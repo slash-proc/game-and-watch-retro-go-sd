@@ -42,6 +42,34 @@ EXCLUDED_EXTENSIONS = {
     ".bak", ".cfg", ".config", ".db", ".dat", ".lnk", ".zip"
 }
 
+SNES_REPO = "Nintendo_-_Super_Nintendo_Entertainment_System"
+DOS_REPO = "DOS"
+
+# Decomp/homebrew/port ROMs in roms/homebrew/ that reuse retail box art but whose
+# short filenames won't fuzzy-match the real titles. Maps filename -> (boxart, thumbnail repo).
+# The boxart string is matched against the FULL Libretro filename (region tag included), so
+# region-specific builds get the correct cover instead of an arbitrary one. Zelda's decomp
+# ships per-language builds; the German/French covers are just Libretro symlinks to (Europe),
+# so the European-language variants (including fan-translation romhacks) all use (Europe).
+ZELDA3 = "Legend of Zelda, The - A Link to the Past"
+HOMEBREW_COVERS = {
+    "smw.sfc": ("Super Mario World (USA)", SNES_REPO),
+    "earthbound.sfc": ("EarthBound (USA)", SNES_REPO),
+    "mother2.sfc": ("Mother 2 - Gyiyg no Gyakushuu (Japan)", SNES_REPO),
+    "zelda3.sfc": (f"{ZELDA3} (USA)", SNES_REPO),
+    "zelda3_en.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_de.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_fr.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_fr-c.sfc": (f"{ZELDA3} (Canada) (Fr)", SNES_REPO),
+    "zelda3_es.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_pl.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_pt.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_nl.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "zelda3_sv.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
+    "doom.bin": ("Doom", DOS_REPO),
+    "doom2.bin": ("Doom II", DOS_REPO),
+}
+
 def clean_name(filename):
     # Remove extension
     name = Path(filename).stem
@@ -82,6 +110,103 @@ def get_libretro_tree(system_repo, token=None):
     except Exception as e:
         print(f"Error fetching repository tree for {system_repo}: {e}")
         return None
+
+def iter_boxart_blobs(tree):
+    # Yield (path, full_stem_lower) for each real boxart blob in the tree.
+    # Skip git symlinks (mode 120000): libretro dedupes regional variants with them,
+    # and fetching a symlink's raw content returns the target filename, not the PNG.
+    for entry in tree:
+        path = entry.get("path", "")
+        if entry.get("mode") == "120000":
+            continue
+        if path.startswith("Named_Boxarts/") and path.endswith(".png"):
+            yield path, Path(path).stem.lower()
+
+def build_boxarts(tree):
+    # Map cleaned, lowercased game name (region tags stripped) -> repo path.
+    return {clean_name(Path(path).name).lower(): path for path, _ in iter_boxart_blobs(tree)}
+
+def build_boxarts_full(tree):
+    # Map full lowercased filename stem (region tag intact) -> repo path, for exact lookups.
+    return {stem: path for path, stem in iter_boxart_blobs(tree)}
+
+def download_cover(system_repo, repo_path, dest_png, token=None):
+    encoded_path = urllib.parse.quote(repo_path)
+    download_url = f"https://raw.githubusercontent.com/libretro-thumbnails/{system_repo}/master/{encoded_path}"
+    req = urllib.request.Request(download_url, headers={"User-Agent": "Retro-Go-Cover-Scraper"})
+    if token:
+        req.add_header("Authorization", f"token {token}")
+
+    with urllib.request.urlopen(req) as response:
+        png_bytes = response.read()
+
+    with open(dest_png, "wb") as f:
+        f.write(png_bytes)
+
+def process_homebrew(roms_dir, token, match_ratio):
+    # Handle individual decomp/homebrew ROMs that reuse retail box art (e.g. SNES smw.sfc, zelda3.sfc).
+    homebrew_dir = roms_dir / "homebrew"
+    if not homebrew_dir.is_dir():
+        return 0, 0, 0
+
+    targets = []
+    for filename, (boxart, repo) in HOMEBREW_COVERS.items():
+        rom = homebrew_dir / filename
+        if not rom.is_file():
+            continue
+        skip = any((homebrew_dir / (rom.stem + ext)).exists() for ext in [".png", ".jpg", ".jpeg", ".bmp"])
+        if skip:
+            print(f"  [=] Cover already exists for {filename}. Skipping.")
+        targets.append((rom, boxart, repo, skip))
+
+    if not targets:
+        return 0, 0, 0
+
+    downloaded = skipped = failed = 0
+    # Group by repo so we only fetch each thumbnail tree once.
+    repos_needed = {repo for rom, boxart, repo, skip in targets if not skip}
+    trees = {}
+    for repo in repos_needed:
+        print(f"\n[HOMEBREW] Fetching Libretro thumbnails database ({repo})...")
+        tree = get_libretro_tree(repo, token=token)
+        trees[repo] = build_boxarts_full(tree) if tree else None
+
+    for rom, boxart, repo, skip in targets:
+        if skip:
+            skipped += 1
+            continue
+
+        boxarts = trees.get(repo)
+        if not boxarts:
+            print(f"  [-] Could not fetch box art database for {rom.name}.")
+            failed += 1
+            continue
+
+        # Boxart names include the region tag, so match the full filename exactly first;
+        # fall back to fuzzy matching only if the exact name isn't present.
+        target = boxart.lower()
+        match = target if target in boxarts else None
+        if not match:
+            close_matches = difflib.get_close_matches(target, list(boxarts.keys()), n=1, cutoff=match_ratio)
+            if close_matches:
+                match = close_matches[0]
+
+        if not match:
+            print(f"  [-] No match found for: {rom.name} ('{boxart}')")
+            failed += 1
+            continue
+
+        print(f"  [+] Match found! Downloading cover for {rom.name} ('{boxart}')...")
+        try:
+            dest_png = homebrew_dir / (rom.stem + ".png")
+            download_cover(repo, boxarts[match], dest_png, token=token)
+            print(f"    Saved PNG: {dest_png.name}")
+            downloaded += 1
+        except Exception as e:
+            print(f"    [!] Failed to download cover: {e}")
+            failed += 1
+
+    return downloaded, skipped, failed
 
 def main():
     parser = argparse.ArgumentParser(description="Scrape cover art from the Libretro thumbnails database and save it next to ROMs.")
@@ -162,13 +287,7 @@ def main():
             continue
 
         # Filter for files in Named_Boxarts
-        boxarts = {}
-        for entry in tree:
-            path = entry.get("path", "")
-            if path.startswith("Named_Boxarts/") and path.endswith(".png"):
-                filename = Path(path).name
-                clean_db_name = clean_name(filename).lower()
-                boxarts[clean_db_name] = path
+        boxarts = build_boxarts(tree)
 
         if not boxarts:
             print(f"[{system.upper()}] Warning: No boxarts found in 'Named_Boxarts' directory of the repository. Skipping system.")
@@ -193,23 +312,11 @@ def main():
                 total_failed += 1
                 continue
 
-            repo_path = boxarts[match]
-            encoded_path = urllib.parse.quote(repo_path)
-            download_url = f"https://raw.githubusercontent.com/libretro-thumbnails/{system_repo}/master/{encoded_path}"
-
             print(f"  [+] Match found! Downloading cover for {rom.name}...")
             try:
-                req = urllib.request.Request(download_url, headers={"User-Agent": "Retro-Go-Cover-Scraper"})
-                if args.token:
-                    req.add_header("Authorization", f"token {args.token}")
-                
-                with urllib.request.urlopen(req) as response:
-                    png_bytes = response.read()
-
                 # Save raw PNG next to the ROM file
                 dest_png = system_dir / (rom.stem + ".png")
-                with open(dest_png, "wb") as f:
-                    f.write(png_bytes)
+                download_cover(system_repo, boxarts[match], dest_png, token=args.token)
                 print(f"    Saved PNG: {dest_png.name}")
 
                 total_downloaded += 1
@@ -217,6 +324,13 @@ def main():
             except Exception as e:
                 print(f"    [!] Failed to download cover: {e}")
                 total_failed += 1
+
+    # Handle individual decomp/homebrew ROMs (e.g. SNES smw.sfc, zelda3.sfc) when scanning everything.
+    if not args.system:
+        hb_downloaded, hb_skipped, hb_failed = process_homebrew(roms_dir, args.token, args.match_ratio)
+        total_downloaded += hb_downloaded
+        total_skipped += hb_skipped
+        total_failed += hb_failed
 
     print("\nScraping complete!")
     print(f"Downloaded/Processed: {total_downloaded}")
