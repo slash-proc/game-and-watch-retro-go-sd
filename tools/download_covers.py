@@ -46,28 +46,34 @@ SNES_REPO = "Nintendo_-_Super_Nintendo_Entertainment_System"
 DOS_REPO = "DOS"
 
 # Decomp/homebrew/port ROMs in roms/homebrew/ that reuse retail box art but whose
-# short filenames won't fuzzy-match the real titles. Maps filename -> (boxart, thumbnail repo).
-# The boxart string is matched against the FULL Libretro filename (region tag included), so
-# region-specific builds get the correct cover instead of an arbitrary one. Zelda's decomp
-# ships per-language builds; the German/French covers are just Libretro symlinks to (Europe),
-# so the European-language variants (including fan-translation romhacks) all use (Europe).
+# source filenames won't fuzzy-match the real titles. Maps source ROM filename ->
+# (boxart, thumbnail repo, cover_stem). cover_stem is the ON-DEVICE menu entry's
+# name (the homebrew <name>.bin): the cover PNG must be saved under exactly that
+# stem (cover art keys off the bin name, not the source ROM). The boxart string
+# is matched against the FULL Libretro filename (region tag included), so
+# region-specific builds get the correct cover instead of an arbitrary one.
+# Zelda's decomp ships per-language source ROMs but ONE on-device "Zelda 3"
+# entry, so they all save to "Zelda 3.png"; the European covers are Libretro
+# symlinks to (Europe), so those variants share the (Europe) boxart.
 ZELDA3 = "Legend of Zelda, The - A Link to the Past"
+ZELDA3_NAME = "Zelda 3"
 HOMEBREW_COVERS = {
-    "smw.sfc": ("Super Mario World (USA)", SNES_REPO),
-    "earthbound.sfc": ("EarthBound (USA)", SNES_REPO),
-    "mother2.sfc": ("Mother 2 - Gyiyg no Gyakushuu (Japan)", SNES_REPO),
-    "zelda3.sfc": (f"{ZELDA3} (USA)", SNES_REPO),
-    "zelda3_en.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_de.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_fr.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_fr-c.sfc": (f"{ZELDA3} (Canada) (Fr)", SNES_REPO),
-    "zelda3_es.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_pl.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_pt.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_nl.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "zelda3_sv.sfc": (f"{ZELDA3} (Europe)", SNES_REPO),
-    "doom.bin": ("Doom", DOS_REPO),
-    "doom2.bin": ("Doom II", DOS_REPO),
+    "smw.sfc": ("Super Mario World (USA)", SNES_REPO, "Super Mario World"),
+    "earthbound.sfc": ("EarthBound (USA)", SNES_REPO, "EarthBound"),
+    "mother2.sfc": ("Mother 2 - Gyiyg no Gyakushuu (Japan)", SNES_REPO, "Mother 2"),
+    "zelda3.sfc": (f"{ZELDA3} (USA)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_en.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_de.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_fr.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_fr-c.sfc": (f"{ZELDA3} (Canada) (Fr)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_es.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_pl.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_pt.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_nl.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    "zelda3_sv.sfc": (f"{ZELDA3} (Europe)", SNES_REPO, ZELDA3_NAME),
+    # gnw-doom builds doom.wad/doom2.wad into the "DOOM" / "DOOM II" entries.
+    "doom.wad": ("Doom", DOS_REPO, "DOOM"),
+    "doom2.wad": ("Doom II", DOS_REPO, "DOOM II"),
 }
 
 def clean_name(filename):
@@ -150,28 +156,33 @@ def process_homebrew(roms_dir, token, match_ratio):
         return 0, 0, 0
 
     targets = []
-    for filename, (boxart, repo) in HOMEBREW_COVERS.items():
+    for filename, spec in HOMEBREW_COVERS.items():
+        # spec is (boxart, repo) or (boxart, repo, cover_stem). When a cover
+        # stem is given, the PNG is saved under THAT name (the on-device menu
+        # entry) instead of the source ROM's stem.
+        boxart, repo = spec[0], spec[1]
+        cover_stem = spec[2] if len(spec) > 2 else Path(filename).stem
         rom = homebrew_dir / filename
         if not rom.is_file():
             continue
-        skip = any((homebrew_dir / (rom.stem + ext)).exists() for ext in [".png", ".jpg", ".jpeg", ".bmp"])
+        skip = any((homebrew_dir / (cover_stem + ext)).exists() for ext in [".png", ".jpg", ".jpeg", ".bmp"])
         if skip:
-            print(f"  [=] Cover already exists for {filename}. Skipping.")
-        targets.append((rom, boxart, repo, skip))
+            print(f"  [=] Cover already exists for {cover_stem}. Skipping.")
+        targets.append((rom, boxart, repo, skip, cover_stem))
 
     if not targets:
         return 0, 0, 0
 
     downloaded = skipped = failed = 0
     # Group by repo so we only fetch each thumbnail tree once.
-    repos_needed = {repo for rom, boxart, repo, skip in targets if not skip}
+    repos_needed = {repo for rom, boxart, repo, skip, cover_stem in targets if not skip}
     trees = {}
     for repo in repos_needed:
         print(f"\n[HOMEBREW] Fetching Libretro thumbnails database ({repo})...")
         tree = get_libretro_tree(repo, token=token)
         trees[repo] = build_boxarts_full(tree) if tree else None
 
-    for rom, boxart, repo, skip in targets:
+    for rom, boxart, repo, skip, cover_stem in targets:
         if skip:
             skipped += 1
             continue
@@ -198,7 +209,7 @@ def process_homebrew(roms_dir, token, match_ratio):
 
         print(f"  [+] Match found! Downloading cover for {rom.name} ('{boxart}')...")
         try:
-            dest_png = homebrew_dir / (rom.stem + ".png")
+            dest_png = homebrew_dir / (cover_stem + ".png")
             download_cover(repo, boxarts[match], dest_png, token=token)
             print(f"    Saved PNG: {dest_png.name}")
             downloaded += 1
