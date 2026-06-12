@@ -1460,22 +1460,24 @@ ifeq ($(DOOM),1)
 doom_homebrew: | create_sd_folders
 	$(V)git -C $(DOOM_DIR) submodule update --init rp2040-doom
 	$(V)git -C $(DOOM_DIR) submodule update --init --checkout retro-go-porting-toolkit
-	$(V)$(MAKE) --no-print-directory -C $(DOOM_DIR) doom WAD=$(abspath $(DOOM1_WAD))
-	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom.bin,$(HOMEBREWS_FOLDER)/doom.bin)
-	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom.whd,$(HOMEBREWS_FOLDER)/doom.whd)
+	@rm -f $(HOMEBREWS_FOLDER)/doom.bin $(HOMEBREWS_FOLDER)/doom.whd \
+	       $(HOMEBREWS_FOLDER)/doom2.bin $(HOMEBREWS_FOLDER)/doom2.whd
+	$(V)$(MAKE) --no-print-directory -C $(DOOM_DIR) doom WAD=$(abspath $(DOOM1_WAD)) "GNW_NAME=DOOM"
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom.bin,$(HOMEBREWS_FOLDER)/DOOM.bin)
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom.whd,$(HOMEBREWS_FOLDER)/DOOM.whd)
 ifneq ($(DOOM2_WAD),)
-	$(V)$(MAKE) --no-print-directory -C $(DOOM_DIR) doom WAD=$(abspath $(DOOM2_WAD))
-	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom2.bin,$(HOMEBREWS_FOLDER)/doom2.bin)
-	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom2.whd,$(HOMEBREWS_FOLDER)/doom2.whd)
+	$(V)$(MAKE) --no-print-directory -C $(DOOM_DIR) doom WAD=$(abspath $(DOOM2_WAD)) "GNW_NAME=DOOM II"
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom2.bin,$(HOMEBREWS_FOLDER)/DOOM II.bin)
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom2.whd,$(HOMEBREWS_FOLDER)/DOOM II.whd)
 endif
 else
 doom_homebrew:
 endif
 
-DOOM_SDPUSH := $(if $(filter 1,$(DOOM)),-- sdpush --file $(HOMEBREWS_FOLDER)/doom.bin --dest-path "/roms/homebrew/" \
-	-- sdpush --file $(HOMEBREWS_FOLDER)/doom.whd --dest-path "/roms/homebrew/" \
-	$(if $(DOOM2_WAD),-- sdpush --file $(HOMEBREWS_FOLDER)/doom2.bin --dest-path "/roms/homebrew/" \
-	-- sdpush --file $(HOMEBREWS_FOLDER)/doom2.whd --dest-path "/roms/homebrew/",),)
+DOOM_SDPUSH := $(if $(filter 1,$(DOOM)),-- sdpush --file $(HOMEBREWS_FOLDER)/DOOM.bin --dest-path "/roms/homebrew/" \
+	-- sdpush --file $(HOMEBREWS_FOLDER)/DOOM.whd --dest-path "/roms/homebrew/" \
+	$(if $(DOOM2_WAD),-- sdpush --file "$(HOMEBREWS_FOLDER)/DOOM II.bin" --dest-path "/roms/homebrew/" \
+	-- sdpush --file "$(HOMEBREWS_FOLDER)/DOOM II.whd" --dest-path "/roms/homebrew/",),)
 
 SD_CONTENT_STAMP := $(BUILD_DIR)/.sd_content.stamp
 

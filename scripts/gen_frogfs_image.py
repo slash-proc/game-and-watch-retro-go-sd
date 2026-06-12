@@ -19,9 +19,9 @@ ROMS_TOP_EXCLUDE_FOR_BIOS_MERGE = frozenset({"bios"})
 # data ships as the converted doom.whd/doom2.whd, so never pack the source wads.
 ROMS_SKIP_EXTENSIONS = frozenset({".img", ".jpg", ".jpeg", ".png", ".bmp", ".wad"})
 
-# Doom WHD data files (mapped directly out of FrogFS by the GWHB overlay app
-# doom.bin/doom2.bin) must stay uncompressed for direct pointer access.
-ROMS_HOMEBREW_DOOM_BINS = ("roms/homebrew/doom.whd", "roms/homebrew/doom2.whd")
+# Doom WHD data files (mapped directly out of FrogFS by the GWHB overlay apps
+# DOOM.bin / "DOOM II.bin") must stay uncompressed for direct pointer access.
+ROMS_HOMEBREW_DOOM_BINS = ("roms/homebrew/DOOM.whd", "roms/homebrew/DOOM II.whd")
 # Thumbnails from tools/gencovers.py (--dst); merged into FrogFS /covers (not repo ./covers).
 GENERATED_COVERS_SUBDIR = "covers_from_roms"
 
