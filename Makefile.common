@@ -1431,6 +1431,52 @@ $(LANG_DIR)/%.bin: Core/Src/retro-go/i18n/rg_i18n_%.c \
 		--lang Core/Src/retro-go/i18n/rg_i18n_$*.c \
 		--output $@
 
+# --- DOOM (external/doom) ---------------------------------------------------
+# Unlike celeste/zelda3/smw (linker overlays extracted from the firmware ELF),
+# doom is built like the pico8 engine: a standalone relocatable XIP payload
+# produced by its own build system and brought into the SD tree. doom.bin is
+# always built (doom1.wad if provided, else the bundled shareware IWAD);
+# doom2.bin is built only when a doom2.wad is provided. IWADs are sourced from
+# roms/homebrew/ (same place zelda3/smw take their ROMs) or external/doom/.
+# Disable with DOOM=0 (the doom build needs a host g++ for whd_gen and
+# python3 pyelftools for the relocation table).
+DOOM ?= 1
+DOOM_DIR := external/doom
+DOOM1_WAD := $(firstword $(wildcard roms/homebrew/doom.wad) $(wildcard roms/homebrew/doom1.wad) $(wildcard $(DOOM_DIR)/doom1.wad) $(DOOM_DIR)/doom1-shareware.wad)
+DOOM2_WAD := $(firstword $(wildcard roms/homebrew/doom2.wad) $(wildcard $(DOOM_DIR)/doom2.wad))
+
+# Copy-if-changed so unchanged bins keep their mtime (the doom sub-make always
+# regenerates doom.bin from its cached ELF; blind cp would defeat sdpush/rsync).
+define COPY_DOOM_BIN_IF_CHANGED
+	@cmp -s "$1" "$2" || { echo "[ DOOM ] $(notdir $2)"; cp "$1" "$2"; }
+endef
+
+# Two files per game: <name>.bin is the GWHB RAM-overlay image the launcher
+# loads to __RAM_EMU_START__ and jumps into; <name>.whd is the converted game
+# data the app maps at runtime via the firmware ABI (FrogFS direct pointer /
+# SD round-robin flash cache). The user's source IWAD (.wad) never ships.
+.PHONY: doom_homebrew
+ifeq ($(DOOM),1)
+doom_homebrew: | create_sd_folders
+	$(V)git -C $(DOOM_DIR) submodule update --init rp2040-doom
+	$(V)git -C $(DOOM_DIR) submodule update --init --checkout retro-go-porting-toolkit
+	$(V)$(MAKE) --no-print-directory -C $(DOOM_DIR) doom WAD=$(abspath $(DOOM1_WAD))
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom.bin,$(HOMEBREWS_FOLDER)/doom.bin)
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom.whd,$(HOMEBREWS_FOLDER)/doom.whd)
+ifneq ($(DOOM2_WAD),)
+	$(V)$(MAKE) --no-print-directory -C $(DOOM_DIR) doom WAD=$(abspath $(DOOM2_WAD))
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom2.bin,$(HOMEBREWS_FOLDER)/doom2.bin)
+	$(call COPY_DOOM_BIN_IF_CHANGED,$(DOOM_DIR)/build/doom2.whd,$(HOMEBREWS_FOLDER)/doom2.whd)
+endif
+else
+doom_homebrew:
+endif
+
+DOOM_SDPUSH := $(if $(filter 1,$(DOOM)),-- sdpush --file $(HOMEBREWS_FOLDER)/doom.bin --dest-path "/roms/homebrew/" \
+	-- sdpush --file $(HOMEBREWS_FOLDER)/doom.whd --dest-path "/roms/homebrew/" \
+	$(if $(DOOM2_WAD),-- sdpush --file $(HOMEBREWS_FOLDER)/doom2.bin --dest-path "/roms/homebrew/" \
+	-- sdpush --file $(HOMEBREWS_FOLDER)/doom2.whd --dest-path "/roms/homebrew/",),)
+
 SD_CONTENT_STAMP := $(BUILD_DIR)/.sd_content.stamp
 
 # `create_sd_data` used to be a recipe with no output file, so every
@@ -1454,7 +1500,7 @@ $(SD_CONTENT_STAMP): $(BUILD_DIR)/$(TARGET).elf \
                      external/blueMSX-go/create_compact_database_file.py \
                      Makefile.common Makefile \
                      $(if $(filter 1,$(COVERFLOW)),covers,) \
-                     | create_sd_folders prepare_msx_bios_files
+                     | create_sd_folders prepare_msx_bios_files doom_homebrew
 	@$(PYTHON3) external/fceumm-go/gen_mappers_table.py $(MAPPERS_DIR)/mappers_table.bin
 	@$(PYTHON3) external/fceumm-go/gen_ines_database.py $(MAPPERS_DIR)/ines_correct.bin
 	@$(PYTHON3) tools/gen_fceu_palettes_table.py $(SD_FOLDER)/bios/nes/palettes.bin
@@ -1572,6 +1618,7 @@ flash_sd: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin cr
 		-- sdpush --file "$(HOMEBREWS_FOLDER)/Super Mario World.bin" --dest-path "/roms/homebrew/" \
 		-- sdpush --file "$(HOMEBREWS_FOLDER)/Zelda 3.bin" --dest-path "/roms/homebrew/" \
 		-- sdpush --file "$(HOMEBREWS_FOLDER)/zelda3.ro" --dest-path "/roms/homebrew/" \
+		$(DOOM_SDPUSH) \
 		-- sdpush --file $(MAPPERS_DIR)/mappers_table.bin --dest-path "/cores/mappers/" \
 		-- sdpush --file $(MAPPERS_DIR)/ines_correct.bin --dest-path "/cores/mappers/" \
 		-- sdpush --file $(SD_FOLDER)/bios/nes/palettes.bin --dest-path "/bios/nes/" \
@@ -1836,6 +1883,7 @@ clean:
 	$(V)-rm -fR $(RELEASE_FOLDER)
 	$(V)$(MAKE) -C external/zelda3 clean
 	$(V)$(MAKE) -C external/smw clean
+	$(V)$(MAKE) -C external/doom clean
 	$(V)@$(MAKE) -C external/firmware_update clean
 
 distclean: clean

@@ -15,7 +15,13 @@ DEFAULT_DIRS = ("bios", "covers", "fonts", "roms")
 # Under /roms, do not duplicate trees that are merged into /bios (routing uses /bios for FrogFS).
 ROMS_TOP_EXCLUDE_FOR_BIOS_MERGE = frozenset({"bios"})
 # Artifacts / compressed ROMs not packed into FrogFS /roms (covers live under /covers).
-ROMS_SKIP_EXTENSIONS = frozenset({".img", ".jpg", ".jpeg", ".png", ".bmp"})
+# .wad: doom IWADs in roms/homebrew are BUILD INPUTS for external/doom — the game
+# data ships as the converted doom.whd/doom2.whd, so never pack the source wads.
+ROMS_SKIP_EXTENSIONS = frozenset({".img", ".jpg", ".jpeg", ".png", ".bmp", ".wad"})
+
+# Doom WHD data files (mapped directly out of FrogFS by the GWHB overlay app
+# doom.bin/doom2.bin) must stay uncompressed for direct pointer access.
+ROMS_HOMEBREW_DOOM_BINS = ("roms/homebrew/doom.whd", "roms/homebrew/doom2.whd")
 # Thumbnails from tools/gencovers.py (--dst); merged into FrogFS /covers (not repo ./covers).
 GENERATED_COVERS_SUBDIR = "covers_from_roms"
 
@@ -783,6 +789,9 @@ def main():
         config.write("    - discard\n")
         if pico8_ro_in_frogfs:
             config.write("  'cores/pico8.ro':\n")
+            config.write("    - no compress\n")
+        for doom_bin in ROMS_HOMEBREW_DOOM_BINS:
+            config.write(f"  {json.dumps(doom_bin)}:\n")
             config.write("    - no compress\n")
 
     cmd = [

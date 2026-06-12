@@ -1233,6 +1233,13 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
             memset(&_OVERLAY_SMW_BSS_START, 0x0, (size_t)&_OVERLAY_SMW_BSS_SIZE);
             SCB_CleanDCache_by_Addr((uint32_t *)&__RAM_EMU_START__, (size_t)&_OVERLAY_SMW_SIZE);
             app_main_smw(load_state, start_paused, save_slot);
+        } else if (*(uint32_t *)&__RAM_EMU_START__ == 0x42485747) { /* 'GWHB' */
+            /* Generic homebrew stub app (e.g. gnw-doom): magic word + entry at
+             * +4, self-contained, talks to the firmware via g_firmware_abi
+             * only. Stub size is capped at 64K (see its linker script). */
+            SCB_CleanDCache_by_Addr((uint32_t *)&__RAM_EMU_START__, 64 * 1024);
+            SCB_InvalidateICache();
+            ((void (*)(uint8_t, uint8_t, int8_t))(((uintptr_t)&__RAM_EMU_START__ + 4) | 1))(load_state, start_paused, save_slot);
         }
       }
     } else if(strcmp(system_name, "Tamagotchi") == 0) {
