@@ -30,6 +30,7 @@
 #include "odroid_overlay.h"
 #include "odroid_sdcard.h"
 #include "odroid_settings.h"
+#include "gw_flash_alloc.h"   /* flash_cache_reserve_floor / flash_cache_release */
 #include "ff.h"
 #include "stm32h7xx_hal.h"
 #include "gw_malloc.h"     /* ram_start */
@@ -246,4 +247,8 @@ const gw_firmware_abi_t g_firmware_abi = {
     .lcd_setup_framebuffers       = (void (*)(int))lcd_setup_framebuffers,
     .lcd_get_bonus_pool           = lcd_get_bonus_pool,
     .lcd_set_clut                 = lcd_set_clut,
+
+    /* v2: round-robin OSPI cache session reservation */
+    .flash_cache_reserve_floor    = flash_cache_reserve_floor,
+    .flash_cache_release          = flash_cache_release,
 };

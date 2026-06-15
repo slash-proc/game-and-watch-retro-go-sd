@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /* Bump on any removal, reorder, or signature change. Append-only is safe. */
-#define GW_FIRMWARE_ABI_VERSION  1u
+#define GW_FIRMWARE_ABI_VERSION  2u
 
 /* Offset within intflash where the .firmware_abi section is pinned by
  * the linker. Chosen to sit after the ISR vector table (684 bytes at
@@ -313,6 +313,16 @@ typedef struct {
                                                       size_t *out_size);
     void                        (*lcd_set_clut)(const uint32_t *clut,
                                                 uint16_t count);
+
+    /* v2 append: round-robin OSPI cache session reservation (gw_flash_alloc.c).
+     * A plugin that stages a large shared blob once can reserve [cache_base, floor)
+     * un-evictable while the cache recycles only above the floor; the floor also
+     * parks the write cursor so the next staged file lands there deterministically.
+     * RAM-only state -> auto-clears on reboot/app exit. No-op unless called: the
+     * cache is byte-identical to v1 behavior otherwise. Pairs with
+     * odroid_overlay_cache_file_in_flash above. */
+    void                        (*flash_cache_reserve_floor)(uint32_t floor);
+    void                        (*flash_cache_release)(void);
 
 } gw_firmware_abi_t;
 

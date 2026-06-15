@@ -45,6 +45,10 @@ typedef struct
 
 static Metadata *metadata = NULL;
 static uint32_t flash_write_pointer = 0;
+// Optional session reservation (see flash_cache_reserve_floor). The lowest address
+// the round-robin may recycle; everything below it is held resident for the running
+// app. 0 = unset -> the cache behaves exactly as stock (floor == cache base).
+static uint32_t s_reserve_floor = 0;
 
 static CpuUniqueId get_cpu_unique_id() {
     CpuUniqueId uid;
@@ -233,15 +237,25 @@ static bool circular_flash_write(const char *file_path,
     }
 
     uint32_t flash_write_base = get_extflash_base();
+    // A running app may reserve [flash_write_base, s_reserve_floor) as un-evictable
+    // (e.g. a shared asset blob staged once); the round-robin then recycles only
+    // [floor, end). Unset (0) -> floor == flash_write_base -> identical to stock:
+    // pool_capacity reduces to the original "OSPI size - reserved" and the extra
+    // below-floor check is never taken (the pointer never sits below the base).
+    uint32_t floor = s_reserve_floor ? s_reserve_floor : flash_write_base;
+    uint32_t pool_capacity = (OSPI_GetFlashSize() - get_reserved_extflash_size())
+                             - (floor - flash_write_base);
 
-    // If there is not enough space available, write the file at the beginning of the flash
-    if (flash_write_pointer - flash_write_base + *data_size > OSPI_GetFlashSize() - get_reserved_extflash_size())
+    // If there is not enough space available (or the pointer is below the floor),
+    // write the file at the start of the recyclable pool.
+    if (flash_write_pointer < floor ||
+        flash_write_pointer - floor + *data_size > pool_capacity)
     {
-        flash_write_pointer = flash_write_base;
+        flash_write_pointer = floor;
     }
 
-    // Data are larger than flash size ... Abort
-    if (flash_write_pointer - flash_write_base + *data_size > OSPI_GetFlashSize() - get_reserved_extflash_size())
+    // Data are larger than the recyclable pool ... Abort
+    if (flash_write_pointer - floor + *data_size > pool_capacity)
     {
         fclose(file);
         return false;
@@ -304,6 +318,34 @@ void flash_alloc_reset()
         metadata = NULL;
     }
     remove(METADATA_FILE);
+}
+
+// --- Session reservation (see gw_flash_alloc.h) -----------------------------
+void flash_cache_reserve_floor(uint32_t floor)
+{
+    s_reserve_floor = floor;
+    // Park the recyclable-pool cursor at the floor and persist it, so the next
+    // store_file_in_flash() (which reloads the pointer from metadata) stages there.
+    initialize_metadata();
+    initialize_flash_pointer();
+    flash_write_pointer = floor;
+    metadata->flash_write_pointer = floor;
+    save_metadata();
+    free(metadata);
+    metadata = NULL;
+}
+
+void flash_cache_release(void)
+{
+    s_reserve_floor = 0;
+    // Return the whole cache to the system and rewind the cursor to the base.
+    initialize_metadata();
+    initialize_flash_pointer();
+    flash_write_pointer = get_extflash_base();
+    metadata->flash_write_pointer = flash_write_pointer;
+    save_metadata();
+    free(metadata);
+    metadata = NULL;
 }
 
 uint8_t *store_file_in_flash(const char *file_path, uint32_t *file_size_p, bool byte_swap, file_progress_cb_t progress_cb)
