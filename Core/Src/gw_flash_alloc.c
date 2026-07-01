@@ -14,6 +14,7 @@
 #include "gw_malloc.h"
 #include "gw_flash_alloc.h"
 #include "gw_ofw.h"
+#include "gw_layout_superblock.h"
 
 /* V2 INDEX, DELIBERATELY UNDER A NEW NAME.
  *
@@ -180,7 +181,7 @@ static bool find_write_slot(uint32_t start_pointer, uint32_t erase_size_total,
                             uint32_t *out_pointer)
 {
     const uint32_t base = get_extflash_base();
-    const uint32_t limit = (uint32_t)&__EXTFLASH_BASE__ + OSPI_GetFlashSize();
+    const uint32_t limit = (uint32_t)&__EXTFLASH_BASE__ + gw_layout_extflash_size();
     uint32_t p = start_pointer;
 
     if (erase_size_total > limit - base)
@@ -213,7 +214,7 @@ static bool find_write_slot(uint32_t start_pointer, uint32_t erase_size_total,
  * the stock behavior when EXTFLASH_OFFSET is 0. */
 static uint32_t get_reserved_extflash_size()
 {
-    uint32_t ofw = get_ofw_extflash_size();
+    uint32_t ofw = gw_layout_reserved_size();
     uint32_t reserved = (uint32_t)&__EXTFLASH_OFFSET__;
     return ofw > reserved ? ofw : reserved;
 }
