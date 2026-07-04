@@ -86,6 +86,7 @@ static uint32_t align_to_next_block(uint32_t pointer)
 #define MAX_LIVE_FILES 28
 
 static uint32_t get_extflash_base(void);
+static uint32_t get_extflash_total_size(void);
 
 typedef struct {
     uint32_t address;
@@ -139,7 +140,7 @@ static bool find_write_slot(uint32_t start_pointer, uint32_t erase_size_total,
                             uint32_t *out_pointer)
 {
     const uint32_t base = get_extflash_base();
-    const uint32_t limit = (uint32_t)&__EXTFLASH_BASE__ + gw_layout_extflash_size();
+    const uint32_t limit = (uint32_t)&__EXTFLASH_BASE__ + get_extflash_total_size();
     uint32_t p = start_pointer;
 
     if (erase_size_total > limit - base)
@@ -172,7 +173,11 @@ static bool find_write_slot(uint32_t start_pointer, uint32_t erase_size_total,
  * the stock behavior when EXTFLASH_OFFSET is 0. */
 static uint32_t get_reserved_extflash_size()
 {
+#if SD_CARD == 1
     uint32_t ofw = gw_layout_reserved_size();
+#else
+    uint32_t ofw = get_ofw_extflash_size();
+#endif
     uint32_t reserved = (uint32_t)&__EXTFLASH_OFFSET__;
     return ofw > reserved ? ofw : reserved;
 }
@@ -180,6 +185,15 @@ static uint32_t get_reserved_extflash_size()
 static uint32_t get_extflash_base(void)
 {
     return align_to_next_block(((uint32_t)&__EXTFLASH_BASE__) + get_reserved_extflash_size());
+}
+
+static uint32_t get_extflash_total_size(void)
+{
+#if SD_CARD == 1
+    return gw_layout_extflash_size();
+#else
+    return OSPI_GetFlashSize();
+#endif
 }
 
 static void reset_metadata(uint32_t flash_write_base) {
