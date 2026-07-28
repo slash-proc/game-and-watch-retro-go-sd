@@ -533,6 +533,13 @@ $(CORE_GW)/src/gw_sys/gw_graphic.c \
 $(CORE_GW)/src/gw_sys/gw_system.c \
 Core/Src/porting/gw/main_gw.c
 
+DOS_C_SOURCES = 
+
+CORE_DOS = external/8086tiny
+DOS_C_SOURCES += \
+$(CORE_DOS)/8086tiny.c \
+Core/Src/porting/dos/main_dos.c
+
 WSV_C_SOURCES = 
 
 CORE_WSV = external/potator
@@ -1106,3 +1113,4 @@ $(BUILD_DIR)/$(TARGET)_intflash.bin: $(BUILD_DIR)/$(TARGET).elf | $(BUILD_DIR)
 $(BUILD_DIR)/$(TARGET)_intflash2.bin: $(BUILD_DIR)/$(TARGET).elf | $(BUILD_DIR)
 	$(V)$(ECHO) [ BIN ] $(notdir $@)
 	$(V)$(BIN) -j .flash2 $< $(BUILD_DIR)/$(TARGET)_intflash2.bin
+

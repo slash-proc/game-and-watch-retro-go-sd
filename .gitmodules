@@ -73,3 +73,6 @@
 	path = external/gpsp
 	url = https://github.com/sylverb/gpsp.git
 	branch = gnw-port
+[submodule "external/8086tiny"]
+	path = external/8086tiny
+	url = git@github.com:slash-proc/8086tiny.git
