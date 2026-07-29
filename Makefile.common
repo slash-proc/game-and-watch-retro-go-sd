@@ -401,6 +401,14 @@ ifeq ($(SD_CARD),0)
 	$(V)$(PYTHON3) tools/gencovers.py --src roms --dst $(SD_FOLDER)/covers $(JPG_QUALITY_PARAM)
 endif
 
+# Packs loose DOS software in roms/dos/ into bootable .dsk floppy images. The
+# MS-DOS core boots disk images, not bare executables, so a plain CAT.EXE is not
+# launchable without this. Run deliberately like generate_covers -- roms/ is
+# per-user content, so this is never part of a normal build.
+.PHONY: dos_disks
+dos_disks:
+	$(V)$(PYTHON3) tools/mkdosdisk.py --src roms/dos
+
 .PHONY: covers
 covers:
 ifeq ($(SD_CARD),0)
@@ -721,6 +729,7 @@ C_INCLUDES +=  \
 -ICore/Inc/porting/pico8 \
 -ICore/Inc/porting/tama \
 -ICore/Inc/porting/pkmini \
+-ICore/Inc/porting/dos \
 -ICore/Inc/retro-go \
 -IDrivers/STM32H7xx_HAL_Driver/Inc \
 -IDrivers/STM32H7xx_HAL_Driver/Inc/Legacy \
@@ -1489,6 +1498,7 @@ create_sd_folders:
 	$(V)mkdir -p $(SD_FOLDER)/bios/msx
 	$(V)mkdir -p $(SD_FOLDER)/bios/nes
 	$(V)mkdir -p $(SD_FOLDER)/bios/coleco
+	$(V)mkdir -p $(SD_FOLDER)/bios/dos
 	$(V)mkdir -p $(HOMEBREWS_FOLDER)
 	$(V)mkdir -p $(RELEASE_FOLDER)
 
@@ -1572,6 +1582,7 @@ $(SD_CONTENT_STAMP): $(BUILD_DIR)/$(TARGET).elf \
 	$(call EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER,.overlay_amstrad,$(CORES_DIR)/amstrad.bin)
 	$(call EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER,.overlay_videopac,$(CORES_DIR)/videopac.bin)
 	$(call EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER,.overlay_tama,$(CORES_DIR)/tama.bin)
+	$(call EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER,.overlay_dos --only-section=.overlay_dos_itc,$(CORES_DIR)/dos.bin)
 	$(call EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER,.overlay_pkmini,$(CORES_DIR)/pkmini.bin)
 	$(call EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER,.overlay_pico8,$(CORES_DIR)/pico8_stub.bin)
 	@$(CP) -O binary --only-section=.overlay_celeste $(BUILD_DIR)/$(TARGET).elf $(HOMEBREWS_FOLDER)/celeste.bin
@@ -1580,6 +1591,7 @@ $(SD_CONTENT_STAMP): $(BUILD_DIR)/$(TARGET).elf \
 	@$(CP) -O binary --only-section=.overlay_smw $(BUILD_DIR)/$(TARGET).elf "$(HOMEBREWS_FOLDER)/Super Mario World.bin"
 	@$(CP) -O binary --only-section=.xip_gba --only-section=.rodata_gba $(BUILD_DIR)/$(TARGET).elf "$(CORES_DIR)/gba.xip"
 	@$(CP) -O binary --only-section=.coleco_bios_data $(BUILD_DIR)/$(TARGET).elf $(SD_FOLDER)/bios/coleco/coleco.bin
+	@cp external/8086tiny/bios $(SD_FOLDER)/bios/dos/bios.bin
 	@$(CP) -O binary --only-section=.overlay_graphics $(BUILD_DIR)/$(TARGET).elf $(SD_FOLDER)/bios/logo.bin
 	@rm -f $(FONTS_DIR)/cp1251_*.bin $(FONTS_DIR)/cp1252_*.bin $(FONTS_DIR)/unicode_*.bin
 ifeq ($(RU_RU),1)
@@ -1668,6 +1680,7 @@ flash_sd: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin cr
 		-- sdpush --file $(CORES_DIR)/amstrad.bin --dest-path "/cores/" \
 		-- sdpush --file $(CORES_DIR)/videopac.bin --dest-path "/cores/" \
 		-- sdpush --file $(CORES_DIR)/tama.bin --dest-path "/cores/" \
+		-- sdpush --file $(CORES_DIR)/dos.bin --dest-path "/cores/" \
 		-- sdpush --file $(CORES_DIR)/pkmini.bin --dest-path "/cores/" \
 		-- sdpush --file $(SD_FOLDER)/bios/logo.bin --dest-path "/bios/" \
 		-- sdpush --file $(HOMEBREWS_FOLDER)/celeste.bin --dest-path "/roms/homebrew/" \
@@ -1680,9 +1693,22 @@ flash_sd: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin cr
 		-- sdpush --file $(SD_FOLDER)/bios/nes/palettes.bin --dest-path "/bios/nes/" \
 		-- sdpush --file $(SD_FOLDER)/bios/coleco/coleco.bin --dest-path "/bios/coleco/" \
 		-- sdpush --file $(SD_FOLDER)/bios/msx/msxromdb.bin --dest-path "/bios/msx/" \
+		-- sdpush --file $(SD_FOLDER)/bios/dos/bios.bin --dest-path "/bios/dos/" \
 		-- start $(INTFLASH_ADDRESS) \
 		$(RESET_DBGMCU_CMD)
 endif
+
+# Pushes the FreeDOS test floppy shipped with the 8086tiny submodule to
+# /roms/dos/freedos.dsk so "does DOS boot at all" is reproducible.
+#
+# Deliberately NOT part of create_sd_data: the `release` target tars everything
+# under sd_content into a distributable package, and fd.img contains
+# ALLEYCAT.EXE, which is commercial software we have no right to redistribute.
+# Keeping this a separate developer-only target keeps it out of the release.
+flash_dos_testdisk: | $(BUILD_DIR)
+	@cp external/8086tiny/fd.img $(BUILD_DIR)/freedos.dsk
+	@$(GNWMANAGER) sdpush --file $(BUILD_DIR)/freedos.dsk --dest-path "/roms/dos/"
+.PHONY: flash_dos_testdisk
 
 firmware_update: create_sd_folders
 	@$(MAKE) -j$(nproc) -C external/firmware_update
@@ -2070,9 +2096,13 @@ help:
 	@echo "  docker_buildx         - Push Docker container image to docker.io"
 	@echo "  docker_shell          - Interactive shell in $(DOCKER_IMAGE)"
 	@echo "  docker (deprecated)   - Use 'make release DOCKER=1' or 'make docker_shell' instead"
+	@echo "  dos_disks         - Packs loose DOS software in roms/dos/ into bootable .dsk"
+	@echo "                      images (see tools/mkdosdisk.py --help)"
 	@echo "  dump_screenshot   - Downloads the stored screenshot."
 	@echo "  flash             - Programs the internal and external flash"
 	@echo "  flash_all         - Alias for 'flash' (deprecated)"
+	@echo "  flash_dos_testdisk - Pushes the FreeDOS test floppy to /roms/dos/freedos.dsk"
+	@echo "                      (developer only; not part of a release -- see the target)"
 	@echo "  flash_extflash    - Flash FrogFS image only (SD_CARD=0; respects EXTFLASH_OFFSET)"
 	@echo "  flash_intflash    - Only programs the internal flash"
 	@echo "  gdb               - Starts gdb and attaches to gdbserver"

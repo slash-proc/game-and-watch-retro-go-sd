@@ -538,7 +538,9 @@ DOS_C_SOURCES =
 CORE_DOS = external/8086tiny
 DOS_C_SOURCES += \
 $(CORE_DOS)/8086tiny.c \
-Core/Src/porting/dos/main_dos.c
+Core/Src/porting/dos/main_dos.c \
+Core/Src/porting/dos/dos_video.c \
+Core/Src/porting/dos/dos_font_data.c
 
 WSV_C_SOURCES = 
 

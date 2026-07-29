@@ -34,6 +34,7 @@
 #include "main_pico8.h"
 #include "main_tama.h"
 #include "main_pkmini.h"
+#include "main_dos.h"
 #include "main_a2600.h"
 #include "main_lynx.h"
 #include "main_gba.h"
@@ -1669,6 +1670,53 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
       } else {
         show_incompatible_homebrew_screen();
       }
+    } else if(strcmp(system_name, "MS-DOS") == 0) {
+      /* MS-DOS loads at a FIXED address inside the LCD bonus area
+       * (__overlay_dos_vma = __RAM_UC_START__ + LUT8 framebuffer size), not at
+       * __RAM_EMU_START__ like the table-driven cores — its 772 KB guest-memory
+       * BSS array does not fit in RAM_EMU alone, so it needs the bonus area and
+       * RAM_EMU as one contiguous run. That is why this cannot use
+       * run_internal_emu(), which hardcodes __RAM_EMU_START__.
+       *
+       * Two-stage load, same reasoning as PICO-8 below:
+       *   1. Read dos.bin from SD to a temp at __RAM_EMU_START__, outside the
+       *      LCD pool. SD reads are slow, so doing it here keeps in-flight
+       *      writes away from anything the LTDC might still be scanning.
+       *   2. Switch to LUT8. lcd_setup_framebuffers() zeroes the 300 KB pool
+       *      footprint (which covers __overlay_dos_vma) and re-marks the bonus
+       *      area cacheable, so it MUST happen before the copy, not after.
+       *   3. memcpy temp -> __overlay_dos_vma: fast, cached, post-switch.
+       * The ITC image is copied to ITCM before BSS is zeroed, because it lands
+       * just past the code and therefore inside the BSS VMA. */
+      extern uint8_t __overlay_dos_vma[];
+      extern void   *_OVERLAY_DOS_BSS_START[];
+      extern uint8_t _OVERLAY_DOS_BSS_SIZE;
+      extern uint8_t _OVERLAY_DOS_ITC_LMA_OFFSET;
+      extern uint8_t _OVERLAY_DOS_ITC_SIZE;
+      extern uint8_t __ram_itc_dos_start__[];
+
+      uint8_t *dos_load_addr = (uint8_t *)__overlay_dos_vma;
+      uint8_t *dos_temp_addr = (uint8_t *)&__RAM_EMU_START__;
+      size_t   dos_bin_size  = load_core_bin_with_header("/cores/dos.bin", dos_temp_addr);
+
+      if (dos_bin_size) {
+        lcd_setup_framebuffers(LCD_MODE_LUT8);
+        memcpy(dos_load_addr, dos_temp_addr, dos_bin_size);
+
+        uint32_t dos_itc_size = (uint32_t)&_OVERLAY_DOS_ITC_SIZE;
+        if (dos_itc_size) {
+            memcpy(__ram_itc_dos_start__,
+                   dos_load_addr + (uint32_t)&_OVERLAY_DOS_ITC_LMA_OFFSET,
+                   dos_itc_size);
+            __DSB(); __ISB();   /* TCM stores drained before any fetch from ITCM */
+        }
+        memset(_OVERLAY_DOS_BSS_START, 0, (uint32_t)&_OVERLAY_DOS_BSS_SIZE);
+        SCB_CleanDCache_by_Addr((uint32_t *)dos_load_addr, dos_bin_size);
+        SCB_InvalidateICache();
+        app_main_dos(load_state, start_paused, save_slot);
+      } else {
+        printf("DOS: /cores/dos.bin missing or bad header\n");
+      }
     } else if(strcmp(system_name, "Tamagotchi") == 0) {
         run_internal_emu(&emu_tama, load_state, start_paused, save_slot);
     } else if(strcmp(system_name, "Pokemon Mini") == 0) {
@@ -1790,7 +1838,9 @@ void emulators_init()
 #endif
     add_emulator("Nintendo Entertainment System", "nes", "nes fds nsf lzma", RG_LOGO_PAD_NES, RG_LOGO_HEADER_NES, NO_GAME_DATA);
     add_emulator("Game & Watch", "gw", "gw", RG_LOGO_PAD_GW, RG_LOGO_HEADER_GW, NO_GAME_DATA);
-    add_emulator("MS-DOS", "dos", "com exe bat img", RG_LOGO_EMPTY, RG_LOGO_HEADER_HOMEBREW, NO_GAME_DATA);
+    /* .dsk only: bare .com/.exe/.bat are not launchable under disk-image
+     * passthrough, and .img is already taken by tools/gencovers.py cover art. */
+    add_emulator("MS-DOS", "dos", "dsk", RG_LOGO_DOS, RG_LOGO_HEADER_DOS, NO_GAME_DATA);
     add_emulator("PC Engine", "pce", "pce lzma", RG_LOGO_PAD_PCE, RG_LOGO_HEADER_PCE, NO_GAME_DATA);
     /* PC Engine CD: same pce overlay; disc streamed from SD, System Card BIOS at boot. */
 #if SD_CARD == 1

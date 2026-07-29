@@ -721,4 +721,8 @@ Please join the [Discord](https://discord.gg/vVcwrrHTNJ).
 
 This project uses Fusion Pixel Font (SIL Open Font License 1.1)
 
+The MS-DOS launcher artwork is derived from `Msdos-icon.svg` by Microsoft Corporation,
+obtained from [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Msdos-icon.svg)
+and used under the MIT license. Microsoft is a trademark of Microsoft Corporation.
+
 This project is licensed under the GPLv2. Some components are available under the MIT license. Respective copyrights apply to each component.

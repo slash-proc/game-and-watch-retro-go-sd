@@ -72,6 +72,11 @@ enum {
     // Game Boy Advance (appended last — no existing index shift)
     RG_LOGO_HEADER_GBA,
     RG_LOGO_PAD_GBA,
+    // MS-DOS (appended last — no existing index shift).
+    // Order here MUST match the definition order in rg_logos.c: the enum indexes
+    // into logo.bin, which is emitted in declaration order.
+    RG_LOGO_DOS,
+    RG_LOGO_HEADER_DOS,
 };
 
 void odroid_overlay_draw_logo(uint16_t x_pos, uint16_t y_pos, int16_t logo_idx, uint16_t color);
@@ -138,6 +143,11 @@ extern const retro_logo_image logo_watara;
 extern const retro_logo_image logo_atari;
 extern const retro_logo_image logo_amstrad;
 extern const retro_logo_image logo_tama;
+
+/* MS-DOS. Artwork derived from Microsoft Corporation's "Msdos-icon.svg"
+ * (Wikimedia Commons, MIT licence) -- see the attribution block in rg_logos.c. */
+extern const retro_logo_image logo_dos;
+extern const retro_logo_image header_dos;
 
 
 extern const unsigned char IMG_SPEAKER[];

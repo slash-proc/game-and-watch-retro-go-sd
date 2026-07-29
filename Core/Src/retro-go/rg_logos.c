@@ -2629,3 +2629,95 @@ const retro_logo_image pad_gba LOGO_DATA = {
 };
 
 #pragma GCC optimize ("O0")
+
+/* ---------------------------------------------------------------------------
+ * MS-DOS launcher artwork.
+ *
+ * Derived from "Msdos-icon.svg" by Microsoft Corporation, obtained from
+ * Wikimedia Commons and used under the MIT (Expat) licence:
+ *   https://commons.wikimedia.org/wiki/File:Msdos-icon.svg
+ *   https://opensource.org/licenses/mit-license.php
+ * Attribution to Microsoft Corporation is required by that licence. Commons
+ * additionally tags the file as depicting a trademark.
+ *
+ * The source is 30x32 pixel art reading "MS" above "DOS", each letter in a
+ * different EGA colour. Reduced to 1bpp by taking the letter fills as ink --
+ * every pixel that is neither white nor black. That rule matters: the two
+ * bands have INVERTED backgrounds (upper is dark-on-white, lower is
+ * light-on-black), so a plain luminance threshold blobs one of them.
+ *
+ *   logo_dos    stacked, unmodified source layout        (tab/pad slot)
+ *   header_dos  "MS" left of "DOS" on a shared baseline  (name header)
+ *
+ * In header_dos only, "MS" is stretched vertically 11->18 rows to match the
+ * cap height of "DOS"; at native height it reads as undersized beside it.
+ * Scaling both axes was rejected -- the "MS" glyphs are already wider per
+ * letter, so that made "MS" wider than "DOS".
+ *
+ * Sizes satisfy ((width+7)>>3)*height % 4 == 0. rg_get_logo() rounds its read
+ * length up to 4 bytes, so a non-aligned entry over-reads into the next logo
+ * in logo.bin. logo_dos 4*30=120, header_dos 8*18=144.
+ * ------------------------------------------------------------------------- */
+const retro_logo_image logo_dos LOGO_DATA = {
+    28,
+    30,
+    {
+        // width28, height:30
+        0x70, 0x1c, 0x1f, 0x00, //  _###_______###_____#####____
+        0x70, 0x1c, 0x71, 0xc0, //  _###_______###___###___###__
+        0x78, 0x3c, 0x60, 0xc0, //  _####_____####___##_____##__
+        0x78, 0x3c, 0x60, 0x00, //  _####_____####___##_________
+        0x7c, 0x7c, 0x70, 0x00, //  _#####___#####___###________
+        0x6c, 0x6c, 0x1e, 0x00, //  _##_##___##_##_____####_____
+        0x66, 0xcc, 0x03, 0x80, //  _##__##_##__##________###___
+        0x66, 0xcc, 0x01, 0xc0, //  _##__##_##__##_________###__
+        0x63, 0x8c, 0x60, 0xc0, //  _##___###___##___##_____##__
+        0x63, 0x8c, 0x61, 0xc0, //  _##___###___##___##____###__
+        0x61, 0x0c, 0x3f, 0x80, //  _##____#____##____#######___
+        0x00, 0x00, 0x00, 0x00, //  ____________________________
+        0xff, 0xbf, 0xbf, 0x80, //  #########_#######_#######___
+        0xff, 0x7f, 0x7f, 0xe0, //  ########_#######_##########_
+        0xfe, 0xfe, 0xff, 0xf0, //  #######_#######_############
+        0xfe, 0xe2, 0xe0, 0xf0, //  #######_###___#_###_____####
+        0xfd, 0xda, 0xdc, 0x70, //  ######_###_##_#_##_###___###
+        0xe1, 0xd8, 0xdc, 0x00, //  ###____###_##___##_###______
+        0xe1, 0xd8, 0xdc, 0x00, //  ###____###_##___##_###______
+        0xe1, 0xd8, 0x5d, 0x80, //  ###____###_##____#_###_##___
+        0xe1, 0xd8, 0x1d, 0xe0, //  ###____###_##______###_####_
+        0xe1, 0xd8, 0x1d, 0xf0, //  ###____###_##______###_#####
+        0xe1, 0x98, 0x1c, 0xf0, //  ###____##__##______###__####
+        0xe0, 0xb8, 0xe8, 0x70, //  ###_____#_###___###_#____###
+        0xe0, 0x70, 0xf0, 0xf0, //  ###______###____####____####
+        0xff, 0xf6, 0xff, 0xf0, //  ############_##_############
+        0xff, 0xce, 0xff, 0xf0, //  ##########__###_############
+        0xff, 0xdf, 0x7f, 0xf0, //  ##########_#####_###########
+        0xff, 0xdf, 0xbf, 0xe0, //  ##########_######_#########_
+        0xff, 0x9f, 0xdf, 0x80, //  #########__#######_######___
+    },
+};
+
+const retro_logo_image header_dos LOGO_DATA = {
+    57,
+    18,
+    {
+        // width57, height:18
+        0xe0, 0x38, 0x3e, 0x1f, 0xf7, 0xf7, 0xf0, 0x00, //  ###_______###_____#####____#########_#######_#######_____
+        0xe0, 0x38, 0x3e, 0x1f, 0xef, 0xef, 0xfc, 0x00, //  ###_______###_____#####____########_#######_##########___
+        0xe0, 0x38, 0xe3, 0x9f, 0xdf, 0xdf, 0xfe, 0x00, //  ###_______###___###___###__#######_#######_############__
+        0xe0, 0x38, 0xe3, 0x9f, 0xdc, 0x5c, 0x1e, 0x00, //  ###_______###___###___###__#######_###___#_###_____####__
+        0xf0, 0x78, 0xc1, 0x9f, 0xbb, 0x5b, 0x8e, 0x00, //  ####_____####___##_____##__######_###_##_#_##_###___###__
+        0xf0, 0x78, 0xc0, 0x1c, 0x3b, 0x1b, 0x80, 0x00, //  ####_____####___##_________###____###_##___##_###________
+        0xf0, 0x78, 0xc0, 0x1c, 0x3b, 0x1b, 0x80, 0x00, //  ####_____####___##_________###____###_##___##_###________
+        0xf8, 0xf8, 0xe0, 0x1c, 0x3b, 0x0b, 0xb0, 0x00, //  #####___#####___###________###____###_##____#_###_##_____
+        0xf8, 0xf8, 0xe0, 0x1c, 0x3b, 0x03, 0xbc, 0x00, //  #####___#####___###________###____###_##______###_####___
+        0xd8, 0xd8, 0x3c, 0x1c, 0x3b, 0x03, 0xbe, 0x00, //  ##_##___##_##_____####_____###____###_##______###_#####__
+        0xcd, 0x98, 0x07, 0x1c, 0x33, 0x03, 0x9e, 0x00, //  ##__##_##__##________###___###____##__##______###__####__
+        0xcd, 0x98, 0x07, 0x1c, 0x17, 0x1d, 0x0e, 0x00, //  ##__##_##__##________###___###_____#_###___###_#____###__
+        0xcd, 0x98, 0x03, 0x9c, 0x0e, 0x1e, 0x1e, 0x00, //  ##__##_##__##_________###__###______###____####____####__
+        0xcd, 0x98, 0x03, 0x9f, 0xfe, 0xdf, 0xfe, 0x00, //  ##__##_##__##_________###__############_##_############__
+        0xc7, 0x18, 0xc1, 0x9f, 0xf9, 0xdf, 0xfe, 0x00, //  ##___###___##___##_____##__##########__###_############__
+        0xc7, 0x18, 0xc3, 0x9f, 0xfb, 0xef, 0xfe, 0x00, //  ##___###___##___##____###__##########_#####_###########__
+        0xc7, 0x18, 0xc3, 0x9f, 0xfb, 0xf7, 0xfc, 0x00, //  ##___###___##___##____###__##########_######_#########___
+        0xc2, 0x18, 0x7f, 0x1f, 0xf3, 0xfb, 0xf0, 0x00, //  ##____#____##____#######___#########__#######_######_____
+    },
+};

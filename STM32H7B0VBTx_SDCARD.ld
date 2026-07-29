@@ -956,6 +956,80 @@ INCLUDE build/fceumm_mappers.ld
   }
   _OVERLAY_PKMINI_BSS_SIZE = SIZEOF(.overlay_pkmini_bss);
 
+  /* MS-DOS (8086tiny) overlay → RAM, at the LOW end of the LCD bonus area.
+
+     Unlike every other core, DOS cannot live at __RAM_EMU_START__: its guest
+     memory is a 772 KB BSS array (640 KB conventional + a 64 KB video aperture
+     + a 64 KB BIOS window + a scratch page, see 8086tiny.c dos_fold()) and
+     RAM_EMU is only 724 KB. Starting at the bonus area instead gives one
+     unbroken run:
+
+       __RAM_UC_START__          = 0x24000000
+       LUT8 framebuffers         = 0x025800   (2 x 320 x 240 = 150 KB)
+       __overlay_dos_vma         = 0x24025800
+       code + rodata             ~27 KB
+       BSS (mem[] lives here)    ~778 KB
+       __RAM_EMU_END__           = 0x24100000
+                                 = 874 KB total available
+
+     Same VMA as PICO-8 by construction (both start right above the LUT8
+     framebuffers); that is safe because only one core is resident at a time.
+
+     The LCD MUST already be in LUT8 mode before dos.bin is copied here, or the
+     copy lands on top of the active RGB565 framebuffer. rg_emulators.c does the
+     PICO-8 two-stage dance for exactly this reason. */
+  __overlay_dos_vma = __RAM_UC_START__ + (2 * 320 * 240);
+
+  .overlay_dos __overlay_dos_vma : {
+    . = ALIGN(4);
+    __ram_emu_dos_start__ = .;
+    /* main_dos .text stays here: it calls launcher APIs (odroid_*, lcd_*,
+     * common_emu_*) and ITCM→flash veneers fail on arm-none-eabi 15.x with
+     * "Unknown destination type ARM/Thumb" — same reason main_pce.o is
+     * excluded from .overlay_pce_itc. */
+    build/dos/*.o (.data .data* .rodata .rodata*)
+    build/dos/*.o (.text .text*)
+    . = ALIGN(4);
+    _OVERLAY_DOS_LOAD_END = .;
+  } AT > CORES
+  _OVERLAY_DOS_LOAD_START = LOADADDR(.overlay_dos);
+  _OVERLAY_DOS_SIZE = SIZEOF(.overlay_dos);
+
+  /* ITCM reserved for the 8086 instruction-dispatch loop.
+     Currently EMPTY on purpose — see docs/decisions.md. dos_cpu_frame() is the
+     obvious hot code, but it calls fread/fwrite/printf/pc_interrupt, so moving
+     it to ITCM needs the veneer question settled first (the PCE comment above
+     records that ITCM→flash veneers fail on this toolchain). Keeping the
+     section declared means the core .bin layout and the dispatch path are
+     already in place: seeding it later is a one-line change here plus adding
+     `--only-section=.overlay_dos_itc` to the extraction, with no format churn.
+
+     KEEP(*(.dos_itc)) gives the section a defined LMA even while nothing opts
+     in, so LOADADDR() below stays valid. */
+  .overlay_dos_itc (ORIGIN(ITCMRAM) + 0x4) : {
+    . = ALIGN(4);
+    __ram_itc_dos_start__ = .;
+    KEEP(*(.dos_itc))
+    . = ALIGN(4);
+    __ram_itc_dos_end__ = .;
+    ASSERT(ABSOLUTE(__ram_itc_dos_end__) <= ORIGIN(ITCMRAM) + LENGTH(ITCMRAM), "Error: DOS ITC overflow");
+  } AT > CORES
+  _OVERLAY_DOS_ITC_SIZE = SIZEOF(.overlay_dos_itc);
+  _OVERLAY_DOS_ITC_LMA_OFFSET = LOADADDR(.overlay_dos_itc) - LOADADDR(.overlay_dos);
+
+  .overlay_dos_bss _OVERLAY_DOS_LOAD_END : {
+    . = ALIGN(4);
+    _OVERLAY_DOS_BSS_START = .;
+    build/dos/*.o (.bss .bss*)
+    . = ALIGN(4);
+    build/dos/*.o (COMMON)
+    __ram_emu_dos_end__ = .;
+    _OVERLAY_DOS_BSS_END = .;
+    ASSERT(ABSOLUTE(_OVERLAY_DOS_BSS_END) <= __RAM_EMU_END__,
+           "Error: DOS code + guest RAM would overflow the LCD bonus area + RAM_EMU");
+  }
+  _OVERLAY_DOS_BSS_SIZE = SIZEOF(.overlay_dos_bss);
+
   .overlay_graphics : {
     . = ALIGN(4);
     KEEP(*(.sdcard_logo))
