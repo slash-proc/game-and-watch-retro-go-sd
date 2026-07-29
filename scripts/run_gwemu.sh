@@ -9,12 +9,18 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "Options:"
     echo "  --docker                   Run QEMU inside a headless Docker container."
     echo "                             (Downloads and builds 'slashproc/gwemu-headless' image)"
-    echo "  --gdb                      Start QEMU suspended (-S) and attach an interactive GDB session."
-    echo "                             (Without this flag, a batch GDB connects to forward logs to stdout)."
+    echo "  --gdb                      Attach an interactive GDB session instead of the default"
+    echo "                             batch log/fault forwarder."
+    echo "  --gdb-script <file.gdb>    Run <file.gdb> under batch GDB instead of the default"
+    echo "                             forwarder. For one-off diagnostics only -- the default"
+    echo "                             already forwards logs and traps exceptions."
+    echo "  --log-file <path>          Write the session log here (default: ./gwemu.log,"
+    echo "                             overwritten each run). Output still goes to stdout."
     echo "  --record <file.tl>         Record a sub-frame accurate input timeline to the specified file."
     echo "                             (Fails if --docker is used since recording requires a local SDL GUI)."
     echo "  --timeline <file.tl>       Playback an existing timeline file."
     echo "  --video <file.mp4>         Export a synced MP4 video (Requires --docker and --timeline)."
+    echo "  --update                   Check for and download the latest gwemu release before running."
     echo "  --qmp <port>               Expose QMP (QEMU Monitor Protocol) on the given port."
     echo "  --help, -h                 Show this help message."
     echo ""
@@ -37,17 +43,23 @@ trap cleanup EXIT INT TERM
 USE_DOCKER=0
 USE_GDB=0
 USE_RESET=0
+USE_UPDATE=0
 TIMELINE_FILE=""
 RECORD_FILE=""
 VIDEO_FILE=""
 QMP_PORT=""
+GDB_SCRIPT=""
+LOG_FILE=""
 PASSTHROUGH_ARGS=()
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --docker) USE_DOCKER=1; shift ;;
         --gdb) USE_GDB=1; shift ;;
+        --gdb-script) GDB_SCRIPT="$2"; shift 2 ;;
+        --log-file) LOG_FILE="$2"; shift 2 ;;
         --reset) USE_RESET=1; shift ;;
+        --update) USE_UPDATE=1; shift ;;
         --timeline) TIMELINE_FILE="$2"; shift 2 ;;
         --record) RECORD_FILE="$2"; shift 2 ;;
         --video) VIDEO_FILE="$2"; shift 2 ;;
@@ -61,16 +73,54 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-if [ "$USE_RESET" = "1" ]; then
-    echo "Resetting emulator state..."
-    rm -f build/sdcard.img build/extflash.bin build/qemu_bank1.bin build/qemu_bank2.bin
-    make gwemu_release
+# Every run is logged. The whole script's output -- emulator stderr, forwarded
+# retro-go log buffer, and any fault report -- goes to both stdout and the file.
+# Kept at the repo root, NOT under build/, so `make clean` does not wipe the log of
+# the run you are trying to read. Gitignored via *.log.
+LOG_FILE="${LOG_FILE:-gwemu.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
+exec > >(tee "$LOG_FILE") 2>&1
+echo "[run_gwemu] logging to $LOG_FILE"
+
+if [ "$USE_UPDATE" = "1" ]; then
+    # gwemu is still moving fast; --update pulls the newest release before running.
+    make gwemu_download GWEMU_UPDATE=1
 fi
 
-EXTRA_ARGS="-s"
-if [ "$USE_GDB" = "1" ]; then
-    EXTRA_ARGS="-s -S"
+if [ "$USE_RESET" = "1" ]; then
+    # The emulated flash and SD card are writable and persist between runs, exactly like
+    # the real device's storage -- the guest mutates them, so state accumulates across
+    # boots. --reset wipes that back to freshly built media.
+    #
+    # Rebuild with the SAME variables the media was originally built with. A bare
+    # `make gwemu_release` falls back to defaults (SD_CARD=1, EXTFLASH_OFFSET=0) and would
+    # quietly hand you media for a different configuration than your tree.
+    INFO="build/gwemu_build_info.txt"
+    if [ ! -f "$INFO" ]; then
+        echo "Error: $INFO not found, so --reset cannot know how the media was built."
+        echo "Re-run your build command instead, e.g.:"
+        echo "  make -j\$(nproc) <your params> release gwemu_release"
+        exit 1
+    fi
+    RESET_VARS=()
+    while IFS= read -r kv; do
+        [ -n "$kv" ] && RESET_VARS+=("$kv")
+    done < <(awk -F'=' '
+        $1 ~ /^(GNW_TARGET|SD_CARD|INTFLASH_BANK|EXTFLASH_OFFSET|EXTFLASH_SIZE_MB|COVERFLOW|CHEAT_CODES|SHARED_HIBERNATE_SAVESTATE|DISABLE_SPLASH_SCREEN) *$/ {
+            gsub(/ /, "", $1); gsub(/^ +| +$/, "", $2);
+            if ($2 != "") print $1 "=" $2
+        }' "$INFO")
+    echo "Resetting emulator state (rebuilding with: ${RESET_VARS[*]})"
+    rm -f build/sdcard.img build/extflash.bin build/qemu_bank1.bin build/qemu_bank2.bin
+    make gwemu_release "${RESET_VARS[@]}"
 fi
+
+# Always start suspended. A GDB session always attaches -- forwarding the log
+# buffer and trapping exceptions is the entire point of running under emulation,
+# so it is not optional and not mode-dependent. Without -S the forwarder attaches
+# a second or two into the boot and silently misses everything retro-go printed
+# on the way up, which reads as "logging is broken".
+EXTRA_ARGS="-s -S"
 
 if [ "$USE_DOCKER" = "1" ]; then
     if [ -n "$RECORD_FILE" ]; then
@@ -78,7 +128,8 @@ if [ "$USE_DOCKER" = "1" ]; then
         exit 1
     fi
     mkdir -p out
-    LATEST_TAG=$(curl -s https://api.github.com/repos/slash-proc/gwemu/releases | grep -o '"tag_name": "[^"]*"' | head -n 1 | cut -d '"' -f 4)
+    # Cached for an hour -- this used to hit the GitHub API on every single run.
+    LATEST_TAG=$(./scripts/gwemu_latest_tag.sh)
     VERSION=${LATEST_TAG#v}
     IMAGE_NAME="${DOCKER_IMAGE:-slashproc/gwemu-headless:$VERSION}"
 
@@ -106,9 +157,8 @@ if [ "$USE_DOCKER" = "1" ]; then
         ENTRY_ARGS+=("--qmp-port" "$QMP_PORT")
     fi
 
-    if [ "$USE_GDB" = "1" ]; then
-        DOCKER_ARGS+=("-p" "1234:1234")
-    fi
+    # GDB always attaches, so the port is always needed.
+    DOCKER_ARGS+=("-p" "1234:1234")
 
     DOCKER_CONTAINER="gwemu-run-$$"
     docker run --rm --name "$DOCKER_CONTAINER" \
@@ -119,7 +169,7 @@ if [ "$USE_DOCKER" = "1" ]; then
         --bank1 /images/qemu_bank1.bin \
         --bank2 /images/qemu_bank2.bin \
         --extflash /images/extflash.bin \
-        --sd /images/sdcard.img \
+        $([ -f build/sdcard.img ] && echo "--sd /images/sdcard.img") \
         "${ENTRY_ARGS[@]}" \
         -- $EXTRA_ARGS "${PASSTHROUGH_ARGS[@]}" &
     GWEMU_PID=$!
@@ -141,11 +191,20 @@ else
         export GNW_TIMELINE="$PWD/$TIMELINE_FILE"
     fi
 
-    build/gwemu_bin -M gnw-h7b0 \
+    # SD_CARD=0 (FrogFS) builds have no SD image - the filesystem lives in
+    # external flash. Only attach a card when one was actually produced.
+    SD_ARGS=()
+    if [ -f build/sdcard.img ]; then
+        SD_ARGS=("-drive" "if=sd,file=build/sdcard.img")
+    else
+        echo "No build/sdcard.img - running without an SD card (SD_CARD=0 build)."
+    fi
+
+    ./gwemu_bin -M gnw-h7b0 \
         -global gnw-h7b0-soc.bank1-image=build/qemu_bank1.bin \
         -global gnw-h7b0-soc.bank2-image=build/qemu_bank2.bin \
         -global gnw-h7b0-soc.extflash-image=build/extflash.bin \
-        -drive if=sd,file=build/sdcard.img \
+        "${SD_ARGS[@]}" \
         -audiodev sdl3,id=snd0 -global gnw-h7b0-sai1.audiodev=snd0 \
         -display gwemu \
         "${NATIVE_ARGS[@]}" \
@@ -157,15 +216,21 @@ fi
 # Fallback to gdb-multiarch if arm-none-eabi-gdb isn't found in env
 GDB_CMD=${GDB:-arm-none-eabi-gdb}
 
+# A GDB session ALWAYS attaches, in every mode including headless Docker. Live
+# log-buffer forwarding and exception capture are the reason for running under
+# emulation at all, so they are never skipped. scripts/gwemu_log.gdb is the
+# default; --gdb-script only replaces it for one-off diagnostics, and --gdb
+# swaps the batch forwarder for an interactive session.
+GDB_RC=0
 if [ "$USE_GDB" = "1" ]; then
-    $GDB_CMD build/gw_retro_go.elf -ex "target extended-remote :1234"
-elif [ "$USE_DOCKER" = "0" ]; then
-    $GDB_CMD build/gw_retro_go.elf -batch -x scripts/gwemu_log.gdb
+    $GDB_CMD build/gw_retro_go.elf -ex "target extended-remote :1234" || GDB_RC=$?
 else
-    # Headless docker container handles execution; wait for background container to finish
+    $GDB_CMD build/gw_retro_go.elf -batch -x "${GDB_SCRIPT:-scripts/gwemu_log.gdb}" || GDB_RC=$?
+fi
+
+if [ "$USE_DOCKER" = "1" ]; then
+    # Let the container finish (timeline playback / ffmpeg), then collect artifacts.
     wait $GWEMU_PID 2>/dev/null || true
-    
-    # Copy artifacts out after container exits and ffmpeg finishes
     if [ -n "$RECORD_FILE" ]; then
         cp -f "out/$(basename "$RECORD_FILE")" "$RECORD_FILE" 2>/dev/null || true
     fi
@@ -173,3 +238,10 @@ else
         cp -f "out/$(basename "$VIDEO_FILE")" "$VIDEO_FILE" 2>/dev/null || true
     fi
 fi
+
+# gwemu_log.gdb exits non-zero when it trapped a fault or a failed assertion, so
+# a caller (or CI) can detect a crashed run without parsing the log.
+if [ "$GDB_RC" -ne 0 ]; then
+    echo "[run_gwemu] session ended with an exception (see $LOG_FILE)"
+fi
+exit $GDB_RC
