@@ -46,6 +46,26 @@ extern unsigned char io_ports[];
 
 #define TEXT_VRAM_BASE   0xB8000 /* guest address of colour text memory     */
 
+/* This BIOS does not print to 0xB8000.
+ *
+ * INT 10h AH=0Eh (teletype) -- the call DOS uses for essentially all normal
+ * output -- writes char+attr into a flat shadow at C000:0 and then pushes the
+ * byte through the emulator's putchar hook (bios.asm:1802, :1847). It never
+ * touches colour text memory. So 0xB8000 only ever holds content written by
+ * software that programs video memory *directly*: games, TUI apps, anything
+ * performance-minded.
+ *
+ * Two sources, therefore, and we pick per frame using the BIOS's own test
+ * (vram_zero_check, bios.asm:3220): colour text memory counts as "written" if
+ * any cell differs from the blank pattern 0x0700 it was cleared to. Direct
+ * writers win when present, because they are the ones with pixels we would
+ * otherwise be ignoring; otherwise we render the teletype shadow.
+ *
+ * The shadow is flat -- curpos_y*160 + curpos_x*2, no pages, no CRTC start
+ * offset -- so paging must be skipped when reading it. */
+#define TEXT_SHADOW_BASE 0xC0000 /* BIOS teletype shadow, flat 80x25        */
+#define TEXT_BLANK_CELL  0x0700  /* what the BIOS clears both buffers to    */
+
 /* ---------------------------------------------------------------------------
  * Palette
  *
@@ -149,27 +169,65 @@ void dos_video_init(void)
 /* ---------------------------------------------------------------------------
  * Text rendering
  * ------------------------------------------------------------------------- */
+
+/* Has anything written real glyphs into colour text memory?
+ *
+ * The BIOS clears 0xB8000 to 0x0700 at startup (bios.asm:265-271) and on every
+ * mode set, so that is the known-blank baseline. Its own vmem driver tests
+ * whole cells against 0x0700 (bios.asm:3220); we test only the *character*
+ * byte, ignoring attributes, so that an INT 10h clear or scroll performed with
+ * a non-default attribute does not read as content and wrongly switch us away
+ * from the teletype shadow. Characters 0x00 and 0x20 both render as blank.
+ *
+ * The whole 32 KB window folds contiguously (guest 0xB8000-0xBFFFF -> folded
+ * 0xA8000-0xAFFFF), so one dos_mem_ptr() call covers the entire scan. */
+static bool vram_has_content(uint16_t cols)
+{
+    const unsigned char *p = dos_mem_ptr(TEXT_VRAM_BASE);
+    const unsigned cells = (unsigned)cols * DOS_TEXT_ROWS;
+
+    for (unsigned i = 0; i < cells; i++) {
+        uint8_t ch = p[i * 2];
+        if (ch != 0x00 && ch != 0x20)
+            return true;
+    }
+    return false;
+}
+
 static void blit_text(uint8_t *fb, uint16_t cols)
 {
     const uint8_t (*font)[8] = (cols >= 80) ? dos_font_4x8 : dos_font_8x8;
     const unsigned cell_w    = (cols >= 80) ? 4 : 8;
     const bool     narrow    = (cols >= 80);
 
-    /* Page and CRTC start. Software scrolls by moving the start address rather
-     * than moving 4 KB of memory, so ignoring it renders a static view. In text
-     * mode the value is in *character* units, hence the *2. */
-    unsigned page       = bda8(BDA_DISP_PAGE) & 7;
-    unsigned page_size  = bda16(BDA_PAGE_SIZE);
-    if (page_size == 0)
-        page_size = 0x1000;
-    unsigned start_char = bda16(BDA_CRT_START);
+    /* Active page. Needed for the cursor position lookup regardless of which
+     * buffer we render from, so it stays out here. */
+    const unsigned page = bda8(BDA_DISP_PAGE) & 7;
 
-    /* Colour text memory is the 32 KB window at 0xB8000-0xBFFFF. Wrap the page
-     * and start-address offset inside it: both come from guest-writable BDA
-     * fields, and an out-of-range value would otherwise fold to the scratch
-     * page and render garbage rather than wrapping like real hardware. */
-    unsigned offset = (page * page_size + start_char * 2) & 0x7FFF;
-    unsigned base   = TEXT_VRAM_BASE + offset;
+    /* Pick the source buffer -- see the TEXT_SHADOW_BASE comment. */
+    const bool direct = vram_has_content(cols);
+    unsigned   base;
+
+    if (direct) {
+        /* CRTC start. Software scrolls by moving the start address rather than
+         * moving 4 KB of memory, so ignoring it renders a static view. In text
+         * mode the value is in *character* units, hence the *2. */
+        unsigned page_size  = bda16(BDA_PAGE_SIZE);
+        if (page_size == 0)
+            page_size = 0x1000;
+        unsigned start_char = bda16(BDA_CRT_START);
+
+        /* Colour text memory is the 32 KB window at 0xB8000-0xBFFFF. Wrap the
+         * page and start-address offset inside it: both come from
+         * guest-writable BDA fields, and an out-of-range value would otherwise
+         * fold to the scratch page and render garbage rather than wrapping like
+         * real hardware. */
+        unsigned offset = (page * page_size + start_char * 2) & 0x7FFF;
+        base = TEXT_VRAM_BASE + offset;
+    } else {
+        /* The teletype shadow is flat: no paging, no start offset. */
+        base = TEXT_SHADOW_BASE;
+    }
 
     const bool blink_enabled = (io_ports[CGA_MODE_CTRL] & CGA_BLINK_ENABLE) != 0;
 
@@ -192,12 +250,17 @@ static void blit_text(uint8_t *fb, uint16_t cols)
 
             /* Bit 7 is blink or background intensity, depending on the CGA
              * mode-control register. Software that wants 16 background colours
-             * clears that bit explicitly. */
+             * clears that bit explicitly.
+             *
+             * The intensity promotion is conditional on bit 7 being SET in this
+             * cell -- it is that bit reinterpreted, not a global mode. Applying
+             * it unconditionally turns every black background into dark grey
+             * (index 0 -> 8), which is a grey screen rather than a black one. */
             if (blink_enabled) {
                 if ((attr & 0x80) && !blink_on)
                     fg = bg;            /* blinked off: draw as background */
-            } else {
-                bg |= 0x08;             /* intensity promotes bg to 16 colours */
+            } else if (attr & 0x80) {
+                bg |= 0x08;             /* bit 7 = background intensity */
             }
 
             const uint32_t fgw = splat(fg);

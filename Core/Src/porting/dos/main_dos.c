@@ -108,8 +108,11 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
         bool drawFrame = common_emu_frame_loop();
 
-        if (dos_cpu_frame(20000)) {
-            // Emulation finished (CS:IP = 0:0)
+        /* dos_cpu_frame() returns 1 when it used its whole cycle budget and the
+         * guest is still running, and 0 when the fetch loop exited because
+         * CS:IP folded to 0 -- i.e. the guest is done. Test for zero: the
+         * inverted form breaks out of the loop on the first *healthy* frame. */
+        if (!dos_cpu_frame(20000)) {
             printf("DOS: emulation finished at CS:IP=%04X:%04X after %u frames\n",
                    regs16[DBG_REG_CS], reg_ip, dbg_frames);
             break;

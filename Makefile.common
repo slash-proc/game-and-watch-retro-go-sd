@@ -2157,6 +2157,17 @@ distclean: clean
 
 # *** EOF ***
 
+# -fsigned-char is REQUIRED, not a preference. 8086tiny sign-extends 8-bit
+# immediates and rel8 branch displacements by casting to `char` (8086tiny.c:484,
+# :495, :557, :609, :667, :678, :825, :842). It was written on x86, where `char`
+# is signed; on ARM `char` is UNSIGNED by default, so (char)0xD9 yields 217
+# instead of -39 and every backward conditional jump in the guest becomes a wild
+# forward jump. Without this flag the BIOS's port-setup loop at F000:02EF
+# (`cmp dx,0xFFF / jl -39`) branches to 0x03CA instead of 0x02CA, falls into an
+# unrelated IRET epilogue, and the CPU exits to CS:IP=0000:0000 after 179
+# instructions.
+DOS_CFLAGS = -fsigned-char
+
 $(BUILD_DIR)/dos/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) "[ CC dos ] $(notdir $<)"
-	$(V)$(CC) -c $(CFLAGS) $(DOS_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/dos/$(notdir $(<:.c=.lst)) $< -o $@
+	$(V)$(CC) -c $(CFLAGS) $(DOS_CFLAGS) $(DOS_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/dos/$(notdir $(<:.c=.lst)) $< -o $@
