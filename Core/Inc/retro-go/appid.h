@@ -23,6 +23,7 @@ typedef enum {
     APPID_PICO8    = 19,
     APPID_LYNX     = 20,
     APPID_GBA      = 21,   /* Game Boy Advance (gpsp) */
+    APPID_DOS      = 22,
 
     APPID_COUNT,
 } appid_t;

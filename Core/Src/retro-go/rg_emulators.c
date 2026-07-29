@@ -244,7 +244,7 @@ static retro_emulator_file_t *shared_files = NULL;
 #define COVERFLOW 0
 #endif /* COVERFLOW */
 // Increase when adding new emulators
-#define MAX_EMULATORS 22
+#define MAX_EMULATORS 24
 static retro_emulator_t *emulators;
 static rom_system_t *systems;
 static int emulators_count = 0;
@@ -1790,6 +1790,7 @@ void emulators_init()
 #endif
     add_emulator("Nintendo Entertainment System", "nes", "nes fds nsf lzma", RG_LOGO_PAD_NES, RG_LOGO_HEADER_NES, NO_GAME_DATA);
     add_emulator("Game & Watch", "gw", "gw", RG_LOGO_PAD_GW, RG_LOGO_HEADER_GW, NO_GAME_DATA);
+    add_emulator("MS-DOS", "dos", "com exe bat img", RG_LOGO_EMPTY, RG_LOGO_HEADER_HOMEBREW, NO_GAME_DATA);
     add_emulator("PC Engine", "pce", "pce lzma", RG_LOGO_PAD_PCE, RG_LOGO_HEADER_PCE, NO_GAME_DATA);
     /* PC Engine CD: same pce overlay; disc streamed from SD, System Card BIOS at boot. */
 #if SD_CARD == 1
