@@ -56,3 +56,9 @@ gwemu_bin.version
 # covered by build/, but --log-file can point anywhere. No .log files are tracked.
 *.log
 .gwemu_release_cache
+
+# Ad-hoc debugging debris at the repo root. Anchored with a leading slash so the
+# tracked helpers under scripts/ (gwemu_log.gdb) are never caught by these.
+/*.gdb
+/gwemu-*.png
+/out/
