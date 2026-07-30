@@ -259,13 +259,15 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
             if (dos_prof_take_sample(&s)) {
                 printf("DOS: prof %s @%luMHz ipf=%lu ips=%lu cpi=%lu | cpu=%u%% (%luus/f) "
                        "blit=%u%% (%luus x%lu) idle=%u%% other=%u%% "
-                       "putc=%lu frames=%lu/%lums\n",
+                       "putc=%lu tick=%lu/%lu rs=%lu frames=%lu/%lums\n",
                        dos_cpu_profile_name(), (unsigned long)s.mhz,
                        (unsigned long)s.insn_per_frame, (unsigned long)s.insn_per_sec,
                        (unsigned long)s.cyc_per_insn,
                        s.cpu_pct, (unsigned long)s.cpu_us_frame,
                        s.blit_pct, (unsigned long)s.blit_us, (unsigned long)s.blits,
                        s.idle_pct, s.other_pct, (unsigned long)s.putchars,
+                       (unsigned long)s.int8_fired, (unsigned long)s.int8_due,
+                       (unsigned long)s.int8_resync,
                        (unsigned long)s.frames, (unsigned long)s.ms);
             }
         }

@@ -56,6 +56,20 @@ typedef struct {
                               * dos_putchar_count in 8086tiny.c. Proxy for how
                               * much of the guest's budget vmem_driver_entry is
                               * spending repainting a terminal we do not have. */
+    /* Guest BIOS timer-tick accounting for the window. `due` is how many 55 ms
+     * deadlines were reached, i.e. how far guest time SHOULD have advanced;
+     * `fired` is how many int 0xA interrupts the guest actually took. They
+     * differ because int8_asap is a flag rather than a count, so deadlines
+     * passing while the guest has IF clear (or a prefix/REP pending) collapse
+     * into one interrupt. `resync` counts the other loss path, where the
+     * deadline is reset forward and the backlog is discarded.
+     *
+     * fired < due means the guest's clock is running slow, which inflates and
+     * destabilises any guest-side benchmark. This exists because TOPBENCH
+     * scored 19-83 while host-side ips held to +/-0.2%. */
+    uint32_t int8_due;
+    uint32_t int8_fired;
+    uint32_t int8_resync;
     uint32_t cyc_per_insn;   /* ARM cycles spent per guest instruction.
                               * The headline efficiency number: comparable
                               * across clocks and platforms, unlike ips.   */

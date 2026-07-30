@@ -31,6 +31,7 @@
 extern int dos_cpu_frame(int cycles);
 extern unsigned int inst_counter;
 extern unsigned int dos_putchar_count;
+extern unsigned int dos_int8_due, dos_int8_fired, dos_int8_resync;
 
 /* ---- The profile table ----------------------------------------------------
  *
@@ -118,6 +119,7 @@ static uint32_t prof_frames, prof_insn, prof_blits;
 static uint32_t prof_win_ms, prof_win_cyc;      /* window start marks */
 static uint32_t prof_blit_t0, prof_idle_t0;
 static uint32_t prof_putchar0;
+static uint32_t prof_int8_due0, prof_int8_fired0, prof_int8_resync0;
 
 /* Last completed sample, kept so the menu can show the achieved rate without a
  * debug build. 0 until the first window closes. */
@@ -139,6 +141,9 @@ void dos_cpu_speed_init(void)
     prof_win_ms  = (uint32_t)HAL_GetTick();
     prof_win_cyc = dos_cyc();
     prof_putchar0 = dos_putchar_count;
+    prof_int8_due0 = dos_int8_due;
+    prof_int8_fired0 = dos_int8_fired;
+    prof_int8_resync0 = dos_int8_resync;
 }
 
 const char *dos_cpu_profile_name(void)
@@ -219,6 +224,12 @@ bool dos_prof_take_sample(dos_prof_sample_t *out)
         out->cyc_per_insn = prof_insn ? (uint32_t)(prof_cpu / prof_insn) : 0;
         out->putchars     = dos_putchar_count - prof_putchar0;
         prof_putchar0     = dos_putchar_count;
+        out->int8_due     = dos_int8_due    - prof_int8_due0;
+        out->int8_fired   = dos_int8_fired  - prof_int8_fired0;
+        out->int8_resync  = dos_int8_resync - prof_int8_resync0;
+        prof_int8_due0    = dos_int8_due;
+        prof_int8_fired0  = dos_int8_fired;
+        prof_int8_resync0 = dos_int8_resync;
     }
 
     prof_last_ips = out->insn_per_sec;
