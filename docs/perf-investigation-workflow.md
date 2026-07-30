@@ -235,3 +235,27 @@ reason it was parked**.
 
 "Tried it, didn't seem to help" is not a conclusion. It is an unfinished excursion, and
 someone will retry it in six months.
+
+## TODO: resolve the INTFLASH_BANK default mismatch
+
+**The project defaults to `INTFLASH_BANK=2`, but this workflow uses bank 1** — the device
+boots bank 1, and every gwemu invocation and `flash_sd` in this document passes
+`INTFLASH_BANK=1` explicitly. Nothing enforces that, so anyone (human or agent) who builds
+with the project default silently produces a bank-2 image that will not run here. This has
+already cost time twice: once as `CORE: load failed '/cores/dos.bin'` when the SD core and
+the firmware disagreed, and once when an agent built bank 2 against a bank-1 emulator.
+
+The contingency has been avoided rather than solved. It is now solvable: **gnwmanager has
+gained gdb support**, which makes patching the stock firmware tractable for **hardware and
+gwemu alike** rather than only on real silicon.
+
+Work to do, when someone picks this up:
+- Decide the canonical bank for this fork and make it the default, or make the mismatch
+  loud (a build-time assert, or a check in `run_gwemu.sh` comparing the built image's bank
+  against what the emulator expects).
+- Use gnwmanager's gdb support to bring the dual-boot / stock-firmware patch path under the
+  same workflow for both targets, so `flash-patch --bootloader` and gwemu stop being
+  separate universes.
+- Until then, **every build command in this document must keep passing `INTFLASH_BANK=1`
+  explicitly**, and briefs handed to agents must state it — an agent that omits it produces
+  an image that looks built but cannot boot.
