@@ -29,8 +29,8 @@ external/8086tiny/
   GNW_PORT.md                  <- STALE. Superseded. Do not trust it.
 ```
 
-Categories with docs today: `video` (10 files), `storage`, `input`, `audio`.
-Still unwritten: memory map, integration, CPU & performance, BIOS & system services.
+Categories with docs today: `video` (10 files), `cpu` (2 files), `storage`, `input`, `audio`.
+Still unwritten: memory map, integration, BIOS & system services.
 
 ### The reading path
 
@@ -65,6 +65,12 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
   rejects; that is gone.
 - `Core/Src/porting/dos/main_dos.c` — `app_main_dos()`. Sets up the frame loop, audio
   timing and `common_emu_*` bookkeeping, and calls `dos_input_update()` once per frame.
+- `Core/Src/porting/dos/dos_cpu.c` — guest CPU speed profiles (`dos_cpu_profiles[]`, a
+  data table like `dos_key_map[]`), MAX mode's deadline chunk loop, the retro-go options
+  row, and the cpu/blit/idle profiler. **Change the speeds by editing the table.**
+  Design in `external/8086tiny/docs/cpu/`. Two things to know before touching it:
+  MAX mode refreshes the watchdog *inside* the chunk loop and must keep doing so, and
+  the `DOS: prof …` line is intentionally not behind a debug flag.
 - `Core/Src/porting/dos/dos_input.c` — buttons → guest keystrokes. The mapping is the
   `dos_key_map[]` table; edge detection against the previous frame turns button state into
   one key-down per press and one key-up per release, encoded in the BIOS's SDL word
@@ -90,12 +96,17 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
    all, so a game setting its background that way gets defaults. And
    `int10_switch_to_cga_gfx` clears with `char=0/attr=7`, which as pixel data is a stripe
    pattern for one frame.
-5. **CPU speed has a first number.** TOPBENCH scores **23**, matching an IBM PS/2 Model
-   P70 / AT&T 6386 WGS (286-class) — but every one of its six sub-timings came back as
-   exactly 215 µsec, which is not credible and almost certainly reflects the 55 ms
-   granularity of the guest clock rather than the CPU. Treat 23 as a baseline to improve
-   against, not as a measurement of anything specific, and fix the timer resolution
-   before trusting the breakdown.
+5. **CPU speed is selectable and instrumented; the numbers are not yet explained.**
+   Profiles (XT/Turbo/286/MAX) live in `dos_cpu.c` and a per-second `DOS: prof …` line
+   reports achieved instructions/frame, instructions/second, **ARM cycles per guest
+   instruction**, and the cpu/blit/idle split. TOPBENCH scores **34/35 on the device**
+   at the default 20,000 and **23 under gwemu** (gwemu is the slower of the two). Both
+   runs returned six *identical* 215 µsec sub-timings, which is not credible — prime
+   suspect is the guest clock's 55 ms quantisation, so the aggregate may be usable but
+   the breakdown is not. At 280 MHz the default profile costs ~233 ARM cycles per 8086
+   instruction against 20–50 for a decent interpreter, so the ceiling looks like an
+   efficiency problem. `external/8086tiny/docs/cpu-roadmap.md` lists the unpulled
+   levers, `.overlay_dos_itc` (reserved, **empty**) first.
 
 ## The memory map — resolved, for reference
 

@@ -8,8 +8,10 @@
 #include "main.h"        /* wdog_refresh() */
 #include "common.h"
 #include "appid.h"
+#include "rg_i18n.h"     /* ODROID_DIALOG_CHOICE_SEPARATOR */
 #include "dos_video.h"
 #include "dos_input.h"
+#include "dos_cpu.h"
 #include <string.h>
 
 /* Guest memory is a BSS array inside this overlay (.overlay_dos_bss), zeroed by
@@ -160,6 +162,20 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     #define DBG_REG_CS 9            /* REG_CS is private to 8086tiny.c */
     unsigned int dbg_frames = 0;
 
+    /* Guest CPU speed. Selectable at runtime because most DOS games have no
+     * frame limiter and run at whatever speed the CPU provides -- the turbo
+     * button problem. The table and the MAX-mode deadline loop live in
+     * dos_cpu.c; this file only owns the menu row. */
+    char dos_cpu_speed_value[DOS_CPU_VALUE_LEN];
+    odroid_dialog_choice_t options[] = {
+        ODROID_DIALOG_CHOICE_SEPARATOR,
+        {200, "CPU speed", dos_cpu_speed_value, 1, &dos_cpu_speed_update_cb},
+        ODROID_DIALOG_CHOICE_LAST};
+    /* Populate the value string before the menu can be opened. */
+    dos_cpu_speed_update_cb(&options[1], ODROID_DIALOG_INIT, 0);
+
+    dos_cpu_speed_init();
+
     /* Baseline for the input edge detector. Without this, any button already
      * held when the core starts (typically A, which launched the ROM) would look
      * like a fresh press on frame 1 and inject a stray Enter into the guest. */
@@ -182,7 +198,7 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         odroid_gamepad_state_t joystick;
         odroid_input_read_gamepad(&joystick);
 
-        common_emu_input_loop(&joystick, NULL, &dos_blit);
+        common_emu_input_loop(&joystick, options, &dos_blit);
 
         /* Once per frame, after the launcher has had its look at the state:
          * common_emu_input_loop() owns PAUSE as a macro prefix (common.c:236),
@@ -193,11 +209,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
         bool drawFrame = common_emu_frame_loop();
 
-        /* dos_cpu_frame() returns 1 when it used its whole cycle budget and the
-         * guest is still running, and 0 when the fetch loop exited because
-         * CS:IP folded to 0 -- i.e. the guest is done. Test for zero: the
-         * inverted form breaks out of the loop on the first *healthy* frame. */
-        if (!dos_cpu_frame(20000)) {
+        /* dos_cpu_run_frame() executes one frame's worth of guest instructions
+         * under the selected speed profile (dos_cpu.c) and forwards
+         * dos_cpu_frame()'s contract: 1 when the budget was spent and the guest
+         * is still running, 0 when the fetch loop exited because CS:IP folded to
+         * 0 -- i.e. the guest is done. Test for zero: the inverted form breaks
+         * out of the loop on the first *healthy* frame. */
+        if (!dos_cpu_run_frame()) {
             printf("DOS: emulation finished at CS:IP=%04X:%04X after %u frames\n",
                    regs16[DBG_REG_CS], reg_ip, dbg_frames);
             break;
@@ -221,15 +239,57 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         }
 #endif
 
+        /* The measurement this whole speed-profile exercise exists to produce:
+         * instructions actually achieved per frame and per second, the ARM
+         * cycles that cost per guest instruction, and where the rest of the
+         * frame went. MAX mode is worthless without the first, "how far off a
+         * decent interpreter are we" is unanswerable without cpi, and "attack
+         * the interpreter or the renderer" is unanswerable without the split.
+         *
+         * Deliberately NOT behind DOS_DEBUG_STATUS. It is one printf per second
+         * against counters that are three loads per frame, and
+         * docs/video/09-video-profiling.md makes the case directly: "a profiling
+         * build that has to be specially produced is a profiling build nobody
+         * runs -- particularly awkward here because the interesting cases (a
+         * specific game, a specific mode) are exactly the ones that are
+         * inconvenient to reproduce." It also means measuring MAX needs no debug
+         * build, so there is no debug flag to accidentally leave switched on. */
+        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames ~= 1s */
+            dos_prof_sample_t s;
+            if (dos_prof_take_sample(&s)) {
+                printf("DOS: prof %s @%luMHz ipf=%lu ips=%lu cpi=%lu | cpu=%u%% (%luus/f) "
+                       "blit=%u%% (%luus x%lu) idle=%u%% other=%u%% "
+                       "putc=%lu frames=%lu/%lums\n",
+                       dos_cpu_profile_name(), (unsigned long)s.mhz,
+                       (unsigned long)s.insn_per_frame, (unsigned long)s.insn_per_sec,
+                       (unsigned long)s.cyc_per_insn,
+                       s.cpu_pct, (unsigned long)s.cpu_us_frame,
+                       s.blit_pct, (unsigned long)s.blit_us, (unsigned long)s.blits,
+                       s.idle_pct, s.other_pct, (unsigned long)s.putchars,
+                       (unsigned long)s.frames, (unsigned long)s.ms);
+            }
+        }
+
         if (!lcd_is_swap_pending() && drawFrame) {
+            /* Bracketed for the cpu/blit/idle split (docs/video/09-video-profiling.md).
+             * Note this only runs when common_emu_frame_loop() said so: a dropped
+             * frame skips the blit entirely, which preserves guest speed at the
+             * cost of visual smoothness -- so blit cost per *frame* and blit cost
+             * per *blit* are different numbers, and both are reported. */
+            dos_prof_blit_begin();
             dos_blit();
             lcd_swap();
+            dos_prof_blit_end();
         }
 
         if (drawFrame) {
             // TODO: Submit audio
         }
 
+        /* The only place this loop deliberately waits. If idle_pct comes back at
+         * ~0 there is no headroom left and the frame is CPU/blit bound. */
+        dos_prof_idle_begin();
         common_emu_sound_sync(false);
+        dos_prof_idle_end();
     }
 }
