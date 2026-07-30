@@ -322,9 +322,19 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         }
 
         /* The only place this loop deliberately waits. If idle_pct comes back at
-         * ~0 there is no headroom left and the frame is CPU/blit bound. */
+         * ~0 there is no headroom left and the frame is CPU/blit bound.
+         *
+         * Once per panel refresh, so dos_screen_sync_edges() times per guest
+         * frame: 1 in the full-rate modes, 2 in "25 (50)" and "30 (60)". Each
+         * common_emu_sound_sync() consumes exactly one SAI DMA half-buffer edge
+         * (common.c:495-511), and the buffer is sized for the PANEL rate, so
+         * half rate is paid for in edges rather than in a longer buffer.
+         * Lengthening the buffer instead would need 48000/25 = 1920 samples
+         * against AUDIO_BUFFER_LENGTH == 1077 -- a DMA write off the end of
+         * .audio. See DOS_AUDIO_LEN in dos_cpu.c. */
         dos_prof_idle_begin();
-        common_emu_sound_sync(false);
+        for (uint8_t e = dos_screen_sync_edges(); e; e--)
+            common_emu_sound_sync(false);
         dos_prof_idle_end();
     }
 }

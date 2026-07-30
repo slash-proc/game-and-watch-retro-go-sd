@@ -21,12 +21,25 @@ void dos_cpu_speed_init(void);
  * deadline and refreshes the watchdog every chunk. */
 int dos_cpu_run_frame(void);
 
-/* Selected screen frequency in Hz -- one of 50/60/72/75, the only rates
- * lcd_set_refresh_rate() can reach (gw_lcd.c:548-591). It is both the panel
- * refresh rate and the guest frame rate; the profile table's instructions/second
- * are divided by it to get the per-frame budget, so the emulated CPU speed does
- * not move when the refresh rate does. */
-uint32_t dos_screen_hz(void);
+/* The screen frequency is TWO numbers and they are not interchangeable.
+ *
+ * dos_screen_panel_rate() is the LTDC pixel-clock rate -- one of 50/60/72/75,
+ * the only rates lcd_set_refresh_rate() can reach (gw_lcd.c:548-591). The audio
+ * DMA buffer length MUST be derived from this one: audio_start_playing() writes
+ * into audiobuffer_dma[AUDIO_BUFFER_LENGTH*2] and 48000/25 = 1920 overruns it.
+ *
+ * dos_screen_guest_fps() is how many guest frames per second we generate: the
+ * panel rate divided by dos_screen_sync_edges(). The profile table's
+ * instructions/second are divided by THIS to get the per-frame budget, so the
+ * emulated CPU speed does not move when the refresh rate does.
+ *
+ * dos_screen_sync_edges() is how many audio-DMA half-buffer edges the frame loop
+ * must consume per guest frame -- 1 for the full-rate modes, 2 for "25 (50)" and
+ * "30 (60)". The caller pays this by calling common_emu_sound_sync() that many
+ * times; the buffer length itself never changes. */
+uint32_t dos_screen_panel_rate(void);
+uint32_t dos_screen_guest_fps(void);
+uint8_t  dos_screen_sync_edges(void);
 
 /* Apply the selected rate to the panel PLL, the frame period and the audio
  * pacer. Call once before the frame loop, and again whenever the selection
@@ -38,10 +51,11 @@ void dos_screen_apply_rate(void);
 void dos_screen_freq_init(void);
 
 /* Minimum size of the char buffer handed to the screen-frequency row. */
-#define DOS_SCREEN_FREQ_VALUE_LEN 8
+#define DOS_SCREEN_FREQ_VALUE_LEN 12
 
-/* Options-menu row. Cycles 50/60/72/75 with left/right, applies and persists
- * the choice immediately. */
+/* Options-menu row. Cycles 25 (50) / 30 (60) / 50 / 60 / 72 / 75 with
+ * left/right, applies and persists the choice immediately. The parenthesised
+ * number in the half-rate labels is the panel rate. */
 bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
                                odroid_dialog_event_t event, uint32_t repeat);
 

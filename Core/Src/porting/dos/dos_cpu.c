@@ -102,29 +102,60 @@ static int dos_cpu_profile_idx = 2;
 
 /* ---- Screen frequency -----------------------------------------------------
  *
- * The single source of truth for "how many guest frames per second are we
- * producing". The panel rate and the guest frame rate are the same number here
- * (there are no half-rate modes; see SCREEN-FREQ-PLAN.md stage 3, deliberately
- * not implemented). Everything that used to hardcode 60 -- the frame budget,
- * the MAX deadline, frame_time_10us, the audio DMA length -- reads it.
+ * TWO numbers, and conflating them is the one genuinely dangerous mistake in
+ * this file:
  *
- * Default 60 so the de-hardcoding is a provable no-op against the old build. */
-#define DOS_SCREEN_HZ_DEFAULT 60u
-static uint32_t dos_screen_hz_sel = DOS_SCREEN_HZ_DEFAULT;
+ *   panel_hz  -- what the LTDC pixel clock is doing. Drives lcd_set_refresh_rate()
+ *                and, critically, the audio DMA buffer length.
+ *   guest_fps -- how many guest frames per second we generate. Drives the CPU
+ *                budget (ips / guest_fps), frame_time_10us and the MAX deadline.
+ *
+ * They are equal in the full-rate modes and differ by `divider` in the half-rate
+ * ones. See DOS_AUDIO_LEN below for what happens if the audio length is derived
+ * from guest_fps instead of panel_hz.
+ *
+ * Default 60/60 so the de-hardcoding is a provable no-op against the old build. */
+#define DOS_SCREEN_FPS_DEFAULT 60u
 
-/* The only rates lcd_set_refresh_rate() can reach. Each is an exact PLL3 (N,R)
- * pair against the fixed 392x255 LTDC frame (gw_lcd.c:549-567, main.c:764-768),
- * so there is no fractional-N drift. Anything else falls into that function's
- * `else { return; }` and SILENTLY leaves the panel where it was -- which is why
- * this is a table of the reachable set rather than a free-form number.
+/* The reachable rate set.
  *
- * Deliberately no 25/30 entries: there is no 25 or 30 Hz LTDC clock, so those
- * would have to be half-rate guest generation on a 50/60 Hz panel, which is a
- * separate change (SCREEN-FREQ-PLAN.md stage 3) carrying an audio-buffer hazard
- * -- 48000/25 = 1920 overruns audiobuffer_dma. See DOS_AUDIO_LEN below. */
-static const uint16_t dos_screen_rates[] = { 50, 60, 72, 75 };
+ * `panel_hz` must be one of 50/60/72/75 -- the four branches of
+ * lcd_set_refresh_rate() (gw_lcd.c:549-567). Each is an exact PLL3 (N,R) pair
+ * against the fixed 392x255 LTDC frame (main.c:764-768), so there is no
+ * fractional-N drift. Anything else falls into that function's `else { return; }`
+ * and SILENTLY leaves the panel where it was, which is why this is a table of
+ * the reachable set rather than a free-form number.
+ *
+ * `divider` is how many panel refreshes make one guest frame. There is no 25 or
+ * 30 Hz LTDC clock and driving the panel that slowly would flicker badly even
+ * if there were, so "25 (50)" is the panel at 50 Hz with a guest frame every
+ * OTHER refresh, and "30 (60)" likewise at 60. The label states both numbers for
+ * exactly that reason.
+ *
+ * A divider > 1 costs two things and buys one: it halves blit and launcher
+ * overhead per second, at the price of visible judder and a doubled per-frame
+ * CPU burst (286 12MHz at 25 fps is 50,400 instructions in one frame). The burst
+ * is why dos_cpu_run_frame() chunks the fixed profiles as well as MAX. */
+typedef struct {
+    const char *label;
+    uint16_t    panel_hz;
+    uint8_t     divider;      /* panel refreshes per guest frame */
+} dos_screen_rate_t;
+
+static const dos_screen_rate_t dos_screen_rates[] = {
+    { "25 (50)", 50, 2 },
+    { "30 (60)", 60, 2 },
+    { "50",      50, 1 },
+    { "60",      60, 1 },
+    { "72",      72, 1 },
+    { "75",      75, 1 },
+};
 #define DOS_SCREEN_RATE_COUNT ((int)(sizeof dos_screen_rates / sizeof dos_screen_rates[0]))
-static int dos_screen_rate_idx = 1;      /* 60 Hz */
+static int dos_screen_rate_idx = 3;      /* "60" -- full rate, today's default */
+
+static uint32_t dos_screen_panel_hz  = 60u;
+static uint32_t dos_screen_fps_sel   = DOS_SCREEN_FPS_DEFAULT;
+static uint8_t  dos_screen_div       = 1u;
 
 /* App-scoped, not per-ROM: the panel rate is a display-comfort and throughput
  * choice about the user's hardware, whereas CPU speed is a per-title
@@ -155,15 +186,17 @@ static int dos_screen_rate_idx = 1;      /* 60 Hz */
 /* Instructions per frame for the active (profile, rate) pair. Cached because
  * both inputs change only from a menu callback, and dos_cpu_run_frame() is the
  * hot path. 0 means MAX. */
-static unsigned int dos_insn_per_frame = 1260000u / DOS_SCREEN_HZ_DEFAULT;
+static unsigned int dos_insn_per_frame = 1260000u / DOS_SCREEN_FPS_DEFAULT;
 
 static void dos_cpu_derive(void)
 {
     unsigned int ips = dos_cpu_profiles[dos_cpu_profile_idx].insn_per_sec;
-    dos_insn_per_frame = ips ? ips / dos_screen_hz_sel : 0u;
+    dos_insn_per_frame = ips ? ips / dos_screen_fps_sel : 0u;
 }
 
-uint32_t dos_screen_hz(void) { return dos_screen_hz_sel; }
+uint32_t dos_screen_guest_fps(void) { return dos_screen_fps_sel; }
+uint32_t dos_screen_panel_rate(void) { return dos_screen_panel_hz; }
+uint8_t  dos_screen_sync_edges(void) { return dos_screen_div; }
 
 /* Audio DMA length for a given panel rate.
  *
@@ -171,13 +204,22 @@ uint32_t dos_screen_hz(void) { return dos_screen_hz_sel; }
  * pacer -- common_emu_sound_sync() waits on the SAI DMA half-buffer counter --
  * so the length still has to be right. audio_start_playing(len) fills
  * audiobuffer_dma[AUDIO_BUFFER_LENGTH * 2] (gw_audio.h:15,23), so len must
- * never exceed AUDIO_BUFFER_LENGTH == 1077. 48000/50 = 960 is the largest value
- * any reachable rate produces, but the clamp stays: overrunning this buffer is
- * memory corruption past the end of .audio, not a glitch, and the next person
- * to add a slower mode (the half-rate modes want 48000/25 = 1920) must hit the
- * clamp rather than the corruption. */
+ * never exceed AUDIO_BUFFER_LENGTH == 1077.
+ *
+ * THE ARGUMENT IS ALWAYS panel_hz, NEVER guest_fps. 48000/50 = 960 and
+ * 48000/60 = 800 are fine; the half-rate modes' guest_fps of 25 would give
+ * 48000/25 = 1920, which overruns audiobuffer_dma by 843 samples. That is a DMA
+ * write past the end of .audio -- memory corruption, not a glitch. Half rate is
+ * implemented by consuming TWO DMA edges per guest frame (dos_screen_sync_edges())
+ * with the buffer still sized for the panel, precisely so this number never
+ * grows. The clamp stays below as a belt-and-braces backstop for whoever adds
+ * the next mode. */
 #define DOS_AUDIO_LEN(hz) ((uint32_t)AUDIO_SAMPLE_RATE / (uint32_t)(hz))
+/* 50 is the slowest panel rate in dos_screen_rates[] and therefore the largest
+ * length any reachable entry produces. */
 _Static_assert(DOS_AUDIO_LEN(50) <= AUDIO_BUFFER_LENGTH,
+               "DOS audio DMA length would overrun audiobuffer_dma");
+_Static_assert(DOS_AUDIO_LEN(60) <= AUDIO_BUFFER_LENGTH,
                "DOS audio DMA length would overrun audiobuffer_dma");
 
 /* Apply the selected rate: panel PLL, guest frame period, audio pacer.
@@ -190,7 +232,8 @@ _Static_assert(DOS_AUDIO_LEN(50) <= AUDIO_BUFFER_LENGTH,
  * (main_gwenesis.c:162-180). */
 void dos_screen_apply_rate(void)
 {
-    uint32_t hz = dos_screen_hz_sel;
+    uint32_t panel = dos_screen_panel_hz;
+    uint32_t fps   = dos_screen_fps_sel;
 
     dos_cpu_derive();
 
@@ -198,11 +241,16 @@ void dos_screen_apply_rate(void)
     if (lcd_is_swap_pending())
         lcd_sleep_while_swap_pending();
 
-    lcd_set_refresh_rate(hz);
-    common_emu_state.frame_time_10us = (int16_t)(100000u / hz);
+    lcd_set_refresh_rate(panel);
 
+    /* GUEST rate: this is the frame period the integrator paces to. int16_t
+     * (common.c:92) -- 4000 at 25 fps, and the SPEEDUP_0_5x multiplier
+     * (common.c:120) doubles it to 8000, still comfortably inside the type. */
+    common_emu_state.frame_time_10us = (int16_t)(100000u / fps);
+
+    /* PANEL rate: see DOS_AUDIO_LEN. */
     {
-        uint32_t len = DOS_AUDIO_LEN(hz);
+        uint32_t len = DOS_AUDIO_LEN(panel);
         if (len > AUDIO_BUFFER_LENGTH) len = AUDIO_BUFFER_LENGTH;
         audio_start_playing((uint16_t)len);
     }
@@ -219,23 +267,33 @@ void dos_screen_apply_rate(void)
  * stub in this fork -- see DOS_SCREEN_HZ_KEY above before assuming a bug here.
  * Verified on hardware: set(50) immediately followed by get() returned -1.
  *
- * The stored value is the Hz number, not the table index: an index would
+ * The stored value is the GUEST fps, not the table index: an index would
  * silently mean a different rate if the table ever gains or reorders an entry,
- * and a stale index is unrecoverable for the user. An unrecognised Hz falls back
- * to the default rather than being trusted -- lcd_set_refresh_rate() would
- * ignore it and leave the panel and the frame budget disagreeing. */
+ * and a stale index is unrecoverable for the user. guest_fps is unique across
+ * the six entries (25/30/50/60/72/75) where panel_hz alone would not be -- 50
+ * names both "25 (50)" and "50". An unrecognised value falls back to the default
+ * rather than being trusted. */
+static void dos_screen_select(int idx)
+{
+    dos_screen_rate_idx  = idx;
+    dos_screen_panel_hz  = dos_screen_rates[idx].panel_hz;
+    dos_screen_div       = dos_screen_rates[idx].divider;
+    dos_screen_fps_sel   = (uint32_t)dos_screen_rates[idx].panel_hz /
+                           dos_screen_rates[idx].divider;
+}
+
 void dos_screen_freq_init(void)
 {
-    int32_t hz = odroid_settings_app_int32_get(DOS_SCREEN_HZ_KEY,
-                                               (int32_t)DOS_SCREEN_HZ_DEFAULT);
+    int32_t fps = odroid_settings_app_int32_get(DOS_SCREEN_HZ_KEY,
+                                                (int32_t)DOS_SCREEN_FPS_DEFAULT);
     for (int i = 0; i < DOS_SCREEN_RATE_COUNT; i++) {
-        if (dos_screen_rates[i] == (uint16_t)hz) {
-            dos_screen_rate_idx = i;
-            dos_screen_hz_sel   = dos_screen_rates[i];
+        if ((int32_t)(dos_screen_rates[i].panel_hz / dos_screen_rates[i].divider) == fps) {
+            dos_screen_select(i);
             return;
         }
     }
     /* Unknown/absent: leave the compiled-in default in place. */
+    dos_screen_select(dos_screen_rate_idx);
 }
 
 bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
@@ -255,8 +313,8 @@ bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
     }
 
     if (changed) {
-        dos_screen_hz_sel = dos_screen_rates[dos_screen_rate_idx];
-        odroid_settings_app_int32_set(DOS_SCREEN_HZ_KEY, (int32_t)dos_screen_hz_sel);
+        dos_screen_select(dos_screen_rate_idx);
+        odroid_settings_app_int32_set(DOS_SCREEN_HZ_KEY, (int32_t)dos_screen_fps_sel);
         /* Applied immediately, like every other option row in this tree. It is a
          * PLL3 write plus an audio restart; there is nothing to defer to a core
          * restart. Safe from inside the menu: the overlay repaints through the
@@ -265,7 +323,8 @@ bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
         dos_screen_apply_rate();
     }
 
-    snprintf(option->value, DOS_SCREEN_FREQ_VALUE_LEN, "%u", (unsigned)dos_screen_hz_sel);
+    snprintf(option->value, DOS_SCREEN_FREQ_VALUE_LEN, "%s",
+             dos_screen_rates[dos_screen_rate_idx].label);
     return event == ODROID_DIALOG_ENTER;
 }
 
@@ -297,7 +356,7 @@ bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
  *
  * It is a percentage rather than an absolute deadline precisely so it survives
  * the refresh rate becoming user-selectable: the period it scales is
- * SystemCoreClock / dos_screen_hz(), so the duty cycle is the same at 50 as at
+ * SystemCoreClock / dos_screen_guest_fps(), so the duty cycle is the same at 50 as at
  * 75 and the sweep below stays valid. The us figures quoted are at 60 Hz.
  *
  * 88 was measured on hardware at the MS-DOS idle prompt (cpi 204). It was 85,
@@ -379,14 +438,36 @@ int dos_cpu_run_frame(void)
     int alive;
 
     if (budget) {
-        alive = dos_cpu_frame((int)budget);
+        /* Chunked, not one big dos_cpu_frame(budget) call, for the same reason
+         * MAX is chunked: wdog_refresh() is otherwise called once per frame from
+         * main_dos.c, and the half-rate modes make a frame long. 286 12MHz at
+         * 25 fps is 50,400 instructions, ~30 ms at the measured cpi -- still
+         * inside WWDG1's few-hundred-ms window, but the margin had halved and
+         * this removes the hazard class rather than arguing about the margin.
+         *
+         * Cost at the common 60 Hz operating point is 14 extra loop iterations
+         * and 14 wdog_refresh() calls against 21,000 interpreted instructions,
+         * i.e. nothing -- verified on hardware: cpu% and ips are unchanged from
+         * the unchunked build.
+         *
+         * The total is exact: the final chunk is trimmed to the remainder, so a
+         * profile still executes precisely its budget and the emulated CPU speed
+         * is unaffected. */
+        unsigned int left = budget;
+        alive = 1;
+        while (left && alive) {
+            unsigned int n = left > DOS_MAX_CHUNK_INSN ? DOS_MAX_CHUNK_INSN : left;
+            alive = dos_cpu_frame((int)n);
+            wdog_refresh();
+            left -= n;
+        }
     } else {
         /* MAX: chunk to the deadline. SystemCoreClock is read live rather than
          * hardcoded because the firmware's PLL config is user-selectable
          * (Core/Src/main.c:480-499 -- 280 MHz stock, up to ~354 MHz
          * overclocked), so a constant here would silently mis-size the budget
          * on an overclocked unit. */
-        uint32_t deadline_cyc = (uint32_t)((SystemCoreClock / dos_screen_hz_sel)
+        uint32_t deadline_cyc = (uint32_t)((SystemCoreClock / dos_screen_fps_sel)
                                            / 100u * DOS_MAX_FRAME_PCT);
         alive = 1;
         do {
@@ -436,7 +517,7 @@ bool dos_prof_take_sample(dos_prof_sample_t *out)
 
     /* Absolute microseconds, so the cpu-vs-blit split can be compared against
      * the frame period directly rather than only as a ratio. That period is
-     * 1,000,000 / dos_screen_hz() us -- 16,667 at 60 Hz, 20,000 at 50,
+     * 1,000,000 / dos_screen_guest_fps() us -- 16,667 at 60 fps, 20,000 at 50,
      * 13,333 at 75 -- not a constant any more. */
     {
         uint32_t mhz = SystemCoreClock / 1000000u;   /* 280 stock */
