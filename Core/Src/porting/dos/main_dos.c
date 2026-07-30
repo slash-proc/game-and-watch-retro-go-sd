@@ -153,6 +153,9 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         common_emu_state.pause_after_frames = 0;
     }
 
+    /* Restore the persisted rate before applying it, so the core comes up at the
+     * user's frequency rather than switching a frame in. */
+    dos_screen_freq_init();
     dos_screen_apply_rate();
 
     extern unsigned int inst_counter;
@@ -165,12 +168,15 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * button problem. The table and the MAX-mode deadline loop live in
      * dos_cpu.c; this file only owns the menu row. */
     char dos_cpu_speed_value[DOS_CPU_VALUE_LEN];
+    char dos_screen_freq_value[DOS_SCREEN_FREQ_VALUE_LEN];
     odroid_dialog_choice_t options[] = {
         ODROID_DIALOG_CHOICE_SEPARATOR,
-        {200, "CPU speed", dos_cpu_speed_value, 1, &dos_cpu_speed_update_cb},
+        {200, "CPU speed",      dos_cpu_speed_value,    1, &dos_cpu_speed_update_cb},
+        {201, "Screen Freq Hz", dos_screen_freq_value,  1, &dos_screen_freq_update_cb},
         ODROID_DIALOG_CHOICE_LAST};
-    /* Populate the value string before the menu can be opened. */
+    /* Populate the value strings before the menu can be opened. */
     dos_cpu_speed_update_cb(&options[1], ODROID_DIALOG_INIT, 0);
+    dos_screen_freq_update_cb(&options[2], ODROID_DIALOG_INIT, 0);
 
     dos_cpu_speed_init();
 

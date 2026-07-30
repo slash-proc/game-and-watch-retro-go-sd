@@ -24,6 +24,7 @@
 #include "main.h"        /* wdog_refresh(), SystemCoreClock via CMSIS */
 #include "gw_lcd.h"      /* lcd_set_refresh_rate(), lcd_is_swap_pending()   */
 #include "gw_audio.h"    /* AUDIO_SAMPLE_RATE, AUDIO_BUFFER_LENGTH          */
+#include "odroid_settings.h"
 #include <stdio.h>
 
 /* 8086tiny. dos_cpu_frame(n) executes n instructions and returns 1, or returns
@@ -111,6 +112,46 @@ static int dos_cpu_profile_idx = 2;
 #define DOS_SCREEN_HZ_DEFAULT 60u
 static uint32_t dos_screen_hz_sel = DOS_SCREEN_HZ_DEFAULT;
 
+/* The only rates lcd_set_refresh_rate() can reach. Each is an exact PLL3 (N,R)
+ * pair against the fixed 392x255 LTDC frame (gw_lcd.c:549-567, main.c:764-768),
+ * so there is no fractional-N drift. Anything else falls into that function's
+ * `else { return; }` and SILENTLY leaves the panel where it was -- which is why
+ * this is a table of the reachable set rather than a free-form number.
+ *
+ * Deliberately no 25/30 entries: there is no 25 or 30 Hz LTDC clock, so those
+ * would have to be half-rate guest generation on a 50/60 Hz panel, which is a
+ * separate change (SCREEN-FREQ-PLAN.md stage 3) carrying an audio-buffer hazard
+ * -- 48000/25 = 1920 overruns audiobuffer_dma. See DOS_AUDIO_LEN below. */
+static const uint16_t dos_screen_rates[] = { 50, 60, 72, 75 };
+#define DOS_SCREEN_RATE_COUNT ((int)(sizeof dos_screen_rates / sizeof dos_screen_rates[0]))
+static int dos_screen_rate_idx = 1;      /* 60 Hz */
+
+/* App-scoped, not per-ROM: the panel rate is a display-comfort and throughput
+ * choice about the user's hardware, whereas CPU speed is a per-title
+ * compatibility choice. Deliberately NOT in the savestate, so the savestate
+ * format is untouched.
+ *
+ * !!! THIS DOES NOT ACTUALLY PERSIST YET, and the reason is not in this file.
+ * The generic key/value settings API is a STUB in this fork:
+ *   Core/Src/porting/odroid_settings.c:410  app_int32_get -> return default_value;
+ *   Core/Src/porting/odroid_settings.c:277  int32_set     -> empty body
+ * so the set is discarded and the get always answers the default. (The vendored
+ * upstream copy at retro-go-stm32/components/odroid/odroid_settings.c:189-199 IS
+ * cJSON-backed and does work -- but Makefile.common:441 compiles the Core/Src
+ * one, not that. Do not be misled by the header, which declares both alike.)
+ *
+ * Real persistence in this fork means adding a field to persistent_config_t
+ * (odroid_settings.c:58-88), which is CRC'd and version-gated: bumping
+ * `version` (currently 8) makes odroid_settings_init() take the "New config
+ * version, resetting settings" path and WIPE every user's launcher settings.
+ * That is a launcher-wide call, not a DOS-core one, so it is left to the
+ * reviewer. Measured consequence today: the row works and applies immediately,
+ * but the core comes up at 60 Hz on every launch.
+ *
+ * The calls below are kept because they are the correct API and become correct
+ * for free the moment a real store exists. They cost two no-op calls per launch. */
+#define DOS_SCREEN_HZ_KEY "dos_screen_hz"
+
 /* Instructions per frame for the active (profile, rate) pair. Cached because
  * both inputs change only from a menu callback, and dos_cpu_run_frame() is the
  * hot path. 0 means MAX. */
@@ -169,6 +210,63 @@ void dos_screen_apply_rate(void)
     /* Without this the first frame after a change looks like a huge stall and
      * the frame integrator clamps into skip mode (common.c:141-155). */
     common_emu_frame_loop_reset();
+}
+
+/* Restore the persisted rate. Must run before the first dos_screen_apply_rate()
+ * so the core comes up at the user's rate rather than switching one frame in.
+ *
+ * NOTE: today this always yields the default, because the settings store is a
+ * stub in this fork -- see DOS_SCREEN_HZ_KEY above before assuming a bug here.
+ * Verified on hardware: set(50) immediately followed by get() returned -1.
+ *
+ * The stored value is the Hz number, not the table index: an index would
+ * silently mean a different rate if the table ever gains or reorders an entry,
+ * and a stale index is unrecoverable for the user. An unrecognised Hz falls back
+ * to the default rather than being trusted -- lcd_set_refresh_rate() would
+ * ignore it and leave the panel and the frame budget disagreeing. */
+void dos_screen_freq_init(void)
+{
+    int32_t hz = odroid_settings_app_int32_get(DOS_SCREEN_HZ_KEY,
+                                               (int32_t)DOS_SCREEN_HZ_DEFAULT);
+    for (int i = 0; i < DOS_SCREEN_RATE_COUNT; i++) {
+        if (dos_screen_rates[i] == (uint16_t)hz) {
+            dos_screen_rate_idx = i;
+            dos_screen_hz_sel   = dos_screen_rates[i];
+            return;
+        }
+    }
+    /* Unknown/absent: leave the compiled-in default in place. */
+}
+
+bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
+                               odroid_dialog_event_t event, uint32_t repeat)
+{
+    (void)repeat;
+    int max = DOS_SCREEN_RATE_COUNT - 1;
+    bool changed = false;
+
+    if (event == ODROID_DIALOG_PREV) {
+        dos_screen_rate_idx = dos_screen_rate_idx > 0 ? dos_screen_rate_idx - 1 : max;
+        changed = true;
+    }
+    if (event == ODROID_DIALOG_NEXT) {
+        dos_screen_rate_idx = dos_screen_rate_idx < max ? dos_screen_rate_idx + 1 : 0;
+        changed = true;
+    }
+
+    if (changed) {
+        dos_screen_hz_sel = dos_screen_rates[dos_screen_rate_idx];
+        odroid_settings_app_int32_set(DOS_SCREEN_HZ_KEY, (int32_t)dos_screen_hz_sel);
+        /* Applied immediately, like every other option row in this tree. It is a
+         * PLL3 write plus an audio restart; there is nothing to defer to a core
+         * restart. Safe from inside the menu: the overlay repaints through the
+         * core's repaint callback afterwards, and apply_rate() drains any
+         * pending swap before moving the pixel clock. */
+        dos_screen_apply_rate();
+    }
+
+    snprintf(option->value, DOS_SCREEN_FREQ_VALUE_LEN, "%u", (unsigned)dos_screen_hz_sel);
+    return event == ODROID_DIALOG_ENTER;
 }
 
 /* ---- MAX mode -------------------------------------------------------------

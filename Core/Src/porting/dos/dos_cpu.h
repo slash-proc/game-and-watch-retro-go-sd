@@ -33,6 +33,18 @@ uint32_t dos_screen_hz(void);
  * changes. */
 void dos_screen_apply_rate(void);
 
+/* Restore the persisted screen frequency (app setting "dos_screen_hz"). Call
+ * before the first dos_screen_apply_rate(). */
+void dos_screen_freq_init(void);
+
+/* Minimum size of the char buffer handed to the screen-frequency row. */
+#define DOS_SCREEN_FREQ_VALUE_LEN 8
+
+/* Options-menu row. Cycles 50/60/72/75 with left/right, applies and persists
+ * the choice immediately. */
+bool dos_screen_freq_update_cb(odroid_dialog_choice_t *option,
+                               odroid_dialog_event_t event, uint32_t repeat);
+
 /* Minimum size of the char buffer handed to the options row as `value`. */
 #define DOS_CPU_VALUE_LEN 20
 
