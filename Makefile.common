@@ -2296,6 +2296,14 @@ distclean: clean
 # instructions.
 DOS_CFLAGS = -fsigned-char
 
+# -O3 for the 8086tiny interpreter only. Measured on hardware at the MS-DOS idle
+# prompt: cpi 207 -> 194 (-6.3%), for +3.8 KB of core (29,873 -> 33,641 B) against
+# ~57 KB of RAM_EMU headroom. This is core-local on purpose -- retro-go as a whole
+# does not tolerate -O3 (see the Lua dispatch-loop note above), and the DOS rule
+# below is the only place it applies. Do NOT add -fno-gcse: measured 210 alone and
+# 208 combined, i.e. it cancels the -O3 win while keeping most of the size cost.
+DOS_CFLAGS += -O3
+
 # Diagnostics knob for the DOS core, off by default. Pass on the make command
 # line, e.g. DOS_CFLAGS_EXTRA="-DDOS_DEBUG_STATUS=2" for a once-a-second ASCII
 # dump of the guest's 0xB8000 text buffer, or "-DDOS_TRACE_INSNS=200" for an
