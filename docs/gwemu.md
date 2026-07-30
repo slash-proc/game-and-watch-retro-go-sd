@@ -17,13 +17,40 @@ Firmware build tools plus a few utilities for the wrapper scripts.
 ### Ubuntu / Debian
 ```bash
 sudo apt-get install -y build-essential gcc-arm-none-eabi gdb-multiarch \
-    python3 python3-pip curl wget unzip mtools parted
+    python3 python3-pip curl wget unzip mtools
 ```
 
 ### macOS
+
 ```bash
-brew install arm-none-eabi-gcc arm-none-eabi-gdb python3 curl wget unzip mtools
+brew install mtools wget python3
 ```
+
+**Do not `brew install arm-none-eabi-gcc`.** The homebrew-core formula is built
+without newlib, so it has no libc at all and the very first compile dies with
+`fatal error: stdint.h: No such file or directory`. Use Arm's own toolchain
+instead — either the cask (needs an admin password for its `.pkg`):
+
+```bash
+brew install --cask gcc-arm-embedded
+```
+
+or the tarball, which needs no admin rights:
+
+```bash
+mkdir -p ~/opt && cd ~/opt
+curl -fSLO https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-darwin-x86_64-arm-none-eabi.tar.xz
+tar xf arm-gnu-toolchain-14.2.rel1-darwin-x86_64-arm-none-eabi.tar.xz
+export PATH="$HOME/opt/arm-gnu-toolchain-14.2.rel1-darwin-x86_64-arm-none-eabi/bin:$PATH"
+```
+
+(Swap `darwin-x86_64` for `darwin-arm64` on Apple Silicon. Alternatively, leave
+it off `PATH` and pass `GCC_PATH=<...>/bin` on the make command line.) The
+bundled `arm-none-eabi-gdb` works as-is, so `gdb-multiarch` is not needed.
+
+`parted` is deliberately absent from both lists: it is Linux-only and has no
+Homebrew formula, so the SD image is built by `scripts/make_sdcard_image.py`
+instead. Nothing else in this workflow needs it.
 
 ## Quick start
 
@@ -36,6 +63,11 @@ make -j$(nproc) <your usual params> release gwemu_release
 make -j$(nproc) <your usual params> frogfs_image littlefs_image gwemu_release
 ./scripts/run_gwemu.sh
 ```
+
+> `nproc` is GNU coreutils and does not exist on macOS — use
+> `-j$(sysctl -n hw.ncpu)` there, or just a literal `-j8`. (Inside the Makefile
+> this is already handled by `$(NPROC)`; it is only the command line you type
+> that needs adjusting.)
 
 That is the whole workflow. The emulator boots, retro-go's log appears on your terminal,
 and if the firmware faults you get a full exception report instead of a frozen screen.
@@ -411,9 +443,17 @@ Until then, QMP is the working alternative for scripted input:
 ```
 
 `send-key` needs `hold-time: 600`; 200 ms is too short for the launcher to register a
-press. The gwemu key map lives at `~/.local/share/gwemu/gwemu/gnw-input.ini` as
-QKeyCode indices — A=`x`, B=`z`, Game=`g`, Time=`t`, Pause=`esc`, Power=`p`,
-Start=`ret`, Select=`shift_r`.
+press. The gwemu key map is `gnw-input.ini`, holding QKeyCode indices — A=`x`, B=`z`,
+Game=`g`, Time=`t`, Pause=`esc`, Power=`p`, Start=`ret`, Select=`shift_r`. It lives
+in gwemu's per-platform settings directory:
+
+| | path |
+|---|---|
+| Linux | `~/.local/share/gwemu/gwemu/gnw-input.ini` |
+| macOS | `~/Library/Application Support/gwemu/gwemu/gnw-input.ini` |
+
+gwemu prints the directory it settled on at startup (`gwemu_settings_get_base_path:`),
+so check the log rather than guessing if it is not where you expect.
 
 > `-display gwemu` fails on X11 MIT-SHM in some environments (notably headless or
 > containerised sessions). `-display none` works, and QMP `screendump` and `send-key`
