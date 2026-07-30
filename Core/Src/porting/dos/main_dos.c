@@ -9,6 +9,7 @@
 #include "common.h"
 #include "appid.h"
 #include "rg_i18n.h"     /* ODROID_DIALOG_CHOICE_SEPARATOR */
+#include "odroid_settings.h" /* odroid_settings_cpu_oc_level_get() */
 #include "dos_video.h"
 #include "dos_input.h"
 #include "dos_cpu.h"
@@ -98,6 +99,31 @@ static void dos_debug_dump_text(void) { }
  * return below logs its own reason first. */
 void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     printf("Initializing 8086tiny...\n");
+
+    /* Raise the core clock, like every other core in this tree does on entry
+     * (main_nes_fceu.c:893, main_msx.c:2045, main_amstrad.c:1061,
+     * main_gwenesis.c:627). DOS was the only core still running at the stock
+     * 280 MHz. Level 2 is 340 MHz core / 97 MHz OSPI (Core/Src/main.c:446-460);
+     * level 3 (~353 MHz) is deliberately NOT used -- "maximum speed could cause
+     * random crash so it should not be used" (main_gwenesis.c:626), and DOS is
+     * the one core doing live SD reads/writes of the .dsk image during
+     * emulation (8086tiny.c OPCODE 48 DISK_READ/DISK_WRITE), so the OSPI/SD
+     * path is under more sustained stress here than elsewhere.
+     *
+     * Guarded on oc_level == 0 so a user who picked an overclock in the
+     * launcher menu keeps it -- we only lift the default, never lower a choice.
+     *
+     * MUST come before dos_screen_apply_rate(): SystemClock_Config()
+     * reprograms PLL3 back to its boot value (60 Hz, main.c:536-543) as part of
+     * the peripheral clock setup, which would silently undo
+     * lcd_set_refresh_rate(). It also updates SystemCoreClock, which the MAX
+     * profile's deadline reads live (dos_cpu.c:389). It does NOT change the
+     * emulated CPU speed: the fixed profiles are instructions/second and the
+     * per-frame budget is derived from the refresh rate, not from the host
+     * clock -- a faster host shows up as lower cpu%, not as a faster guest. */
+    if (odroid_settings_cpu_oc_level_get() == 0) {
+        SystemClock_Config(2);
+    }
 
     odroid_system_init(APPID_DOS, AUDIO_SAMPLE_RATE);
 
