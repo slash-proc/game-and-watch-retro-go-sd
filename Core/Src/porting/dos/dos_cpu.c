@@ -61,7 +61,16 @@ typedef struct {
 static const dos_cpu_profile_t dos_cpu_profiles[] = {
     { "XT 4.77MHz",  6700 },   /* ~0.40 MIPS -- 8088-era, for 1984 titles   */
     { "Turbo 8MHz", 11000 },   /* ~0.66 MIPS -- 8086 turbo XT               */
-    { "286 12MHz",  20000 },   /* ~1.20 MIPS -- the historical default      */
+    /* 21000 was measured, not guessed. Sweeping ipf on hardware at the MS-DOS
+     * idle prompt (cpi 208): 20000 -> cpu 89%/idle 7%; 21000 -> cpu 93%/idle
+     * 2-3%; 21500 -> cpu 96%/idle 0% (the true edge); 22000 -> cpu 98% and the
+     * blit count collapses to 33-35 of 64, i.e. HALF THE VISUAL FRAMES DROPPED.
+     * 21000 is the highest step that keeps real margin.
+     *
+     * Watch the blit count, not frames=N/Mms, when re-tuning this:
+     * common_emu_frame_loop() skips the screen draw when it falls behind, so
+     * frames= stays a healthy 64/1066ms right through the drops. */
+    { "286 12MHz",  21000 },   /* ~1.26 MIPS -- the historical default      */
     { "MAX",            0 },   /* whatever the STM32H7B0 sustains           */
 };
 
