@@ -1367,12 +1367,29 @@ void mpu_set_lcd_pool_uncached_range(uint32_t framebuffer_bytes)
     r5_size_kb =   8; r5_enum = MPU_REGION_SIZE_8KB;
                       r6_enum = MPU_REGION_SIZE_4KB;
   } else {
-    /* LUT8 — exactly 154 KB framebuffer footprint, leaves the 146 KB
-     * bonus area cacheable by default (CPU sees engine-accessible
-     * memory as Normal Write-back). */
+    /* LUT8 — exactly 150 KB, which is the true framebuffer footprint:
+     * 2 * 320 * 240 = 153,600 bytes. Leaves the 150 KB bonus area cacheable
+     * by default (CPU sees engine-accessible memory as Normal Write-back).
+     *
+     * This used to decompose to 128+16+8+2 = 154 KB and the comment claimed
+     * that was the footprint. It was 4 KB too much, and the overhang was not
+     * harmless: overlay cores start at __RAM_UC_START__ + 2*320*240 =
+     * 0x24025800, i.e. exactly 150 KB, so the extra 4 KB made the first 4 KB
+     * of the resident core uncached AND non-bufferable. For the DOS core that
+     * caught both CP437 font tables — dos_font_8x8 (0x24025a78, 2 KB, wholly
+     * inside) and dos_font_4x8 (0x24026278, 1,416 of 2,048 bytes inside) —
+     * which the text renderer reads ~2,000 times per repaint and which could
+     * therefore never cache. CGA graphics never touch the fonts, which is the
+     * asymmetry that made text blit cost 1,250 us against CGA's 308 us.
+     *
+     * 128+16+4+2 keeps the same four regions (3..6) and every region stays
+     * aligned to its own size: 128K@0x24000000, 16K@0x24020000, 4K@0x24024000,
+     * 2K@0x24025000, ending exactly at 0x24025800. Do not pad this window
+     * "for safety" — anything past the framebuffers is resident core code and
+     * data. */
     r3_size_kb = 128; r3_enum = MPU_REGION_SIZE_128KB;
     r4_size_kb =  16; r4_enum = MPU_REGION_SIZE_16KB;
-    r5_size_kb =   8; r5_enum = MPU_REGION_SIZE_8KB;
+    r5_size_kb =   4; r5_enum = MPU_REGION_SIZE_4KB;
                       r6_enum = MPU_REGION_SIZE_2KB;
   }
 
