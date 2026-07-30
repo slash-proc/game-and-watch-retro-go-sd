@@ -109,8 +109,29 @@ static int dos_cpu_profile_idx = 2;
 /* Share of the frame period MAX mode may spend inside the CPU. The rest pays
  * for the blit, the launcher's input/menu work, and leaves common_emu_sound_sync
  * something to wait on -- if the CPU eats the whole period, audio pacing has no
- * slack and the frame integrator starts declaring skips. */
-#define DOS_MAX_FRAME_PCT 85
+ * slack and the frame integrator starts declaring skips.
+ *
+ * 88 was measured on hardware at the MS-DOS idle prompt (cpi 204). It was 85,
+ * which made MAX *slower than the 286 profile*: 85% of 16667us is a 14167us
+ * deadline, a chunk costs ~1090us, so the loop stopped after 13 chunks =
+ * ipf 19500 against the 286 profile's 21000. Sweep (ipf / cpu% / blit count of
+ * 64): 85 -> 19500 / 85% / 61-64; 88 -> 20950 / 92% / 60-64; 90 -> 21000 / 92%
+ * / 60-64; 92 -> 21300 / 93% / 50-64 (dips under putchar load); 94 -> 22450 /
+ * 98% / 16-30, i.e. two thirds of the visual frames dropped. frames=64 and rs=0
+ * at every point -- as ever, the blit count is the frame-drop indicator, not
+ * frames=.
+ *
+ * 90 is the highest fully clean step; 88 is one step back for margin and costs
+ * nothing, because chunk quantisation puts 88 and 90 on the same 14-chunk
+ * operating point. A 15th chunk needs a deadline past ~92.3%, so 88 sits 4.3
+ * points below the next step up and 6 points below the measured failure.
+ *
+ * The chunk loop itself was left alone deliberately. Trimming the final chunk
+ * to fit the deadline would remove the up-to-one-chunk overshoot, but the
+ * overshoot is what currently reaches 92% CPU from an 88% deadline -- a precise
+ * loop would need the constant raised to the same measured-safe 92% to break
+ * even. No throughput to gain, so no extra arithmetic on the hot path. */
+#define DOS_MAX_FRAME_PCT 88
 
 /* ---- Profiling accumulators ----------------------------------------------
  *
