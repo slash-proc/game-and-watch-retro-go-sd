@@ -199,10 +199,6 @@ static bool     initialised = false;
 static uint8_t  last_colsel = 0xFF;   /* last port 0x3D9 value programmed  */
 static uint8_t  last_gfx_mode = 0xFF; /* which palette rule that was for   */
 
-/* Forward declaration: the dirty-cell text cache (defined near blit_text)
- * must be invalidated from dos_video_init() and on mode/geometry changes. */
-static void text_cache_invalidate(void);
-
 static inline uint16_t bda16(unsigned addr)
 {
     const unsigned char *p = dos_mem_ptr(addr);
@@ -316,7 +312,6 @@ void dos_video_init(void)
     program_clut(gfx_default);
 
     clear_framebuffers();
-    text_cache_invalidate();
 
     last_mode = 0xFF;
     last_cols = 0;
@@ -329,95 +324,8 @@ void dos_video_init(void)
  * Text rendering
  * ------------------------------------------------------------------------- */
 
-/* ---------------------------------------------------------------------------
- * Dirty-cell cache
- *
- * The text screen is redrawn wholesale every frame even when nothing changed,
- * which is most of the time at an idle prompt. Cache what was last painted
- * into each of the TWO physical framebuffers separately -- the display is
- * double-buffered and alternates every frame, so a single shadow would only
- * ever agree with one of the two buffers; a cell that changed once would then
- * flicker forever between the new content (buffer A) and stale content
- * (buffer B). Slot index is resolved against the STABLE buffer identity --
- * gw_lcd.h's framebuffer1/framebuffer2 (0 => framebuffer1, 1 => framebuffer2)
- * -- never against lcd_get_active_buffer()/lcd_get_inactive_buffer(), whose
- * active/inactive ROLE swaps every frame. Comparing against "inactive" was
- * tried first and was wrong: dos_video_blit() always renders into the
- * buffer lcd_get_active_buffer() returns (see the entry point below), so
- * `fb == lcd_get_inactive_buffer()` is never true, every frame resolves to
- * the same slot, and the two physical buffers silently share one shadow --
- * exactly the flicker bug this cache exists to avoid, just reached by a
- * different route.
- *
- * gw_lcd.c's lcd_set_buffers() can REPOINT framebuffer1/framebuffer2 on a
- * layout change; text_cache_track_buffers() below detects that and forces a
- * full invalidation so no shadow is ever compared against the wrong buffer.
- *
- * The signature is the EFFECTIVE (ch, fg, bg) actually used to paint the
- * cell -- fg already has the blink substitution applied. That means a blink
- * phase flip is just an ordinary signature change for every blinking cell;
- * no separate blink-invalidation pass is needed.
- *
- * The cursor is handled outside the cache entirely (see blit_text): it is
- * force-repainted every frame at both its current and previous cell,
- * regardless of cache hit/miss, so blinking and movement are never masked by
- * "nothing changed" at the character level.
- * ------------------------------------------------------------------------- */
-#define TEXT_SHADOW_MAX_COLS 80
-
-static uint32_t text_shadow[2][DOS_TEXT_ROWS][TEXT_SHADOW_MAX_COLS];
-static bool     text_shadow_valid = false; /* false forces a full repaint    */
-
-static int  cursor_prev_row[2]     = { -1, -1 };
-static int  cursor_prev_col[2]     = { -1, -1 };
-static bool cursor_prev_visible[2] = { false, false };
-
-/* Sentinel: real signatures are (ch<<8)|(fg<<4)|bg, at most 16 bits, so this
- * 32-bit value can never collide with one. */
-#define TEXT_SIG_INVALID 0xFFFFFFFFu
-
-static void text_cache_invalidate(void)
-{
-    for (unsigned s = 0; s < 2; s++) {
-        for (unsigned r = 0; r < DOS_TEXT_ROWS; r++)
-            for (unsigned c = 0; c < TEXT_SHADOW_MAX_COLS; c++)
-                text_shadow[s][r][c] = TEXT_SIG_INVALID;
-        cursor_prev_row[s] = -1;
-        cursor_prev_col[s] = -1;
-        cursor_prev_visible[s] = false;
-    }
-    text_shadow_valid = true;
-}
-
-/* framebuffer1/framebuffer2 (gw_lcd.h) can be repointed by lcd_set_buffers()
- * on a layout change. Track what they were as of the last blit and force a
- * full invalidation the moment either one moves, so a shadow can never be
- * compared against pixels it did not actually paint. */
-static pixel_t *text_cache_fb1_seen = NULL;
-static pixel_t *text_cache_fb2_seen = NULL;
-
-static void text_cache_track_buffers(void)
-{
-    if (framebuffer1 != text_cache_fb1_seen || framebuffer2 != text_cache_fb2_seen) {
-        text_cache_invalidate();
-        text_cache_fb1_seen = framebuffer1;
-        text_cache_fb2_seen = framebuffer2;
-    }
-}
-
 static void blit_text(uint8_t *fb, uint16_t cols)
 {
-    if (!text_shadow_valid)
-        text_cache_invalidate();
-    text_cache_track_buffers();
-
-    /* Which physical buffer are we painting into this frame? Identified by
-     * the STABLE framebuffer1/framebuffer2 pointers (0 => framebuffer1,
-     * 1 => framebuffer2, per gw_lcd.h), not by active/inactive role, which
-     * swaps every frame -- see the comment block above. */
-    const unsigned slot = (fb == (uint8_t *)framebuffer2) ? 1 : 0;
-    uint32_t (*shadow)[TEXT_SHADOW_MAX_COLS] = text_shadow[slot];
-
     const uint8_t (*font)[8] = (cols >= 80) ? dos_font_4x8 : dos_font_8x8;
     const unsigned cell_w    = (cols >= 80) ? 4 : 8;
     const bool     narrow    = (cols >= 80);
@@ -459,33 +367,6 @@ static void blit_text(uint8_t *fb, uint16_t cols)
 
     uint8_t *dst_top = fb + DOS_LETTERBOX * DOS_LCD_WIDTH;
 
-    /* Cursor. Shape comes from BDA 0x460 (end) / 0x461 (start) -- reversed
-     * order, matching real hardware and bios.asm:3646-3647. start > end means
-     * the cursor is HIDDEN, which is how software turns it off; treating it as
-     * an inverted range would paint a block over the character instead.
-     *
-     * Computed up front (rather than after the cell loop, as before) so the
-     * cache-skip test below can force-repaint the cursor's current AND
-     * previous cell regardless of whether the underlying character changed --
-     * the cursor overlay itself is not part of a cell's cached signature, so
-     * without this a cache hit would leave a blink transition or a cursor
-     * move undrawn. */
-    uint8_t c_end   = bda8(BDA_CUR_V_END);
-    uint8_t c_start = bda8(BDA_CUR_V_START);
-    bool cursor_visible = (c_start <= c_end && c_start < 8 && blink_on);
-    unsigned cx = 0, cy = 0;
-
-    if (cursor_visible) {
-        cx = bda8(BDA_CURPOS + page * 2);
-        cy = bda8(BDA_CURPOS + page * 2 + 1);
-        if (cx >= cols || cy >= DOS_TEXT_ROWS)
-            cursor_visible = false;
-    }
-
-    const bool have_prev_cursor = cursor_prev_visible[slot];
-    const unsigned prev_cx = (unsigned)cursor_prev_col[slot];
-    const unsigned prev_cy = (unsigned)cursor_prev_row[slot];
-
     for (unsigned row = 0; row < DOS_TEXT_ROWS; row++) {
         const unsigned char *cell = TEXT_ROW_PTR(row);
         uint8_t *dst_row = dst_top + row * 8 * DOS_LCD_WIDTH;
@@ -511,23 +392,6 @@ static void blit_text(uint8_t *fb, uint16_t cols)
             } else if (attr & 0x80) {
                 bg |= 0x08;             /* bit 7 = background intensity */
             }
-
-            /* Dirty-cell cache. The signature is the EFFECTIVE fg/bg (post
-             * blink substitution), so a blink-phase flip is an ordinary
-             * signature change for every blinking cell -- no separate
-             * invalidation pass needed. Skip the repaint on a cache hit,
-             * UNLESS this cell is the cursor's current or previous position
-             * for this physical buffer, in which case it must always be
-             * repainted (see cursor_visible/have_prev_cursor above). */
-            const uint32_t sig = ((uint32_t)ch << 8) | ((uint32_t)fg << 4) | bg;
-            const bool is_cursor_cell =
-                (cursor_visible && row == cy && col == cx) ||
-                (have_prev_cursor && row == prev_cy && col == prev_cx);
-
-            if (!is_cursor_cell && shadow[row][col] == sig)
-                continue;
-
-            shadow[row][col] = sig;
 
             const uint32_t fgw = splat(fg);
             const uint32_t bgw = splat(bg);
@@ -557,25 +421,33 @@ static void blit_text(uint8_t *fb, uint16_t cols)
         }
     }
 
-    if (cursor_visible) {
-        const unsigned char *cell = TEXT_ROW_PTR(cy);
-        uint8_t fg = cell[cx * 2 + 1] & 0x0F;
-        uint32_t fgw = splat(fg);
+    /* Cursor. Shape comes from BDA 0x460 (end) / 0x461 (start) -- reversed
+     * order, matching real hardware and bios.asm:3646-3647. start > end means
+     * the cursor is HIDDEN, which is how software turns it off; treating it as
+     * an inverted range would paint a block over the character instead. */
+    uint8_t c_end   = bda8(BDA_CUR_V_END);
+    uint8_t c_start = bda8(BDA_CUR_V_START);
 
-        uint8_t *dst = dst_top + cy * 8 * DOS_LCD_WIDTH + cx * cell_w;
-        unsigned y_end = (c_end < 7) ? c_end : 7;
+    if (c_start <= c_end && c_start < 8 && blink_on) {
+        unsigned cx = bda8(BDA_CURPOS + page * 2);
+        unsigned cy = bda8(BDA_CURPOS + page * 2 + 1);
 
-        for (unsigned y = c_start; y <= y_end; y++) {
-            uint32_t *p = (uint32_t *)(dst + y * DOS_LCD_WIDTH);
-            p[0] = fgw;
-            if (!narrow)
-                p[1] = fgw;
+        if (cx < cols && cy < DOS_TEXT_ROWS) {
+            const unsigned char *cell = TEXT_ROW_PTR(cy);
+            uint8_t fg = cell[cx * 2 + 1] & 0x0F;
+            uint32_t fgw = splat(fg);
+
+            uint8_t *dst = dst_top + cy * 8 * DOS_LCD_WIDTH + cx * cell_w;
+            unsigned y_end = (c_end < 7) ? c_end : 7;
+
+            for (unsigned y = c_start; y <= y_end; y++) {
+                uint32_t *p = (uint32_t *)(dst + y * DOS_LCD_WIDTH);
+                p[0] = fgw;
+                if (!narrow)
+                    p[1] = fgw;
+            }
         }
     }
-
-    cursor_prev_visible[slot] = cursor_visible;
-    cursor_prev_col[slot] = cursor_visible ? (int)cx : -1;
-    cursor_prev_row[slot] = cursor_visible ? (int)cy : -1;
 
     #undef TEXT_ROW_PTR
 }
@@ -1125,7 +997,6 @@ void dos_video_blit(void)
         /* A geometry change leaves stale pixels from the previous mode, and a
          * 200-row mode does not overwrite bars a previous mode may have used. */
         clear_framebuffers();
-        text_cache_invalidate();
         last_mode = mode;
         last_cols = cols;
     }
