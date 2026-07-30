@@ -9,6 +9,7 @@
 #include "common.h"
 #include "appid.h"
 #include "rg_i18n.h"     /* ODROID_DIALOG_CHOICE_SEPARATOR */
+#include "odroid_settings.h" /* odroid_settings_cpu_oc_level_get() */
 #include "dos_video.h"
 #include "dos_input.h"
 #include "dos_cpu.h"
@@ -99,6 +100,31 @@ static void dos_debug_dump_text(void) { }
 void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     printf("Initializing 8086tiny...\n");
 
+    /* Raise the core clock, like every other core in this tree does on entry
+     * (main_nes_fceu.c:893, main_msx.c:2045, main_amstrad.c:1061,
+     * main_gwenesis.c:627). DOS was the only core still running at the stock
+     * 280 MHz. Level 2 is 340 MHz core / 97 MHz OSPI (Core/Src/main.c:446-460);
+     * level 3 (~353 MHz) is deliberately NOT used -- "maximum speed could cause
+     * random crash so it should not be used" (main_gwenesis.c:626), and DOS is
+     * the one core doing live SD reads/writes of the .dsk image during
+     * emulation (8086tiny.c OPCODE 48 DISK_READ/DISK_WRITE), so the OSPI/SD
+     * path is under more sustained stress here than elsewhere.
+     *
+     * Guarded on oc_level == 0 so a user who picked an overclock in the
+     * launcher menu keeps it -- we only lift the default, never lower a choice.
+     *
+     * MUST come before dos_screen_apply_rate(): SystemClock_Config()
+     * reprograms PLL3 back to its boot value (60 Hz, main.c:536-543) as part of
+     * the peripheral clock setup, which would silently undo
+     * lcd_set_refresh_rate(). It also updates SystemCoreClock, which the MAX
+     * profile's deadline reads live (dos_cpu.c:389). It does NOT change the
+     * emulated CPU speed: the fixed profiles are instructions/second and the
+     * per-frame budget is derived from the refresh rate, not from the host
+     * clock -- a faster host shows up as lower cpu%, not as a faster guest. */
+    if (odroid_settings_cpu_oc_level_get() == 0) {
+        SystemClock_Config(2);
+    }
+
     odroid_system_init(APPID_DOS, AUDIO_SAMPLE_RATE);
 
     /* NOTE: the LCD is already in LUT8 mode and mem[] is already zeroed by the
@@ -153,9 +179,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         common_emu_state.pause_after_frames = 0;
     }
 
-    lcd_set_refresh_rate(60);
-    common_emu_state.frame_time_10us = (uint16_t)(100000 / 60 + 0.5f);
-    audio_start_playing(AUDIO_SAMPLE_RATE / 60);
+    /* Restore the persisted rate before applying it, so the core comes up at the
+     * user's frequency rather than switching a frame in. */
+    dos_screen_freq_init();
+    dos_screen_apply_rate();
 
     extern unsigned int inst_counter;
     extern unsigned short reg_ip;
@@ -167,12 +194,15 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * button problem. The table and the MAX-mode deadline loop live in
      * dos_cpu.c; this file only owns the menu row. */
     char dos_cpu_speed_value[DOS_CPU_VALUE_LEN];
+    char dos_screen_freq_value[DOS_SCREEN_FREQ_VALUE_LEN];
     odroid_dialog_choice_t options[] = {
         ODROID_DIALOG_CHOICE_SEPARATOR,
-        {200, "CPU speed", dos_cpu_speed_value, 1, &dos_cpu_speed_update_cb},
+        {200, "CPU speed",      dos_cpu_speed_value,    1, &dos_cpu_speed_update_cb},
+        {201, "Screen Freq Hz", dos_screen_freq_value,  1, &dos_screen_freq_update_cb},
         ODROID_DIALOG_CHOICE_LAST};
-    /* Populate the value string before the menu can be opened. */
+    /* Populate the value strings before the menu can be opened. */
     dos_cpu_speed_update_cb(&options[1], ODROID_DIALOG_INIT, 0);
+    dos_screen_freq_update_cb(&options[2], ODROID_DIALOG_INIT, 0);
 
     dos_cpu_speed_init();
 
@@ -223,7 +253,7 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
         ++dbg_frames;
 #if DOS_DEBUG_STATUS > 0
-        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames ~= 1s */
+        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames: ~1.07s at 60Hz */
             /* BDA clk_dtimer (guest 0x40:0x6C = 0x46C) is the 32-bit BIOS
              * tick counter. It must advance at ~18.2 Hz; printing it next to
              * HAL_GetTick() makes the rate directly measurable from the log
@@ -254,7 +284,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
          * specific game, a specific mode) are exactly the ones that are
          * inconvenient to reproduce." It also means measuring MAX needs no debug
          * build, so there is no debug flag to accidentally leave switched on. */
-        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames ~= 1s */
+        /* Every 64 frames. That is ~1.07 s at 60 Hz, ~1.28 s at 50 and ~0.85 s
+         * at 75 -- the window length is measured (prof_win_ms), not assumed, so
+         * only the reporting cadence moves with the refresh rate. */
+        if ((dbg_frames & 0x3F) == 0) {
             dos_prof_sample_t s;
             if (dos_prof_take_sample(&s)) {
                 printf("DOS: prof %s @%luMHz ipf=%lu ips=%lu cpi=%lu | cpu=%u%% (%luus/f) "
@@ -289,9 +322,19 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         }
 
         /* The only place this loop deliberately waits. If idle_pct comes back at
-         * ~0 there is no headroom left and the frame is CPU/blit bound. */
+         * ~0 there is no headroom left and the frame is CPU/blit bound.
+         *
+         * Once per panel refresh, so dos_screen_sync_edges() times per guest
+         * frame: 1 in the full-rate modes, 2 in "25 (50)" and "30 (60)". Each
+         * common_emu_sound_sync() consumes exactly one SAI DMA half-buffer edge
+         * (common.c:495-511), and the buffer is sized for the PANEL rate, so
+         * half rate is paid for in edges rather than in a longer buffer.
+         * Lengthening the buffer instead would need 48000/25 = 1920 samples
+         * against AUDIO_BUFFER_LENGTH == 1077 -- a DMA write off the end of
+         * .audio. See DOS_AUDIO_LEN in dos_cpu.c. */
         dos_prof_idle_begin();
-        common_emu_sound_sync(false);
+        for (uint8_t e = dos_screen_sync_edges(); e; e--)
+            common_emu_sound_sync(false);
         dos_prof_idle_end();
     }
 }
