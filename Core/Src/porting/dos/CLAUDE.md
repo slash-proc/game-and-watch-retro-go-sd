@@ -1,11 +1,14 @@
 # MS-DOS core (8086tiny) — porting notes
 
-Status: **early**. It builds and links, the launcher shows an MS-DOS tab, and the CPU core
-is split into init/step so it can be driven per frame. Nothing is displayed, no input is
-wired, and selecting a ROM does nothing yet.
+Status: **boots to a DOS prompt.** MS-DOS 6.22 and FreeDOS both reach `A:\>` with no
+input support, because the boot-time prompts that looked like key waits turned out to be
+timeouts. Text mode renders in authentic CP437; the CGA blit is written and unit-verified
+but has not yet rendered a real game. No input, no audio.
 
-`external/8086tiny/GNW_PORT.md` is the original plan document and is **out of date** —
-several things it proposes were tried and abandoned. Trust this file where they disagree.
+**This file is a summary and a list of traps. `external/8086tiny/STATUS.md` is the
+authority on current state** — it is maintained per-change and this one is not.
+`external/8086tiny/GNW_PORT.md` is the original plan document and is **stale**; several
+things it proposes were tried and abandoned.
 
 ## Where the documentation lives — read this first
 
@@ -68,57 +71,43 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
 
 ## What is missing, roughly in order
 
-1. **It is not an overlay core.** Every other emulator links into a `.overlay_<name>`
-   section that is streamed from SD into `._ram_exec` at launch; DOS currently links
-   straight into internal flash. Follow the pattern at
-   `STM32H7B0VBTx_SDCARD.ld:918-938` (`.overlay_tama` / `.overlay_tama_bss`), plus the
-   `EXTRACT_INTERNAL_CORE_BIN_WITH_HEADER` line in `Makefile.common:1573` and the `sdpush`
-   line near `:1669`. Until then it burns scarce internal flash and cannot get a sensible
-   RAM budget.
-2. **Nothing dispatches to it.** `rg_emulators.c` has no `strcmp(system_name, "MS-DOS")`
-   branch, so picking a ROM falls through the chain harmlessly and returns. Dispatch is
-   now table-driven (`emu_dispatch_t` + `run_internal_emu()`, `rg_emulators.c:1394`), so
-   adding DOS is one struct line alongside `emu_tama` (`:1517`) and one `else if` (`:1673`)
-   — cheaper than it used to be. Add both once the overlay exists.
-3. **The memory map is unresolved** — see below.
-4. **Display.** `dos_blit()` is empty. See `external/8086tiny/docs/` for the full design.
-   The headline finding: **upstream 8086tiny has no graphical text mode at all** — it
-   renders only in graphics mode (`8086tiny.c:733`) and sends text mode to stdout via
-   termios. DOS boots to text mode, so the *primary* display path does not exist upstream
-   and must be written from scratch. The video aperture is 64 KB at `0xB0000` (not 32 KB
-   at `0xB8000`): `8086tiny.c:754` uses Hercules bank 1 at `B000:0` and CGA/bank 2 at
-   `B800:0`.
-5. **Input and audio.** Neither is wired.
+1. **Input.** Nothing is wired. It is no longer needed to *reach* a prompt — both DOSes
+   boot to `A:\>` on their own — but it is needed to use one. Design is settled in
+   `external/8086tiny/docs/input-roadmap.md`: SDL word format into `mem[0x4A6]` plus
+   `pc_interrupt(7)`, the BIOS translates via `a2scan_tbl` into `kbbuf`. Only eight
+   physical inputs exist, so the on-screen keyboard in the reserved letterbox bars is
+   mandatory, not optional.
+2. **Graphics modes end-to-end.** The CGA blit is written and unit-verified (75 checks,
+   mutation-tested) but has never rendered a real game. The most likely failure is
+   **mode detection**: nothing has confirmed BDA `0x449` reads 4 when a game sets mode 4,
+   and a game that programs the adapter directly instead of calling `INT 10h` will get
+   text mode. 1984 titles do exactly that.
+3. **Audio.** Not wired. PC speaker only for v1; see `docs/audio-roadmap.md`.
+4. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
+   all, so a game setting its background that way gets defaults. And
+   `int10_switch_to_cga_gfx` clears with `char=0/attr=7`, which as pixel data is a stripe
+   pattern for one frame.
+5. **CPU speed is unmeasured.** `dos_cpu_frame()`'s cycle budget is a placeholder.
+   `games/TOPBENCH/` is packed and on the card to calibrate it.
 
-## The memory map problem (the real design decision)
+## The memory map — resolved, for reference
 
-8086tiny wants a flat 1 MB physical space: conventional RAM up to `0xA0000`, CGA video at
-`0xB8000`, BIOS and its register block at `0xF0000`. That does not fit anywhere on this
-part.
+`dos_fold()` (`8086tiny.c`) folds the guest 1 MB into 780 KB: 640 KB conventional
+identity-mapped, a 64 KB video aperture at guest `0xB0000`, a 64 KB BIOS+register window at
+guest `0xF0000`, 4 KB windows for the BIOS's `C000:0` and `C800:0` shadows, everything else
+to a scratch page. Dropping the `0xC0000`-`0xEFFFF` option-ROM hole is what makes it fit —
+**that hole is not entirely dead, which is why the two 4 KB windows exist.**
 
-The current code is a stopgap and should not be built on:
+`REGS_BASE` is back at a stock `0xF0000` guest address, so `0xB8000` is reachable and
+`-DNO_GRAPHICS` is gone. Only two sites apply the fold: `SEGREG` and the instruction fetch.
 
-- `RAM_SIZE` reduced to 256 KB, addresses masked with `& 0x3FFFF`.
-- `REGS_BASE` moved from `0xF0000` to `0x30000` to fit, which puts the BIOS somewhere the
-  standard layout does not expect and makes `0xB8000` unreachable — hence `-DNO_GRAPHICS`
-  and the empty blit.
-- `mem` points at the LCD bonus pool via `lcd_get_bonus_pool()`, which is only ~146 KB in
-  LUT8 mode while the mask allows 256 KB. **Anything above 146 KB runs off the end of the
-  pool into `RAM_EMU`.**
+Guest memory is a **BSS array inside the overlay**, so overflow is a link-time `ASSERT`
+failure rather than silent corruption. The overlay links at `0x24025800` — the LCD bonus
+area, PICO-8 pattern — and because `.lcd_pool` spans all of RAM_UC (`__lcd_pool_end__ ==
+__RAM_EMU_START__`) that yields **874 KB in one unbroken run**. 780 KB guest + code/BSS
+reaches 813 KB, leaving 61 KB.
 
-  (An earlier revision of this file called the bonus pool uncached and therefore slow.
-  **That was wrong.** In LUT8 mode `lcd_setup_framebuffers` calls
-  `mpu_set_lcd_pool_uncached_range(fb_footprint)`, shrinking the uncached window to just
-  the two framebuffers; everything above them is Normal cacheable. See `gw_lcd.c:317-325`.)
-
-The bonus pool is **contiguous with `RAM_EMU`** — `.lcd_pool` spans all of RAM_UC, so
-`__lcd_pool_end__ == __RAM_EMU_START__`. Linking the overlay at `0x24026800` (the PICO-8
-pattern, `STM32H7B0VBTx_SDCARD.ld:887`) therefore yields **870 KB in one unbroken run**,
-not 724 KB. That is enough for a translated map (640 KB conventional + a video window + a
-BIOS window) but not for a flat 1 MB, so address translation replacing the `& 0x3FFFF`
-mask is required either way.
-
-Total budget, verified: 870 KB AXI (LUT8) + 120 KB AHB + 64 KB ITCM. **DTCM is not
+Total budget, verified: 874 KB AXI (LUT8) + 120 KB AHB + 64 KB ITCM. **DTCM is not
 available** — it is firmware's (~17 KB data/bss, 85 KB heap, 20 KB stack); apps reach it
 only through `malloc`. See the RAM ownership contract.
 
@@ -166,5 +155,17 @@ automatically.
   differently from silicon. **Fixed in gwemu 0.0.19.** It reproduced only under emulation
   and never on hardware. If you see it again, check your gwemu version first. The full
   write-up and reproduction images live in the gwemu project's `backup/memfault/`.
-- **`REGS_BASE` relocation as a long-term answer.** It is what forces `NO_GRAPHICS`.
-  Solving the memory map properly removes the need for it.
+- **`REGS_BASE` relocation as a long-term answer.** It was what forced `NO_GRAPHICS`.
+  Resolved: `REGS_BASE` is back at a stock `0xF0000` guest address, split from `REGS_SEG`
+  so it is not folded twice. Do not move it again.
+- **`gettimeofday()` as a millisecond source.** It resolves to `GW_GetCurrentMillis()`
+  (`Core/Src/retro-go/rg_rtc.c:251`), whose sub-second part comes from the RTC SubSeconds
+  register — **which gwemu does not model** (`tv_usec` measured pinned at 996000 forever).
+  So it works on hardware and silently freezes guest time under emulation. The guest clock
+  is driven off `HAL_GetTick()` instead, anchored once to the RTC for the wall date.
+
+> **A repeated lesson, worth internalising: unverified claims about this codebase have been
+> wrong far more often than not** — the bonus pool's cacheability, `BUILD_DIR` isolation,
+> BDA `0x484`'s meaning, the CRTC wrap granularity, whether the font pack had narrow fonts,
+> which script assembles `roms/`, and the detection method for a contaminated build were all
+> asserted confidently and all wrong. Check against source and cite `file:line`.

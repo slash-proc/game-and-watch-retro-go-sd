@@ -804,7 +804,7 @@ ifeq ($(DOCKER),1)
 all: FORCE
 	$(V)$(DOCKER_RUN) $(MAKE) -j$$(nproc) all $(_DOCKER_FWDVARS) CHECK_DIRTY_SUBMODULE=0
 else
-all: CheckTools CheckDirtySubmodules $(BUILD_DIR) $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET)_intflash.bin $(BUILD_DIR)/$(TARGET)_intflash2.bin
+all: CheckTools CheckDirtySubmodules CheckDosBios $(BUILD_DIR) $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET)_intflash.bin $(BUILD_DIR)/$(TARGET)_intflash2.bin
 ifneq ($(SD_CARD),0)
 all: $(BUILD_DIR)/$(TARGET)_extflash.bin
 endif
@@ -917,6 +917,33 @@ CheckDirtySubmodules:
 else
 CheckDirtySubmodules:
 endif
+# --- Guest BIOS staleness check ----------------------------------------------
+#
+# external/8086tiny/bios is the MS-DOS core's guest BIOS ROM, assembled from
+# bios_source/bios.asm with NASM. The blob is committed on purpose so a normal
+# build needs neither NASM nor Docker (see external/8086tiny/Dockerfile and
+# docs/decisions.md), but that leaves a staleness hole: a stale BIOS does not
+# fail cleanly, it executes garbage. So refuse to build when the source is
+# newer than the blob.
+DOS_BIOS_ASM  := external/8086tiny/bios_source/bios.asm
+DOS_BIOS_BLOB := external/8086tiny/bios
+
+.PHONY: CheckDosBios
+CheckDosBios:
+	$(V)if [ -f "$(DOS_BIOS_ASM)" ] && [ "$(DOS_BIOS_ASM)" -nt "$(DOS_BIOS_BLOB)" ]; then \
+		echo ""; \
+		echo "ERROR: $(DOS_BIOS_ASM) is newer than the committed blob $(DOS_BIOS_BLOB)."; \
+		echo "       The guest BIOS is out of date. A stale BIOS does not fail cleanly --"; \
+		echo "       it executes garbage. Rebuild it with NASM (Docker, no local nasm needed):"; \
+		echo ""; \
+		echo "         make -C external/8086tiny bios-toolchain   # once"; \
+		echo "         make -C external/8086tiny bios"; \
+		echo ""; \
+		echo "       Then commit the blob alongside the .asm change."; \
+		echo ""; \
+		exit 1; \
+	fi
+
 .PHONY: CheckDirtySubmodules
 
 # The fceumm mappers .ld file is INCLUDEd from $(LDSCRIPT). Generating it
@@ -1843,6 +1870,102 @@ gwemu_release: $(GWEMU_PREREQS)
 	$(GWEMU_WRITE_BUILDINFO)
 .PHONY: gwemu_release
 
+# Injects the FreeDOS test floppy into the gwemu SD image as a bootable .dsk.
+#
+# This is deliberately NOT part of `release`: `release` tars sd_content/ into
+# gw_update.tar, and the test image carries software that is not redistributable.
+# Keeping it a separate post-step on build/sdcard.img means it can never end up
+# in a release artifact.
+#
+#   make ... release gwemu_release gwemu_dos_testdisk && ./scripts/run_gwemu.sh
+DOS_TESTDISK_SRC ?= external/8086tiny/fd.img
+DOS_TESTDISK_DST ?= ::/roms/dos/freedos.dsk
+
+# Ordered after gwemu_release, not just documented as such: with -j the two would
+# otherwise race and this would run against a nonexistent (or half-written) image.
+gwemu_dos_testdisk: gwemu_release
+	$(V)if [ ! -f $(BUILD_DIR)/sdcard.img ]; then \
+		echo "ERROR: $(BUILD_DIR)/sdcard.img does not exist - run 'make gwemu_release' first."; \
+		exit 1; \
+	fi
+	$(V)if [ ! -f $(DOS_TESTDISK_SRC) ]; then \
+		echo "ERROR: $(DOS_TESTDISK_SRC) not found."; \
+		exit 1; \
+	fi
+	$(V)mmd -i $(BUILD_DIR)/sdcard.img@@1M -D s ::/roms ::/roms/dos 2>/dev/null || true
+	$(V)mcopy -i $(BUILD_DIR)/sdcard.img@@1M -o $(DOS_TESTDISK_SRC) $(DOS_TESTDISK_DST)
+	@echo "[ DOS ] $(DOS_TESTDISK_SRC) -> sdcard.img $(DOS_TESTDISK_DST)"
+.PHONY: gwemu_dos_testdisk
+
+# Mirrors roms/ into the gwemu SD image under ::/roms/, keeping the per-console
+# subdirectory layout the launcher scans for.
+#
+# On SD_CARD=1 there is otherwise NO path from roms/ onto the emulated card:
+# create_sd_data only ever populates sd_content/roms/homebrew from ELF sections
+# (HOMEBREWS_FOLDER), and gwemu_release mformats build/sdcard.img from
+# sd_content/* alone. Testing any ROM therefore meant a hand-written mcopy that
+# the next `make gwemu_release --reset` silently wiped. (SD_CARD=0 does merge
+# roms/ into its filesystem image -- gen_frogfs_image.py:657-658 -- which is why
+# the SD_CARD=1 behaviour reads like a bug rather than a policy.)
+#
+# Same reasoning as gwemu_dos_testdisk above, and the same shape:
+#
+#   * NOT part of `release`, and it never writes sd_content/. `release` tars
+#     sd_content/ into gw_update.tar; ROMs are not redistributable, so the only
+#     safe place to inject them is as a post-step on build/sdcard.img.
+#   * Ordered after gwemu_release as a real prerequisite, not a comment: with -j
+#     it would otherwise race and mcopy into a half-mformatted image.
+#   * A missing roms/ is normal (fresh clone, CI), not an error -- same
+#     degradation as the `covers` target.
+#
+# Everything under roms/ is mirrored verbatim, with no per-console extension
+# filter. The launcher already filters what it lists (roms/dos/CAT.EXE is
+# ignored because only .dsk is offered for DOS), so a filter here would buy
+# nothing while duplicating the firmware's extension table in make -- and a
+# test-image target that silently drops files is the opposite of useful.
+#
+#   make ... release gwemu_release gwemu_roms && ./scripts/run_gwemu.sh
+GWEMU_ROMS_SRC ?= roms
+
+gwemu_roms: gwemu_release
+ifeq ($(SD_CARD),0)
+	@echo "[ ROMS ] SD_CARD=0 has no SD image - roms/ is packed into FrogFS by 'make frogfs_image'."
+else
+ifeq ($(wildcard $(GWEMU_ROMS_SRC)),)
+	@echo "[ ROMS ] no $(GWEMU_ROMS_SRC)/ directory - skipping"
+else
+	$(V)if [ ! -f $(BUILD_DIR)/sdcard.img ]; then \
+		echo "ERROR: $(BUILD_DIR)/sdcard.img does not exist - run 'make gwemu_release' first."; \
+		exit 1; \
+	fi
+	$(V)set -e; \
+	if [ -z "$$(ls -A $(GWEMU_ROMS_SRC))" ]; then \
+		echo "[ ROMS ] $(GWEMU_ROMS_SRC)/ is empty - skipping"; \
+		exit 0; \
+	fi; \
+	need=$$(du -sb $(GWEMU_ROMS_SRC) | cut -f1); \
+	free=$$(mdir -i $(BUILD_DIR)/sdcard.img@@1M ::/ | grep 'bytes free' | tr -cd '0-9'); \
+	if [ -z "$$free" ]; then \
+		echo "ERROR: could not read free space from $(BUILD_DIR)/sdcard.img"; exit 1; \
+	fi; \
+	: 'The image is a fixed 256 MB (see GWEMU_MEDIA_PREP). Check up front with a'; \
+	: '5% margin for FAT cluster round-up: without this, mcopy fails partway'; \
+	: 'through and leaves an image that is silently missing some ROMs.'; \
+	budget=$$(( need + need / 20 )); \
+	if [ "$$budget" -gt "$$free" ]; then \
+		echo "ERROR: $(GWEMU_ROMS_SRC)/ is $$need bytes; only $$free bytes free on the"; \
+		echo "       256MB $(BUILD_DIR)/sdcard.img (need ~$$budget with FAT slack)."; \
+		echo "       Trim $(GWEMU_ROMS_SRC)/, or copy a subset by hand:"; \
+		echo "         mcopy -i $(BUILD_DIR)/sdcard.img@@1M -s -o roms/nes ::/roms/"; \
+		exit 1; \
+	fi; \
+	mmd -i $(BUILD_DIR)/sdcard.img@@1M -D s ::/roms 2>/dev/null || true; \
+	mcopy -i $(BUILD_DIR)/sdcard.img@@1M -s -o -Q $(GWEMU_ROMS_SRC)/* ::/roms/; \
+	echo "[ ROMS ] $(GWEMU_ROMS_SRC)/ ($$need bytes) -> sdcard.img ::/roms/"
+endif
+endif
+.PHONY: gwemu_roms
+
 # Record the parameters and image checksums every run. When gwemu and hardware disagree,
 # the first question is always "was it actually the same firmware?" -- this answers it
 # without re-deriving anything. Compare against the md5 gnwmanager flashed.
@@ -2106,6 +2229,11 @@ help:
 	@echo "  flash_extflash    - Flash FrogFS image only (SD_CARD=0; respects EXTFLASH_OFFSET)"
 	@echo "  flash_intflash    - Only programs the internal flash"
 	@echo "  gdb               - Starts gdb and attaches to gdbserver"
+	@echo "  gwemu_release     - Builds the images gwemu boots (implies 'release' on SD_CARD=1)"
+	@echo "  gwemu_roms        - Mirrors roms/ into build/sdcard.img under /roms (post-step on"
+	@echo "                      gwemu_release; never touches sd_content/, so never in a release)"
+	@echo "  gwemu_dos_testdisk - Injects external/8086tiny/fd.img into build/sdcard.img as"
+	@echo "                      /roms/dos/freedos.dsk (developer only; not part of a release)"
 	@echo "  gdb_intflash      - Flashes intflash and then starts gdb and attaches to gdbserver"
 	@echo "  reset_dbgmcu      - Resets the unit and turns off DBGMCU (lowers battery drain)"
 	@echo "  reset_mcu         - Resets the unit"
@@ -2167,6 +2295,13 @@ distclean: clean
 # unrelated IRET epilogue, and the CPU exits to CS:IP=0000:0000 after 179
 # instructions.
 DOS_CFLAGS = -fsigned-char
+
+# Diagnostics knob for the DOS core, off by default. Pass on the make command
+# line, e.g. DOS_CFLAGS_EXTRA="-DDOS_DEBUG_STATUS=2" for a once-a-second ASCII
+# dump of the guest's 0xB8000 text buffer, or "-DDOS_TRACE_INSNS=200" for an
+# instruction trace. See Core/Src/porting/dos/main_dos.c and 8086tiny.c.
+DOS_CFLAGS_EXTRA ?=
+DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
 
 $(BUILD_DIR)/dos/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) "[ CC dos ] $(notdir $<)"

@@ -172,6 +172,36 @@ want a clean slate.
 
 `gwemu_release` otherwise skips regenerating media that already exists.
 
+### Getting your ROMs onto the emulated SD card
+
+`gwemu_release` mformats `build/sdcard.img` from `sd_content/*` alone, and
+`sd_content/roms/` only ever contains `homebrew/`, built out of ELF sections. So on
+`SD_CARD=1` **nothing in `roms/` reaches the card by default.** (`SD_CARD=0` does merge
+`roms/` into its FrogFS image — `scripts/gen_frogfs_image.py` — and that asymmetry is
+what makes the SD-card behaviour look like a bug.)
+
+```bash
+make ... release gwemu_release gwemu_roms && ./scripts/run_gwemu.sh
+```
+
+`gwemu_roms` mirrors `roms/` into `::/roms/` on the image, per-console subdirectories
+intact, and it fails up front with a clear message if the collection does not fit the
+fixed 256 MB image rather than letting `mcopy` half-copy it. A missing or empty `roms/`
+is a skip, not an error.
+
+**It is a post-step on `build/sdcard.img` and never writes `sd_content/`**, because
+`release` tars `sd_content/` into `gw_update.tar` and ROMs are not redistributable.
+`gwemu_dos_testdisk` exists for the same reason and stays separate: the DOS test floppy
+is `external/8086tiny/fd.img`, not something under `roms/`, and it has to be renamed to
+`freedos.dsk` on the way in. Run both when you want both.
+
+Everything under `roms/` is copied, unfiltered. The launcher already filters what it
+lists per system (`roms/dos/CAT.EXE` is ignored because only `.dsk` is offered for DOS),
+so filtering here would only duplicate the firmware's extension table and risk silently
+dropping the file you were trying to test.
+
+Note `--reset` re-mformats the image, which drops the ROMs; re-run `gwemu_roms` after it.
+
 ### `run_gwemu.sh` — running it
 
 Launches the emulator, attaches GDB, and gives you logs and exceptions.
@@ -248,6 +278,72 @@ and warns on stderr rather than returning nothing.
 - `scripts/gwemu_latest_tag.sh --force`, or `make gwemu_update GWEMU_FORCE_CHECK=1` —
   bypass the cache, e.g. right after a release lands.
 - `GWEMU_RELEASE_TTL=<minutes>` — change the lifetime; `0` disables caching.
+
+## Running more than one instance at a time
+
+**`scripts/run_gwemu.sh` does not support concurrent runs.** Two invocations in the
+same checkout will corrupt each other, and the failure looks like random emulator
+crashes rather than a resource conflict — which makes it expensive to diagnose.
+
+Three separate collisions:
+
+| Contended resource | Where |
+|---|---|
+| `build/qemu_bank*.bin`, `build/extflash.bin`, `build/sdcard.img` | hardcoded, `run_gwemu.sh:197-206` |
+| The gdb port `:1234` | `-s -S` plus `target extended-remote :1234`, `:123`/`:226-228` |
+| Concurrent `make` in one tree | shared object files and one output ELF |
+
+`--reset` makes it worse: it deletes those images (`:114`) while another instance
+may be reading them.
+
+### `BUILD_DIR` does NOT isolate a build
+
+`BUILD_DIR ?= build` (`Makefile.common:246`) looks overridable and is not, for
+anything that links. **The linker scripts hardcode `build/<core>/*.o`** — 96 sites in
+`STM32H7B0VBTx_SDCARD.ld` (`:246`, `:270`, `:324`, …), 65 in `STM32H7B0VBTx_FLASH.ld`
+— to place each core's overlay. Those globs resolve against the linker's working
+directory, not `$(BUILD_DIR)`, so `BUILD_DIR=build-mine` links `build-mine/*.o` from
+the command line *and* drags in `build/*.o` by pattern:
+
+```
+multiple definition of `app_main_pico8' ...
+STM32H7B0VBTx_SDCARD.ld:1201 cannot move location counter backwards
+```
+
+Genuinely isolating the *build* needs a git worktree, or templating ~96 paths in the
+linker scripts on `$(BUILD_DIR)`. Neither is done. **So builds must be serialised.**
+
+### Isolating a run
+
+Isolate the *run* instead: **snapshot the artifacts you intend to test into your own
+directory, and launch the emulator against the copies** with ports of your own. A
+sibling relinking `build/` then leaves your run stale-but-valid rather than corrupt.
+
+```bash
+MYDIR=/tmp/mywork-images
+mkdir -p $MYDIR && cp build/qemu_bank1.bin build/qemu_bank2.bin \
+                     build/extflash.bin build/sdcard.img build/gw_retro_go.elf $MYDIR/
+./gwemu_bin -M gnw-h7b0 \
+    -global gnw-h7b0-soc.bank1-image=$MYDIR/qemu_bank1.bin \
+    -global gnw-h7b0-soc.bank2-image=$MYDIR/qemu_bank2.bin \
+    -global gnw-h7b0-soc.extflash-image=$MYDIR/extflash.bin \
+    -drive if=sd,file=$MYDIR/sdcard.img \
+    -audiodev sdl3,id=snd0 -global gnw-h7b0-sai1.audiodev=snd0 \
+    -display gwemu \
+    -qmp tcp:localhost:<your port>,server,nowait \
+    -gdb tcp::<your port> -S &
+```
+
+Then attach gdb to *your* port with `scripts/gwemu_log.gdb` to keep log forwarding
+and fault capture.
+
+**If several people or agents share one checkout: serialise the builds, snapshot the
+artifacts, and run on your own ports.** Never assume a shared `build/` is yours, and
+never `rm -f build/...` — that deletes images another instance may be reading.
+
+> Proper fixes, not yet done: give `run_gwemu.sh` a `--images-dir` and `--gdb-port`
+> so the wrapper can be used concurrently instead of bypassed, and template the
+> linker scripts' `build/` paths on `$(BUILD_DIR)` so builds can be isolated too.
 
 ## Timelines and video
 

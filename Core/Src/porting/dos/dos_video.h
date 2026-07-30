@@ -36,8 +36,9 @@ extern const uint8_t dos_font_8x8[256][8];
 void dos_video_init(void);
 
 /* Render one frame of guest video into the current framebuffer. Safe to call
- * every frame; detects mode changes itself. Does nothing in graphics modes,
- * which are not implemented yet. */
+ * every frame; detects mode changes itself. Handles text modes 0-3 and CGA
+ * graphics modes 4/5 (320x200x2bpp) and 6 (640x200x1bpp). Hercules is out of
+ * scope. */
 void dos_video_blit(void);
 
 #endif /* _DOS_VIDEO_H_ */
