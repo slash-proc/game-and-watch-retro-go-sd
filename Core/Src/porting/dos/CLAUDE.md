@@ -1,9 +1,10 @@
 # MS-DOS core (8086tiny) — porting notes
 
-Status: **boots to a DOS prompt.** MS-DOS 6.22 and FreeDOS both reach `A:\>` with no
-input support, because the boot-time prompts that looked like key waits turned out to be
-timeouts. Text mode renders in authentic CP437; the CGA blit is written and unit-verified
-but has not yet rendered a real game. No input, no audio.
+Status: **boots to a DOS prompt and takes button input.** MS-DOS 6.22 and FreeDOS both
+reach `A:\>`. Text mode renders in authentic CP437 and the CGA blit now renders real
+games — Alley Cat is playable. G&W buttons reach the guest keyboard
+(`dos_input.c`): TOPBENCH was driven with the d-pad and A/Enter to a **SCORE of 23**.
+No audio, no on-screen keyboard, so only five distinct keys are reachable.
 
 **This file is a summary and a list of traps. `external/8086tiny/STATUS.md` is the
 authority on current state** — it is maintained per-change and this one is not.
@@ -63,7 +64,12 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
   it. The original used an IOCCC-style `(int(*)())` function-pointer cast that GCC 15
   rejects; that is gone.
 - `Core/Src/porting/dos/main_dos.c` — `app_main_dos()`. Sets up the frame loop, audio
-  timing and `common_emu_*` bookkeeping. `dos_blit()` is an empty TODO.
+  timing and `common_emu_*` bookkeeping, and calls `dos_input_update()` once per frame.
+- `Core/Src/porting/dos/dos_input.c` — buttons → guest keystrokes. The mapping is the
+  `dos_key_map[]` table; edge detection against the previous frame turns button state into
+  one key-down per press and one key-up per release, encoded in the BIOS's SDL word
+  format. **Change the mapping by editing the table, nothing else.** Traps live in
+  `external/8086tiny/STATUS.md` (queue, word format, absence of typematic repeat).
 - `APPID_DOS` in `Core/Inc/retro-go/appid.h`, and an `add_emulator("MS-DOS", "dos", ...)`
   entry in `Core/Src/retro-go/rg_emulators.c`.
 - Build wiring in `Makefile` (`DOS_C_SOURCES`) and `Makefile.common` (`DOS_OBJECTS`, vpath,
@@ -71,24 +77,25 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
 
 ## What is missing, roughly in order
 
-1. **Input.** Nothing is wired. It is no longer needed to *reach* a prompt — both DOSes
-   boot to `A:\>` on their own — but it is needed to use one. Design is settled in
-   `external/8086tiny/docs/input-roadmap.md`: SDL word format into `mem[0x4A6]` plus
-   `pc_interrupt(7)`, the BIOS translates via `a2scan_tbl` into `kbbuf`. Only eight
-   physical inputs exist, so the on-screen keyboard in the reserved letterbox bars is
-   mandatory, not optional.
-2. **Graphics modes end-to-end.** The CGA blit is written and unit-verified (75 checks,
-   mutation-tested) but has never rendered a real game. The most likely failure is
-   **mode detection**: nothing has confirmed BDA `0x449` reads 4 when a game sets mode 4,
-   and a game that programs the adapter directly instead of calling `INT 10h` will get
-   text mode. 1984 titles do exactly that.
+1. **On-screen keyboard.** Basic input is done (`dos_input.c` + the injection queue in
+   `8086tiny.c`), but only eight physical inputs exist, so the guest can be handed five
+   distinct keys — enough to play a game, not enough to type a command. The OSK in the
+   reserved letterbox bars is mandatory, not optional. Design in
+   `external/8086tiny/docs/input/03-onscreen-keyboard.md`.
+2. **Graphics modes beyond CGA.** CGA is now confirmed end-to-end: Alley Cat's title
+   screen and playfield both render, so mode detection works for a 1984 title. Mode 13h,
+   EGA/Mode X and Hercules are still unbuilt — see `docs/video-roadmap.md`.
 3. **Audio.** Not wired. PC speaker only for v1; see `docs/audio-roadmap.md`.
 4. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
    all, so a game setting its background that way gets defaults. And
    `int10_switch_to_cga_gfx` clears with `char=0/attr=7`, which as pixel data is a stripe
    pattern for one frame.
-5. **CPU speed is unmeasured.** `dos_cpu_frame()`'s cycle budget is a placeholder.
-   `games/TOPBENCH/` is packed and on the card to calibrate it.
+5. **CPU speed has a first number.** TOPBENCH scores **23**, matching an IBM PS/2 Model
+   P70 / AT&T 6386 WGS (286-class) — but every one of its six sub-timings came back as
+   exactly 215 µsec, which is not credible and almost certainly reflects the 55 ms
+   granularity of the guest clock rather than the CPU. Treat 23 as a baseline to improve
+   against, not as a measurement of anything specific, and fix the timer resolution
+   before trusting the breakdown.
 
 ## The memory map — resolved, for reference
 

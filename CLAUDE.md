@@ -87,6 +87,6 @@ Detailed debugging guides live next to each porting layer (not in this file — 
 | System | Guide |
 |--------|-------|
 | PCE / PCE CD | [Core/Src/porting/pce/CLAUDE.md](Core/Src/porting/pce/CLAUDE.md) — harness `linux/Makefile.pce` |
-| MS-DOS (8086tiny) | [Core/Src/porting/dos/CLAUDE.md](Core/Src/porting/dos/CLAUDE.md) — **read its "Where the documentation lives" section first.** Design docs are in the submodule: `external/8086tiny/STATUS.md` (status/blockers), `docs/decisions.md` (settled calls + why), `docs/sprint-first-boot.md` (active plan), `docs/<category>-roadmap.md` → `docs/<category>/`. `GNW_PORT.md` is stale. |
+| MS-DOS (8086tiny) | [Core/Src/porting/dos/CLAUDE.md](Core/Src/porting/dos/CLAUDE.md) — **read its "Where the documentation lives" section first.** Design docs are in the submodule: `external/8086tiny/STATUS.md` (status/budget), `docs/decisions.md` (settled calls + why), **`docs/traps.md` (things that have already cost real time — read before changing anything)**, `docs/<category>-roadmap.md` → `docs/<category>/`. `GNW_PORT.md` is a superseded pointer; `docs/sprint-first-boot.md` is a completed record, not an active plan. |
 
 Add a `CLAUDE.md` under `Core/Src/porting/<system>/` (and optionally `.cursor/rules/<system>.mdc`) when an emulator accumulates non-obvious debug knowledge.

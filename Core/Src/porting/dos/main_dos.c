@@ -5,9 +5,11 @@
 #include "odroid_sdcard.h"
 #include "gw_lcd.h"
 #include "gw_linker.h"
+#include "main.h"        /* wdog_refresh() */
 #include "common.h"
 #include "appid.h"
 #include "dos_video.h"
+#include "dos_input.h"
 #include <string.h>
 
 /* Guest memory is a BSS array inside this overlay (.overlay_dos_bss), zeroed by
@@ -158,11 +160,36 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     #define DBG_REG_CS 9            /* REG_CS is private to 8086tiny.c */
     unsigned int dbg_frames = 0;
 
+    /* Baseline for the input edge detector. Without this, any button already
+     * held when the core starts (typically A, which launched the ROM) would look
+     * like a fresh press on frame 1 and inject a stray Enter into the guest. */
+    dos_input_reset();
+
     while (1) {
+        /* Feed the window watchdog. NOT optional and NOT cosmetic: WWDG1 is
+         * enabled unconditionally in main() (MX_WWDG1_Init), wdog_refresh() is
+         * the only thing that services it, and its window is a few hundred
+         * milliseconds. A frame loop that never refreshes resets the chip after
+         * ~0.3 s no matter how fast the frames are.
+         *
+         * This is why DOS BSOD'd on real hardware with PC=0/LR=0 shortly after
+         * "Starting MS-DOS..." while running fine under emulation: gwemu does
+         * not model WWDG1, so the counter never expires there. Every other core
+         * does this (main_tama.c:462, main_pce.c:1041, main_gba.c:891, ...) --
+         * DOS was the only frame loop missing it. */
+        wdog_refresh();
+
         odroid_gamepad_state_t joystick;
         odroid_input_read_gamepad(&joystick);
 
         common_emu_input_loop(&joystick, NULL, &dos_blit);
+
+        /* Once per frame, after the launcher has had its look at the state:
+         * common_emu_input_loop() owns PAUSE as a macro prefix (common.c:236),
+         * and it may block here for the duration of the pause menu. Reading
+         * button edges afterwards means keys are not injected from a menu the
+         * guest cannot see. */
+        dos_input_update(&joystick);
 
         bool drawFrame = common_emu_frame_loop();
 

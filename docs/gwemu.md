@@ -319,10 +319,31 @@ Isolate the *run* instead: **snapshot the artifacts you intend to test into your
 directory, and launch the emulator against the copies** with ports of your own. A
 sibling relinking `build/` then leaves your run stale-but-valid rather than corrupt.
 
+> **A plain `cp` from `build/` is not enough, and this has cost three separate
+> sessions a cycle each.** `gwemu_release` **skips media prep entirely when the images
+> already exist** — it prints "QEMU images already exist (skipping prep)" — so after a
+> code change `build/qemu_bank*.bin` can be hours older than `build/gw_retro_go.elf`.
+> Copying them gets you *stale firmware*, and you then spend the cycle debugging code
+> that is not running.
+>
+> **Refresh explicitly rather than trusting the target**, and for an overlay core
+> remember the code lives on the SD image, not in the bank:
+>
+> ```bash
+> dd if=build/gw_retro_go_intflash.bin of=$MYDIR/qemu_bank1.bin bs=256k count=1 conv=sync
+> mcopy -i $MYDIR/sdcard.img@@1M -o sd_content/cores/dos.bin ::/cores/dos.bin
+> ```
+>
+> `conv=sync` pads to the full bank rather than truncating, so an instance holding the
+> file open is not disrupted. **The rule: confirm the firmware you are running is the
+> firmware you just built** — md5 it if there is any doubt. A "result" from stale
+> firmware is worse than no result.
+
 ```bash
 MYDIR=/tmp/mywork-images
 mkdir -p $MYDIR && cp build/qemu_bank1.bin build/qemu_bank2.bin \
                      build/extflash.bin build/sdcard.img build/gw_retro_go.elf $MYDIR/
+# then refresh per the warning above before trusting anything
 ./gwemu_bin -M gnw-h7b0 \
     -global gnw-h7b0-soc.bank1-image=$MYDIR/qemu_bank1.bin \
     -global gnw-h7b0-soc.bank2-image=$MYDIR/qemu_bank2.bin \
@@ -356,6 +377,47 @@ Record keypresses sub-frame accurately, then replay them deterministically:
 ```
 
 This is how a bug that takes twelve button presses to reach becomes reproducible.
+
+### The `.tl` file format is UNDOCUMENTED — and that is a real gap
+
+Only the *usage* above has ever been written down, never the file contents. An agent
+trying to automate a boot test concluded it could not author one and fell back to
+manual driving, because `--record` needs an interactive SDL window and no example
+`.tl` exists anywhere in the tree.
+
+What is known from the binary, without having reverse-engineered the grammar:
+
+- It is a **plain-text, line-oriented** format. The recorder writes a
+  `# Automatically recorded timeline` header, so `#` is a comment.
+- The parser reports errors as `gnw-timeline: <file>:<line>: parse error: "<text>"`,
+  so it is line-by-line with a recognisable token per line.
+- It arms **two kinds of event**: `gnw-timeline: <file> armed (%d time + %d frame events)`
+  — i.e. events can be scheduled either at a timestamp or at a frame number.
+- Actions include at least **`screenshot`** and **`quit`** (`gnw-timeline: screenshot %s`,
+  `gnw-timeline: quit`), alongside button events.
+- `GNW_TIMELINE` selects a file for playback, `GNW_TIMELINE_RECORD` for capture — the
+  wrapper sets both (`scripts/run_gwemu.sh`).
+
+Semantically it is simple — press a button at a timestamp, quit at a timestamp — but
+**the exact syntax has not been confirmed and is deliberately not guessed here.** The
+reliable way to obtain it is to record one interactively once (`--record`, needs a
+local SDL window) and check the result in as a worked example. **Do that; it removes a
+standing obstacle to automated testing.**
+
+Until then, QMP is the working alternative for scripted input:
+
+```bash
+./scripts/run_gwemu.sh --qmp 4477      # then drive via QMP send-key / screendump
+```
+
+`send-key` needs `hold-time: 600`; 200 ms is too short for the launcher to register a
+press. The gwemu key map lives at `~/.local/share/gwemu/gwemu/gnw-input.ini` as
+QKeyCode indices — A=`x`, B=`z`, Game=`g`, Time=`t`, Pause=`esc`, Power=`p`,
+Start=`ret`, Select=`shift_r`.
+
+> `-display gwemu` fails on X11 MIT-SHM in some environments (notably headless or
+> containerised sessions). `-display none` works, and QMP `screendump` and `send-key`
+> both still function — so a screenshot-driven test does not need a visible window.
 
 ## When the emulator and hardware disagree
 
