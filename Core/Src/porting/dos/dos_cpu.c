@@ -22,6 +22,8 @@
 #include "dos_cpu.h"
 #include "common.h"
 #include "main.h"        /* wdog_refresh(), SystemCoreClock via CMSIS */
+#include "gw_lcd.h"      /* lcd_set_refresh_rate(), lcd_is_swap_pending()   */
+#include "gw_audio.h"    /* AUDIO_SAMPLE_RATE, AUDIO_BUFFER_LENGTH          */
 #include <stdio.h>
 
 /* 8086tiny. dos_cpu_frame(n) executes n instructions and returns 1, or returns
@@ -35,43 +37,55 @@ extern unsigned int dos_int8_due, dos_int8_fired, dos_int8_resync;
 
 /* ---- The profile table ----------------------------------------------------
  *
- * insn_per_frame is at 60 fps, so instructions/second = insn_per_frame * 60.
- * The MIPS figures in the comments are what that works out to; the machine
+ * The field is instructions per *second*, and the per-frame budget is derived
+ * at runtime as insn_per_sec / guest fps (dos_cpu_derive()). It used to be
+ * instructions per frame with a hidden "/60"; that silently redefined what
+ * "286 12MHz" means the moment the screen frequency became user-selectable
+ * (SCREEN-FREQ-PLAN.md section 2). The emulated machine must not change
+ * identity behind the user's back, so the table states the rate and the frame
+ * budget follows the refresh rate.
+ *
+ * The MIPS figures in the comments are what these work out to; the machine
  * names are the era those rates land in, not a claim of accuracy.
  *
  * 8088 @ 4.77 MHz is usually put near 0.33-0.4 MIPS: the 8088's 8-bit bus and
  * 4-cycle bus access dominate, giving an average of roughly 12-14 cycles per
- * instruction. 6,700/frame = 402,000/s sits at the top of that range, which is
- * the right side to err on for a period game.
+ * instruction. 402,000/s sits at the top of that range, which is the right side
+ * to err on for a period game.
  *
- * 20,000 is the historical hardcoded value from main_dos.c and is kept as a
- * profile so behaviour is unchanged by default and TOPBENCH scores stay
- * comparable across this change. Nobody derived it; the "286" label is
- * retrofitted from where 1.2 MIPS lands, not from measurement.
+ * 1,260,000/s (21,000/frame at 60 Hz) is the historical value from main_dos.c
+ * and is kept as a profile so behaviour is unchanged by default and TOPBENCH
+ * scores stay comparable across this change. Nobody derived it; the "286" label
+ * is retrofitted from where 1.26 MIPS lands, not from measurement.
  *
- * insn_per_frame == 0 means MAX -- run to the frame deadline, see
+ * insn_per_sec == 0 means MAX -- run to the frame deadline, see
  * dos_cpu_run_frame(). It must be the *last* entry only by convention; nothing
  * depends on its position.
  */
 typedef struct {
     const char  *name;
-    unsigned int insn_per_frame;   /* 0 = MAX (deadline-driven) */
+    unsigned int insn_per_sec;     /* 0 = MAX (deadline-driven) */
 } dos_cpu_profile_t;
 
 static const dos_cpu_profile_t dos_cpu_profiles[] = {
-    { "XT 4.77MHz",  6700 },   /* ~0.40 MIPS -- 8088-era, for 1984 titles   */
-    { "Turbo 8MHz", 11000 },   /* ~0.66 MIPS -- 8086 turbo XT               */
-    /* 21000 was measured, not guessed. Sweeping ipf on hardware at the MS-DOS
-     * idle prompt (cpi 208): 20000 -> cpu 89%/idle 7%; 21000 -> cpu 93%/idle
-     * 2-3%; 21500 -> cpu 96%/idle 0% (the true edge); 22000 -> cpu 98% and the
-     * blit count collapses to 33-35 of 64, i.e. HALF THE VISUAL FRAMES DROPPED.
-     * 21000 is the highest step that keeps real margin.
+    { "XT 4.77MHz",  402000 },   /* ~0.40 MIPS -- 8088-era, for 1984 titles */
+    { "Turbo 8MHz",  660000 },   /* ~0.66 MIPS -- 8086 turbo XT             */
+    /* 21000/frame at 60 Hz was measured, not guessed. Sweeping ipf on hardware
+     * at the MS-DOS idle prompt (cpi 208): 20000 -> cpu 89%/idle 7%; 21000 ->
+     * cpu 93%/idle 2-3%; 21500 -> cpu 96%/idle 0% (the true edge); 22000 ->
+     * cpu 98% and the blit count collapses to 33-35 of 64, i.e. HALF THE VISUAL
+     * FRAMES DROPPED. 21000 is the highest step that keeps real margin.
+     *
+     * Note the ceiling is a *per-frame* one, so it moves with the refresh rate:
+     * at 50 Hz the same 1.26 MIPS is 25,200 instructions in a 20 ms frame,
+     * which is the same duty cycle. At 75 Hz it is 16,800 in 13.3 ms. The
+     * headroom argument is unchanged; only the absolute ipf moves.
      *
      * Watch the blit count, not frames=N/Mms, when re-tuning this:
      * common_emu_frame_loop() skips the screen draw when it falls behind, so
      * frames= stays a healthy 64/1066ms right through the drops. */
-    { "286 12MHz",  21000 },   /* ~1.26 MIPS -- the historical default      */
-    { "MAX",            0 },   /* whatever the STM32H7B0 sustains           */
+    { "286 12MHz",  1260000 },   /* ~1.26 MIPS -- the historical default    */
+    { "MAX",              0 },   /* whatever the STM32H7B0 sustains         */
 };
 
 #define DOS_CPU_PROFILE_COUNT ((int)(sizeof dos_cpu_profiles / sizeof dos_cpu_profiles[0]))
@@ -84,6 +98,78 @@ static const dos_cpu_profile_t dos_cpu_profiles[] = {
  * dos_cpu_speed_init() and the write in dos_cpu_speed_update_cb(), so nothing
  * else in the core would change. */
 static int dos_cpu_profile_idx = 2;
+
+/* ---- Screen frequency -----------------------------------------------------
+ *
+ * The single source of truth for "how many guest frames per second are we
+ * producing". The panel rate and the guest frame rate are the same number here
+ * (there are no half-rate modes; see SCREEN-FREQ-PLAN.md stage 3, deliberately
+ * not implemented). Everything that used to hardcode 60 -- the frame budget,
+ * the MAX deadline, frame_time_10us, the audio DMA length -- reads it.
+ *
+ * Default 60 so the de-hardcoding is a provable no-op against the old build. */
+#define DOS_SCREEN_HZ_DEFAULT 60u
+static uint32_t dos_screen_hz_sel = DOS_SCREEN_HZ_DEFAULT;
+
+/* Instructions per frame for the active (profile, rate) pair. Cached because
+ * both inputs change only from a menu callback, and dos_cpu_run_frame() is the
+ * hot path. 0 means MAX. */
+static unsigned int dos_insn_per_frame = 1260000u / DOS_SCREEN_HZ_DEFAULT;
+
+static void dos_cpu_derive(void)
+{
+    unsigned int ips = dos_cpu_profiles[dos_cpu_profile_idx].insn_per_sec;
+    dos_insn_per_frame = ips ? ips / dos_screen_hz_sel : 0u;
+}
+
+uint32_t dos_screen_hz(void) { return dos_screen_hz_sel; }
+
+/* Audio DMA length for a given panel rate.
+ *
+ * SAFETY: the DOS core emits no samples, but audio_start_playing() is the frame
+ * pacer -- common_emu_sound_sync() waits on the SAI DMA half-buffer counter --
+ * so the length still has to be right. audio_start_playing(len) fills
+ * audiobuffer_dma[AUDIO_BUFFER_LENGTH * 2] (gw_audio.h:15,23), so len must
+ * never exceed AUDIO_BUFFER_LENGTH == 1077. 48000/50 = 960 is the largest value
+ * any reachable rate produces, but the clamp stays: overrunning this buffer is
+ * memory corruption past the end of .audio, not a glitch, and the next person
+ * to add a slower mode (the half-rate modes want 48000/25 = 1920) must hit the
+ * clamp rather than the corruption. */
+#define DOS_AUDIO_LEN(hz) ((uint32_t)AUDIO_SAMPLE_RATE / (uint32_t)(hz))
+_Static_assert(DOS_AUDIO_LEN(50) <= AUDIO_BUFFER_LENGTH,
+               "DOS audio DMA length would overrun audiobuffer_dma");
+
+/* Apply the selected rate: panel PLL, guest frame period, audio pacer.
+ *
+ * Deliberately NOT lcd_init() and NOT mpu_set_lcd_pool_uncached_range():
+ * lcd_set_refresh_rate() reprograms PLL3 only (gw_lcd.c:548-591) and neither
+ * the framebuffer footprint nor its addresses move, while re-running the MPU
+ * setup would rewrite regions 3-6 underneath this very overlay (main_dos.c
+ * warns about exactly that). gwenesis switches the same way
+ * (main_gwenesis.c:162-180). */
+void dos_screen_apply_rate(void)
+{
+    uint32_t hz = dos_screen_hz_sel;
+
+    dos_cpu_derive();
+
+    /* Do not move the pixel clock with a swap in flight. */
+    if (lcd_is_swap_pending())
+        lcd_sleep_while_swap_pending();
+
+    lcd_set_refresh_rate(hz);
+    common_emu_state.frame_time_10us = (int16_t)(100000u / hz);
+
+    {
+        uint32_t len = DOS_AUDIO_LEN(hz);
+        if (len > AUDIO_BUFFER_LENGTH) len = AUDIO_BUFFER_LENGTH;
+        audio_start_playing((uint16_t)len);
+    }
+
+    /* Without this the first frame after a change looks like a huge stall and
+     * the frame integrator clamps into skip mode (common.c:141-155). */
+    common_emu_frame_loop_reset();
+}
 
 /* ---- MAX mode -------------------------------------------------------------
  *
@@ -110,6 +196,11 @@ static int dos_cpu_profile_idx = 2;
  * for the blit, the launcher's input/menu work, and leaves common_emu_sound_sync
  * something to wait on -- if the CPU eats the whole period, audio pacing has no
  * slack and the frame integrator starts declaring skips.
+ *
+ * It is a percentage rather than an absolute deadline precisely so it survives
+ * the refresh rate becoming user-selectable: the period it scales is
+ * SystemCoreClock / dos_screen_hz(), so the duty cycle is the same at 50 as at
+ * 75 and the sweep below stays valid. The us figures quoted are at 60 Hz.
  *
  * 88 was measured on hardware at the MS-DOS idle prompt (cpi 204). It was 85,
  * which made MAX *slower than the 286 profile*: 85% of 16667us is a 14167us
@@ -166,6 +257,7 @@ static inline uint32_t dos_cyc(void) { return DOS_DWT_CYCCNT; }
 void dos_cpu_speed_init(void)
 {
     common_emu_enable_dwt_cycles();
+    dos_cpu_derive();
     prof_cpu = prof_blit = prof_idle = 0;
     prof_frames = prof_insn = 0;
     prof_win_ms  = (uint32_t)HAL_GetTick();
@@ -183,7 +275,7 @@ const char *dos_cpu_profile_name(void)
 
 int dos_cpu_run_frame(void)
 {
-    const unsigned int budget = dos_cpu_profiles[dos_cpu_profile_idx].insn_per_frame;
+    const unsigned int budget = dos_insn_per_frame;
     uint32_t t0 = dos_cyc();
     unsigned int insn0 = inst_counter;
     int alive;
@@ -196,7 +288,8 @@ int dos_cpu_run_frame(void)
          * (Core/Src/main.c:480-499 -- 280 MHz stock, up to ~354 MHz
          * overclocked), so a constant here would silently mis-size the budget
          * on an overclocked unit. */
-        uint32_t deadline_cyc = (uint32_t)((SystemCoreClock / 60u) / 100u * DOS_MAX_FRAME_PCT);
+        uint32_t deadline_cyc = (uint32_t)((SystemCoreClock / dos_screen_hz_sel)
+                                           / 100u * DOS_MAX_FRAME_PCT);
         alive = 1;
         do {
             alive = dos_cpu_frame(DOS_MAX_CHUNK_INSN);
@@ -244,7 +337,9 @@ bool dos_prof_take_sample(dos_prof_sample_t *out)
     }
 
     /* Absolute microseconds, so the cpu-vs-blit split can be compared against
-     * the 16,667 us frame period directly rather than only as a ratio. */
+     * the frame period directly rather than only as a ratio. That period is
+     * 1,000,000 / dos_screen_hz() us -- 16,667 at 60 Hz, 20,000 at 50,
+     * 13,333 at 75 -- not a constant any more. */
     {
         uint32_t mhz = SystemCoreClock / 1000000u;   /* 280 stock */
         out->blits        = prof_blits;
@@ -286,8 +381,10 @@ bool dos_cpu_speed_update_cb(odroid_dialog_choice_t *option,
 
     /* PER-GAME PERSISTENCE would be written here (see dos_cpu_profile_idx). */
 
+    dos_cpu_derive();
+
     const dos_cpu_profile_t *p = &dos_cpu_profiles[dos_cpu_profile_idx];
-    if (p->insn_per_frame) {
+    if (p->insn_per_sec) {
         /* Show the rate the profile asks for, in thousands of instructions per
          * second -- the number the label is actually promising. */
         snprintf(option->value, DOS_CPU_VALUE_LEN, "%s", p->name);

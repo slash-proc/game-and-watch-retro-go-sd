@@ -153,9 +153,7 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         common_emu_state.pause_after_frames = 0;
     }
 
-    lcd_set_refresh_rate(60);
-    common_emu_state.frame_time_10us = (uint16_t)(100000 / 60 + 0.5f);
-    audio_start_playing(AUDIO_SAMPLE_RATE / 60);
+    dos_screen_apply_rate();
 
     extern unsigned int inst_counter;
     extern unsigned short reg_ip;
@@ -223,7 +221,7 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
         ++dbg_frames;
 #if DOS_DEBUG_STATUS > 0
-        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames ~= 1s */
+        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames: ~1.07s at 60Hz */
             /* BDA clk_dtimer (guest 0x40:0x6C = 0x46C) is the 32-bit BIOS
              * tick counter. It must advance at ~18.2 Hz; printing it next to
              * HAL_GetTick() makes the rate directly measurable from the log
@@ -254,7 +252,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
          * specific game, a specific mode) are exactly the ones that are
          * inconvenient to reproduce." It also means measuring MAX needs no debug
          * build, so there is no debug flag to accidentally leave switched on. */
-        if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames ~= 1s */
+        /* Every 64 frames. That is ~1.07 s at 60 Hz, ~1.28 s at 50 and ~0.85 s
+         * at 75 -- the window length is measured (prof_win_ms), not assumed, so
+         * only the reporting cadence moves with the refresh rate. */
+        if ((dbg_frames & 0x3F) == 0) {
             dos_prof_sample_t s;
             if (dos_prof_take_sample(&s)) {
                 printf("DOS: prof %s @%luMHz ipf=%lu ips=%lu cpi=%lu | cpu=%u%% (%luus/f) "

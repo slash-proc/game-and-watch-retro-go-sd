@@ -21,6 +21,18 @@ void dos_cpu_speed_init(void);
  * deadline and refreshes the watchdog every chunk. */
 int dos_cpu_run_frame(void);
 
+/* Selected screen frequency in Hz -- one of 50/60/72/75, the only rates
+ * lcd_set_refresh_rate() can reach (gw_lcd.c:548-591). It is both the panel
+ * refresh rate and the guest frame rate; the profile table's instructions/second
+ * are divided by it to get the per-frame budget, so the emulated CPU speed does
+ * not move when the refresh rate does. */
+uint32_t dos_screen_hz(void);
+
+/* Apply the selected rate to the panel PLL, the frame period and the audio
+ * pacer. Call once before the frame loop, and again whenever the selection
+ * changes. */
+void dos_screen_apply_rate(void);
+
 /* Minimum size of the char buffer handed to the options row as `value`. */
 #define DOS_CPU_VALUE_LEN 20
 
