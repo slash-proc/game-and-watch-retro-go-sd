@@ -1017,7 +1017,31 @@ INCLUDE build/fceumm_mappers.ld
   _OVERLAY_DOS_ITC_SIZE = SIZEOF(.overlay_dos_itc);
   _OVERLAY_DOS_ITC_LMA_OFFSET = LOADADDR(.overlay_dos_itc) - LOADADDR(.overlay_dos);
 
-  .overlay_dos_bss _OVERLAY_DOS_LOAD_END : {
+  /* 4 KB-aligned ON PURPOSE, and it is a performance fix, not tidiness.
+   *
+   * With plain ALIGN(4) the BSS began at 0x2402cc88, in the SAME 4 KB page as the
+   * tail of the DOS interpreter's own code (which ended at exactly that address).
+   * The variables at the front of that BSS are the per-instruction decode state
+   * (set_flags_type, i_data0, raw_opcode_id, i_mod_size, bios_table_lookup), and
+   * the decode prologue stores to them ~20 times per emulated 8086 instruction.
+   *
+   * Under QEMU/gwemu that is pathological: a guest page containing translated code
+   * is marked `notdirty`, so EVERY store into it takes the slow path --
+   * notdirty_write -> page_collection_lock (GTree alloc) ->
+   * tb_invalidate_phys_page_range -> physical_memory_set_dirty_range. Measured with
+   * `perf --sort symbol` on gwemu v0.0.20: ~65% of host time in that cluster
+   * (page_trylock_add 15%, physical_memory_set_dirty_range 15%,
+   * tb_invalidate_phys_page_range__locked 12%, page_collection_lock 8%, ...) against
+   * only 6% in helper_lookup_tb_ptr and 3% actually executing translated code.
+   *
+   * Aligning to a page boundary puts all of the core's writable data in pages that
+   * contain no code, so those stores take the TLB fast path. Costs up to 4 KB of
+   * padding out of the overlay's ~61 KB headroom; hardware is indifferent either way
+   * (silicon has no such concept), so this is a pure emulator win.
+   *
+   * Keep this aligned if the overlay layout is ever reworked, and if a future core
+   * shows the same profile signature, check its code/BSS page sharing first. */
+  .overlay_dos_bss (ALIGN(_OVERLAY_DOS_LOAD_END, 4096)) : {
     . = ALIGN(4);
     _OVERLAY_DOS_BSS_START = .;
     build/dos/*.o (.bss .bss*)
