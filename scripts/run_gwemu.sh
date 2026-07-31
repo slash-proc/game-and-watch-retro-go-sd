@@ -14,6 +14,10 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "  --gdb-script <file.gdb>    Run <file.gdb> under batch GDB instead of the default"
     echo "                             forwarder. For one-off diagnostics only -- the default"
     echo "                             already forwards logs and traps exceptions."
+    echo "  --keep-on-fault            On a fault, print the report and RESUME instead of"
+    echo "                             exiting, so the firmware paints its own BSOD and the"
+    echo "                             emulator stays up to inspect or drive it. The exit code"
+    echo "                             stops being a fault signal -- grep for 'FAULT CAUGHT'."
     echo "  --log-file <path>          Write the session log here (default: ./gwemu.log,"
     echo "                             overwritten each run). Output still goes to stdout."
     echo "  --record <file.tl>         Record a sub-frame accurate input timeline to the specified file."
@@ -57,6 +61,7 @@ while [[ "$#" -gt 0 ]]; do
         --docker) USE_DOCKER=1; shift ;;
         --gdb) USE_GDB=1; shift ;;
         --gdb-script) GDB_SCRIPT="$2"; shift 2 ;;
+        --keep-on-fault) KEEP_ON_FAULT=1; shift ;;
         --log-file) LOG_FILE="$2"; shift 2 ;;
         --reset) USE_RESET=1; shift ;;
         --update) USE_UPDATE=1; shift ;;
@@ -251,7 +256,11 @@ GDB_RC=0
 if [ "$USE_GDB" = "1" ]; then
     $GDB_CMD build/gw_retro_go.elf -ex "target extended-remote :1234" || GDB_RC=$?
 else
-    $GDB_CMD build/gw_retro_go.elf -batch -x "${GDB_SCRIPT:-scripts/gwemu_log.gdb}" || GDB_RC=$?
+    # $fault_keep must be set BEFORE the script is sourced -- -x blocks in
+    # `continue` and never returns, so anything after it would not run.
+    $GDB_CMD build/gw_retro_go.elf -batch \
+        -ex "set \$fault_keep=${KEEP_ON_FAULT:-0}" \
+        -x "${GDB_SCRIPT:-scripts/gwemu_log.gdb}" || GDB_RC=$?
 fi
 
 if [ "$USE_DOCKER" = "1" ]; then

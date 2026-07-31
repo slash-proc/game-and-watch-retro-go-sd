@@ -65,7 +65,27 @@ commands
   printf "--- registers ---\n"
   info registers
   printf "=== END FAULT REPORT ===\n"
-  quit 1
+  # $fault_keep is always set by run_gwemu.sh (0 or 1) before this script is
+  # sourced, so it is never void here.
+  #
+  # 0 (default): quit non-zero. The exit code is how a caller or CI detects a
+  #   crashed run without parsing the log, and stopping here means the report
+  #   above is the last thing that happened -- nothing overwrites it.
+  #
+  # 1 (--keep-on-fault): resume instead. common_fault_handler_c goes on to call
+  #   BSOD(), so the firmware paints its own blue screen and the emulator stays
+  #   up -- which is the only way to see, photograph or drive the BSOD, and the
+  #   BSOD is firmware that needs testing too. The trade is that the exit code
+  #   is NO LONGER a dependable fault signal in this mode -- measured: a resumed
+  #   run whose inferior then exited normally still returned 1 -- so callers
+  #   must grep the log for "FAULT CAUGHT" rather than trusting $?.
+  if $fault_keep == 1
+    printf "[gwemu_log] --keep-on-fault: resuming so the firmware BSOD can paint.\n"
+    printf "[gwemu_log] exit code is not a fault signal here; grep for 'FAULT CAUGHT'.\n"
+    continue
+  else
+    quit 1
+  end
 end
 
 # Assertions are the other common abort path; catch them the same way.
@@ -75,7 +95,12 @@ commands
   printf "\n\n=== !!! ASSERT FAILED !!! ===\n"
   bt
   printf "=== END ASSERT REPORT ===\n"
-  quit 1
+  if $fault_keep == 1
+    printf "[gwemu_log] --keep-on-fault: resuming.\n"
+    continue
+  else
+    quit 1
+  end
 end
 
 continue
