@@ -14,6 +14,7 @@
 #include "dos_input.h"
 #include "dos_osk.h"
 #include "dos_cpu.h"
+#include "dos_audio.h"
 #include <string.h>
 
 /* Guest memory is a BSS array inside this overlay (.overlay_dos_bss), zeroed by
@@ -185,6 +186,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     dos_screen_freq_init();
     dos_screen_apply_rate();
 
+    /* After dos_screen_apply_rate(): that is what calls audio_start_playing()
+     * and so decides the DMA buffer length we will be filling. */
+    dos_audio_init();
+
     extern unsigned int inst_counter;
     extern unsigned short reg_ip;
     #define DBG_REG_CS 9            /* REG_CS is private to 8086tiny.c */
@@ -325,9 +330,8 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
             dos_prof_blit_end();
         }
 
-        if (drawFrame) {
-            // TODO: Submit audio
-        }
+        /* NOTE: audio submission is NOT here, and NOT under `if (drawFrame)`.
+         * It is fused with the sound-sync loop below -- see the comment there. */
 
         /* The only place this loop deliberately waits. If idle_pct comes back at
          * ~0 there is no headroom left and the frame is CPU/blit bound.
@@ -340,9 +344,30 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
          * Lengthening the buffer instead would need 48000/25 = 1920 samples
          * against AUDIO_BUFFER_LENGTH == 1077 -- a DMA write off the end of
          * .audio. See DOS_AUDIO_LEN in dos_cpu.c. */
-        dos_prof_idle_begin();
-        for (uint8_t e = dos_screen_sync_edges(); e; e--)
+        /* One dos_audio_submit() per DMA half-buffer edge, immediately before
+         * the wait for that edge. Three things force this shape:
+         *
+         * 1. The buffer accessors are edge-relative. audio_get_active_buffer()
+         *    and audio_get_buffer_length() both key off dma_state
+         *    (gw_audio.c:31-46), which flips on each half-complete interrupt.
+         *    Filling once per guest frame in a half-rate mode -- where
+         *    dos_screen_sync_edges() is 2 -- would write one half twice and
+         *    leave the other replaying stale content.
+         * 2. Audio is the frame clock, not a passenger. common_emu_sound_sync()
+         *    blocks on dma_counter, so the ring must never be left unfilled: a
+         *    skipped fill is an underrun, which is an audible click, and the
+         *    DOS core drops frames routinely under the CPU profiles.
+         * 3. The spkr_en latch is sampled and cleared inside submit, so it must
+         *    run exactly as often as buffers are consumed -- no more, no less.
+         *
+         * The submit is outside the profiler's idle bracket on purpose: it is
+         * work, not waiting, and folding it into idle_pct would understate how
+         * much headroom the frame actually has. */
+        for (uint8_t e = dos_screen_sync_edges(); e; e--) {
+            dos_audio_submit();
+            dos_prof_idle_begin();
             common_emu_sound_sync(false);
-        dos_prof_idle_end();
+            dos_prof_idle_end();
+        }
     }
 }

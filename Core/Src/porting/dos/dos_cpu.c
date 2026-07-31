@@ -200,9 +200,10 @@ uint8_t  dos_screen_sync_edges(void) { return dos_screen_div; }
 
 /* Audio DMA length for a given panel rate.
  *
- * SAFETY: the DOS core emits no samples, but audio_start_playing() is the frame
- * pacer -- common_emu_sound_sync() waits on the SAI DMA half-buffer counter --
- * so the length still has to be right. audio_start_playing(len) fills
+ * SAFETY: this length is now doubly load-bearing. It is the frame pacer --
+ * common_emu_sound_sync() waits on the SAI DMA half-buffer counter -- and since
+ * the PC speaker landed (dos_audio.c) it is also the number of samples we
+ * actually render per edge. audio_start_playing(len) fills
  * audiobuffer_dma[AUDIO_BUFFER_LENGTH * 2] (gw_audio.h:15,23), so len must
  * never exceed AUDIO_BUFFER_LENGTH == 1077.
  *
