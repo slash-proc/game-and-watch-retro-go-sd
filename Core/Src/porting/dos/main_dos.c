@@ -148,15 +148,28 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
            (unsigned)(dos_mem_required / 1024), (void *)mem,
            (void *)(mem + dos_mem_required), (void *)&__RAM_EMU_END__);
 
-    /* ahb_calloc, not ahb_malloc: unlike mem[] this block is NOT inside
-     * .overlay_dos_bss, so the launcher's overlay memset does not reach it and
-     * a dirty colour-text window would show the previous core's garbage. Must
-     * be handed over BEFORE dos_cpu_init(), which runs BIOS setup code that
-     * already touches the shadows. There is no failure path: ahb_only_malloc()
-     * asserts if the pool is short, which is the same contract every other AHB
-     * user in this tree has. */
+    /* ahb_ONLY_malloc, and that is not a stylistic choice -- ahb_malloc() and
+     * ahb_calloc() both try ram_malloc() FIRST (gw_malloc.c:65,83), which hands
+     * out AXI RAM_EMU starting at the global `ram_start`. ahb_init() resets
+     * current_ram_pointer but NOT ram_start, and ram_start is intflash BSS that
+     * whichever core ran last leaves set (main_smsplusgx.c:92, main_smw.c:313,
+     * ...). So ahb_calloc() here would return AXI memory at the *previous*
+     * core's BSS end -- straight through the middle of this overlay -- on any
+     * session where a game was played before DOS, and not on a cold boot. That
+     * is a session-dependent silent corruption of guest memory, so take the AHB
+     * pool explicitly.
+     *
+     * Zeroed by hand for the same reason ahb_calloc would have: unlike mem[]
+     * this block is NOT inside .overlay_dos_bss, so the launcher's overlay
+     * memset does not reach it and a dirty colour-text window would show the
+     * previous core's garbage.
+     *
+     * Must be handed over BEFORE dos_cpu_init(), which runs BIOS setup that
+     * already touches the shadows. No failure path: ahb_only_malloc() asserts
+     * if the pool is short, the same contract every other AHB user here has. */
     {
-        unsigned char *ahb = (unsigned char *)ahb_calloc(1, dos_mem_ahb_required);
+        unsigned char *ahb = (unsigned char *)ahb_only_malloc(dos_mem_ahb_required);
+        memset(ahb, 0, dos_mem_ahb_required);
         printf("DOS: guest AHB %u KB at %p\n",
                (unsigned)(dos_mem_ahb_required / 1024), (void *)ahb);
         dos_mem_set_ahb(ahb);
