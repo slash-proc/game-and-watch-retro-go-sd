@@ -630,8 +630,9 @@ INCLUDE build/fceumm_mappers.ld
    * AHB is 120 KB of RAM that no core but this one has any real use for (only
    * smsplusgx touches it, for an 8 KB BIOS, and never at the same time). The
    * framebuffer already lives there, taking 75 KB of the 120 KB heap; this claims
-   * another 34 KB of it statically, which is 34 KB the 724 KB pool does not have
-   * to find.
+   * another 34 KB of it *while GBA is the resident core*, which is 34 KB the
+   * 724 KB pool does not have to find. (It used to claim that 34 KB
+   * unconditionally — see the overlay note on the section below.)
    *
    * Which three is decided by bus traffic, not by size: AHB SRAM is on a slower
    * bus than the AXI SRAM the pool lives in, so what goes here is what is read
@@ -645,7 +646,27 @@ INCLUDE build/fceumm_mappers.ld
    * memset does not reach them. main_gba.c zeroes this range by hand; the symbols
    * below are what it uses. Forget that and the core starts with a cheat table full
    * of whatever the last game left in AHB. */
-  .gba_ahbram (NOLOAD) : {
+  /* OVERLAID on the shared AHB heap, not placed in front of it.
+   *
+   * This used to be `> AHBRAM`, which made the linker charge the region for it and
+   * pushed __ahbram_heap_start__ 34,976 bytes up — bytes that stayed reserved while
+   * *any* core ran, even though only one core is ever resident (cores are overlays
+   * memcpy'd in by run_internal_emu()). Same reasoning as .overlay_*_bss: give the
+   * section an explicit VMA and NO region, so it costs the region nothing and simply
+   * aliases the bottom of the heap.
+   *
+   * The address is ORIGIN(AHBRAM) — identical to what it resolved to before, and
+   * identical to __ahbram_heap_start__ now that nothing else is charged to the
+   * region ahead of ._ahbram. GBA therefore keeps the exact same addresses it had;
+   * what changes is that every other core gets those 34 KB back.
+   *
+   * The one thing this makes mandatory: GBA must now RESERVE this range out of the
+   * heap before its first ahb_malloc(), or the framebuffer would be handed the same
+   * addresses as the BIOS/cheat/sound arrays. main_gba.c does that with an
+   * ahb_only_malloc(__gba_ahb_end__ - __gba_ahb_start__) immediately after the
+   * memset — see the STATIC_RESERVE comment there. Remove it and GBA corrupts
+   * itself; nothing else is affected. */
+  .gba_ahbram ORIGIN(AHBRAM) (NOLOAD) : {
     . = ALIGN(8);
     __gba_ahb_start__ = .;
     build/gba/gba_memory.o (.bss.bios_rom)
@@ -668,7 +689,7 @@ INCLUDE build/fceumm_mappers.ld
              ORIGIN(AHBRAM) + LENGTH(AHBRAM) - __AHBRAM_AUDIO_RESERVE__,
            "Error: GBA AHB SRAM overflow (no room left for the framebuffer)");
 
-  } > AHBRAM
+  }
 
   /* Declared BEFORE .xip_gba, and that ordering is the whole point: input sections
    * go to whichever output section claims them first, so what the overlay names
@@ -1076,6 +1097,12 @@ INCLUDE build/fceumm_mappers.ld
     *(.audio)
     . = ALIGN(4);
     __ahbram_end__ = .;
+    /* .gba_ahbram is overlaid on the bottom of this heap at a hardcoded
+     * ORIGIN(AHBRAM). If anything is ever charged to the AHBRAM region ahead of
+     * ._ahbram, the heap would start above the GBA arrays and GBA's reservation
+     * in main_gba.c would no longer line up. Catch that at link time. */
+    ASSERT(ABSOLUTE(__ahbram_heap_start__) == ABSOLUTE(__gba_ahb_start__),
+           "Error: AHB heap no longer starts at the GBA AHB overlay (see .gba_ahbram)");
   } > AHBRAM
 
   /* The startup code goes first into FLASH */
