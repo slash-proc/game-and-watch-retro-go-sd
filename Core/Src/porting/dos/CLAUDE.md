@@ -2,9 +2,10 @@
 
 Status: **boots to a DOS prompt and takes button input.** MS-DOS 6.22 and FreeDOS both
 reach `A:\>`. Text mode renders in authentic CP437 and the CGA blit now renders real
-games — Alley Cat is playable. G&W buttons reach the guest keyboard
+games — Alley Cat is playable. PC-speaker audio is wired but unheard.
+G&W buttons reach the guest keyboard
 (`dos_input.c`): TOPBENCH was driven with the d-pad and A/Enter to a **SCORE of 23**.
-No audio, no on-screen keyboard, so only five distinct keys are reachable.
+No on-screen keyboard, so only five distinct keys are reachable.
 
 **This file is a summary and a list of traps. `external/8086tiny/STATUS.md` is the
 authority on current state** — it is maintained per-change and this one is not.
@@ -91,7 +92,14 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
 2. **Graphics modes beyond CGA.** CGA is now confirmed end-to-end: Alley Cat's title
    screen and playfield both render, so mode detection works for a 1984 title. Mode 13h,
    EGA/Mode X and Hercules are still unbuilt — see `docs/video-roadmap.md`.
-3. **Audio.** Not wired. PC speaker only for v1; see `docs/audio-roadmap.md`.
+3. **Audio.** PC speaker is **built** (`dos_audio.c`, `dos_audio_wave.h`,
+   `dos_spkr_take()` in `8086tiny.c`) but has never been heard — no gwemu run and
+   no hardware run. Two things to know before touching it: the `spkr_en` latch is
+   accumulate-on-write / clear-once-per-fill and `dos_spkr_take()` must keep
+   exactly one caller, and the 1077-sample DMA ceiling is enforced at the write in
+   `dos_audio_submit()` because the firmware itself bounds-checks nothing. Host
+   tests: `external/8086tiny/test286/runaudio.sh` (pitch) and `runspkr.sh`
+   (latch/gate). Design in `docs/audio-roadmap.md`.
 4. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
    all, so a game setting its background that way gets defaults. And
    `int10_switch_to_cga_gfx` clears with `char=0/attr=7`, which as pixel data is a stripe
