@@ -264,6 +264,11 @@ void lcd_set_buffers(uint16_t *buf1, uint16_t *buf2)
  * of framebuffer1/2 + fb1/2 set up at the top of this file. */
 static lcd_mode_t current_lcd_mode = LCD_MODE_RGB565;
 
+/* Caller-owned full-size palette; see lcd_set_clut_ext(). NULL means the normal
+ * cached path above is in charge. */
+static const uint32_t *ext_clut       = NULL;
+static uint16_t        ext_clut_count = 0;
+
 void lcd_setup_framebuffers(lcd_mode_t mode)
 {
   uint8_t *base = __lcd_pool_start__;
@@ -305,6 +310,10 @@ void lcd_setup_framebuffers(lcd_mode_t mode)
 
   current_lcd_mode = mode;
   active_framebuffer = 0;
+
+  /* The cart array a previous core handed us is about to be reused. */
+  ext_clut = NULL;
+  ext_clut_count = 0;
 
   /* Push to LTDC: change format and source address, then reload at vsync. */
   HAL_LTDC_SetPixelFormat(&hltdc, pixel_format, 0);
@@ -363,11 +372,22 @@ static uint32_t active_clut[LCD_EXTENDED_CLUT_MAX];
 static uint16_t active_clut_count   = 0;   /* cart entries in [0..count); twins at [count..2*count) */
 static uint16_t overlay_clut_count  = 0;   /* overlay entries in [BASE..BASE+count) */
 
+
 /* Push the entire populated range to the LTDC. The HAL writes index =
  * counter, so we always send slot 0 onward. Determine how far we need
  * to go from whichever range is populated. */
 static void clut_push(void)
 {
+  /* An external palette owns the whole hardware table. Re-push it rather than
+   * the cache -- pushing the cache here would stamp active_clut[0..67] over the
+   * guest's first 68 colours, which is exactly what lcd_set_overlay_clut()
+   * would otherwise do the moment the Retro-Go theme changed. */
+  if (ext_clut != NULL) {
+    HAL_LTDC_ConfigCLUT(&hltdc, (uint32_t *)ext_clut, ext_clut_count, 0);
+    HAL_LTDC_EnableCLUT(&hltdc, 0);
+    return;
+  }
+
   int total = (int)(2u * active_clut_count);
   if (overlay_clut_count > 0) {
     int overlay_end = LCD_OVERLAY_CLUT_BASE + overlay_clut_count;
@@ -444,8 +464,27 @@ void lcd_convert_lut8_to_rgb565(const uint8_t *src, uint16_t *dst, size_t count,
   }
 }
 
+/* Program the LTDC CLUT from a CALLER-OWNED palette of up to 256 RGB888
+ * entries, bypassing the darkened-twin cache. See gw_lcd.h for why this exists
+ * rather than a larger LCD_CLUT_CACHE_MAX. */
+void lcd_set_clut_ext(const uint32_t *clut, uint16_t count)
+{
+  if (clut == NULL || count == 0) {          /* hand control back */
+    ext_clut = NULL;
+    ext_clut_count = 0;
+    return;
+  }
+  if (count > 256) count = 256;
+  ext_clut = clut;
+  ext_clut_count = count;
+  if (current_lcd_mode == LCD_MODE_LUT8) clut_push();
+}
+
 void lcd_set_clut(const uint32_t *clut, uint16_t count)
 {
+  /* A 32-entry core reclaims the table from any external palette. */
+  ext_clut = NULL;
+  ext_clut_count = 0;
   if (current_lcd_mode != LCD_MODE_LUT8 || clut == NULL || count == 0) return;
   if (count > LCD_CLUT_CACHE_MAX) count = LCD_CLUT_CACHE_MAX;
 
@@ -477,7 +516,7 @@ void lcd_set_overlay_clut(const uint32_t *colors, uint16_t count)
 uint16_t lcd_pack_color(uint16_t rgb565)
 {
   if (current_lcd_mode != LCD_MODE_LUT8) return rgb565;
-  if (active_clut_count == 0 && overlay_clut_count == 0) return 0;
+  if (active_clut_count == 0 && overlay_clut_count == 0 && ext_clut_count == 0) return 0;
 
   /* Decode RGB565 → RGB888 components for distance comparison. */
   int r = ((rgb565 >> 11) & 0x1F) * 255 / 31;
@@ -501,6 +540,18 @@ uint16_t lcd_pack_color(uint16_t rgb565)
    * the +LCD_DARKEN_BIT OR path, not direct color matching. */
   for (uint16_t i = 0; i < active_clut_count; i++) {
     uint32_t e = active_clut[i];
+    int er = (int)((e >> 16) & 0xFF);
+    int eg = (int)((e >>  8) & 0xFF);
+    int eb = (int)((e      ) & 0xFF);
+    int dr = r - er, dg = g - eg, db = b - eb;
+    int d  = dr*dr + dg*dg + db*db;
+    if (d < best_dist) { best_dist = d; best_idx = (int)i; }
+  }
+  /* And an external full-size palette, if one owns the table. 256 entries of
+   * ~10 ops is ~2.5k operations, but menus resolve a handful of colours when
+   * they open, not per frame. */
+  for (uint16_t i = 0; i < ext_clut_count; i++) {
+    uint32_t e = ext_clut[i];
     int er = (int)((e >> 16) & 0xFF);
     int eg = (int)((e >>  8) & 0xFF);
     int eb = (int)((e      ) & 0xFF);

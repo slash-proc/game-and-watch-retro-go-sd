@@ -88,9 +88,13 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
    distinct keys — enough to play a game, not enough to type a command. The OSK in the
    reserved letterbox bars is mandatory, not optional. Design in
    `external/8086tiny/docs/input/03-onscreen-keyboard.md`.
-2. **Graphics modes beyond CGA.** CGA is now confirmed end-to-end: Alley Cat's title
-   screen and playfield both render, so mode detection works for a 1984 title. Mode 13h,
-   EGA/Mode X and Hercules are still unbuilt — see `docs/video-roadmap.md`.
+2. **Graphics modes beyond CGA.** CGA, **VGA mode 13h** (320x200x256 linear) and **EGA
+   mode 0Dh** (320x200x16 planar) all render, each host-verified pixel-exact
+   (`test286/run13h.sh`, `test286/run_ega.sh`). Planar reuses the existing 64 KB A-segment
+   aperture — 16 KB CPU read shadow at the bottom, four interleaved planes above — and
+   allocates no new guest RAM. **EGA 0Eh/10h, page flipping, Mode X and Hercules are not
+   built, and 0Eh/10h/page-flipping are blocked on RAM, not effort** (the arithmetic is in
+   `external/8086tiny/docs/video/11-ega-planar.md`).
 3. **Audio.** Not wired. PC speaker only for v1; see `docs/audio-roadmap.md`.
 4. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
    all, so a game setting its background that way gets defaults. And
