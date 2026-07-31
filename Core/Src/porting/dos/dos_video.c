@@ -549,6 +549,95 @@ static void blit_vga13(uint8_t *fb)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * EGA mode 0Dh -- 320x200, 16 colours, four bitplanes
+ *
+ * The planes are NOT at dos_mem_ptr(0xA0000). While planar is armed the core
+ * repartitions the 64 KB aperture into a 16 KB CPU-visible read shadow (which
+ * is what guest 0xA0000 folds onto, so that reads cost nothing) and 48 KB of
+ * interleaved planes above it. dos_ega_planes() is the only correct source
+ * here; see 8086tiny.c and external/8086tiny/docs/video/11-ega-planar.md.
+ *
+ * "Interleaved" means plane p at offset a lives at planes[4*a + p], so all four
+ * planes of one 8-pixel group are a single aligned 32-bit load. That layout is
+ * hchunhui/tiny386's (vga.c, BSD-3-Clause); the idea is theirs.
+ * ------------------------------------------------------------------------- */
+#define EGA_WIDTH     320
+#define EGA_ROWS      200
+#define EGA_ROWBYTES  (EGA_WIDTH / 8)   /* 40 bytes per plane per row */
+
+extern const unsigned char *dos_ega_planes(void);
+extern const unsigned char *dos_ega_attr_palette(void);
+extern int dos_ega_is_active(void);
+
+/* Last (attribute palette, DAC) pair pushed, so the CLUT is rebuilt only when
+ * the guest actually changes one. */
+static uint8_t ega_attr_shadow[16];
+static uint8_t ega_dac_shadow[16 * 3];
+static bool    ega_clut_valid = false;
+
+/* Unlike mode 13h, 16 colours fit the firmware's 32-entry model exactly, so this
+ * uses lcd_set_clut() rather than lcd_set_clut_ext(). That keeps LCD_DARKEN_BIT
+ * working -- a Retro-Go menu over an EGA screen dims properly, where over a mode
+ * 13h screen it shifts colour instead (see docs/video/10-mode-13h.md). */
+static void ega_sync_palette(void)
+{
+    const unsigned char *dac  = dos_vga_palette();
+    const unsigned char *attr = dos_ega_attr_palette();
+    uint32_t clut[DOS_CLUT_COUNT];
+
+    if (ega_clut_valid &&
+        memcmp(ega_attr_shadow, attr, sizeof ega_attr_shadow) == 0 &&
+        memcmp(ega_dac_shadow, dac, sizeof ega_dac_shadow) == 0)
+        return;
+
+    memcpy(ega_attr_shadow, attr, sizeof ega_attr_shadow);
+    memcpy(ega_dac_shadow, dac, sizeof ega_dac_shadow);
+
+    for (unsigned i = 0; i < 16; i++) {
+        /* Two indirections, both real: the pixel value indexes an Attribute
+         * Controller palette register, and that register indexes the DAC. A
+         * game can repaint the screen by writing either one. */
+        const unsigned char *e = dac + (attr[i] & 0x3F) * 3;
+        const unsigned r = e[0], g = e[1], b = e[2];
+        clut[i] = (uint32_t)(((r << 2 | r >> 4) & 0xFF) << 16) |
+                  (uint32_t)(((g << 2 | g >> 4) & 0xFF) <<  8) |
+                  (uint32_t)( ((b << 2 | b >> 4) & 0xFF)      );
+    }
+    /* 16-31 are unreachable from a 4-bit pixel, but must not be left stale --
+     * lcd_pack_color() searches the whole table for menu colours. Mirror. */
+    for (unsigned i = 16; i < DOS_CLUT_COUNT; i++)
+        clut[i] = clut[i - 16];
+
+    lcd_set_clut(clut, DOS_CLUT_COUNT);
+    ega_clut_valid = true;
+    last_colsel = 0xFF;         /* CGA/text must reprogram on the way back */
+}
+
+static void blit_ega16(uint8_t *fb)
+{
+    const uint8_t *planes = (const uint8_t *)dos_ega_planes();
+    uint8_t *dst_row = fb + DOS_LETTERBOX * DOS_LCD_WIDTH;
+
+    for (unsigned y = 0; y < EGA_ROWS; y++, dst_row += DOS_LCD_WIDTH) {
+        const uint8_t *src = planes + 4 * (y * EGA_ROWBYTES);
+        uint8_t *dst = dst_row;
+
+        for (unsigned g = 0; g < EGA_ROWBYTES; g++, src += 4) {
+            /* One 32-bit load, four planes. Bit 7 is the leftmost pixel. */
+            uint32_t q = *(const uint32_t *)src;
+            uint32_t p0 = q & 0xFF, p1 = (q >> 8) & 0xFF;
+            uint32_t p2 = (q >> 16) & 0xFF, p3 = (q >> 24) & 0xFF;
+
+            for (int bit = 7; bit >= 0; bit--)
+                *dst++ = (uint8_t)(((p0 >> bit) & 1)
+                                 | (((p1 >> bit) & 1) << 1)
+                                 | (((p2 >> bit) & 1) << 2)
+                                 | (((p3 >> bit) & 1) << 3));
+        }
+    }
+}
+
 static void blit_cga(uint8_t *fb, uint8_t mode)
 {
     /* The whole 64 KB aperture folds contiguously (guest 0xB0000-0xBFFFF ->
@@ -1075,6 +1164,7 @@ void dos_video_blit(void)
         /* Leaving mode 13h hands the CLUT back to the cached 32-entry path;
          * entering it must re-push, because lcd_set_clut() cleared ext_clut. */
         vga13_clut_valid = false;
+        ega_clut_valid = false;
         if (mode != 0x13) {
             lcd_set_clut_ext(NULL, 0);
             last_colsel = 0xFF;          /* force program_clut() on the way back */
@@ -1089,10 +1179,16 @@ void dos_video_blit(void)
      * 2 and 7 to 3 (bios.asm:1080-1083), so mode 7 never appears. 4/5 are CGA
      * 320x200 and 6 is CGA 640x200.
      *
-     * Mode 0x13 is VGA 320x200x256 linear. Anything else -- Hercules, EGA,
-     * Mode X/Y -- is unsupported: leave the screen alone rather than render one
-     * mode's memory through another mode's decoder, which produces
-     * confident-looking garbage. Note that the BIOS
+     * Mode 0x13 is VGA 320x200x256 linear. Mode 0x0D is EGA 320x200x16 planar;
+     * the core only reinterprets the aperture as bitplanes while its BIOS armed
+     * that mode, so blit_ega16() and this arm are always consistent.
+     *
+     * Anything else -- Hercules, EGA 0Eh/10h, Mode X/Y -- is unsupported: leave
+     * the screen alone rather than render one mode's memory through another
+     * mode's decoder, which produces confident-looking garbage. 0Eh and 10h are
+     * refused by the BIOS for a concrete reason: they need 16,000 and 28,000
+     * bytes per plane against the 12,288 the repartitioned aperture holds. Note
+     * that the BIOS
      * programs the *Hercules* CRTC to 640x400 even for CGA modes
      * (bios.asm:1086-1112); that is upstream's pixel-doubling for its SDL path
      * and is deliberately ignored -- we read the real 320x200 buffer. */
@@ -1104,5 +1200,8 @@ void dos_video_blit(void)
     } else if (mode == 0x13) {
         vga13_sync_palette();
         blit_vga13(fb);
+    } else if (mode == 0x0D && dos_ega_is_active()) {
+        ega_sync_palette();
+        blit_ega16(fb);
     }
 }
