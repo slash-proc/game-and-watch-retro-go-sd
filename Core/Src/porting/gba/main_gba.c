@@ -756,6 +756,20 @@ void app_main_gba(uint8_t load_state, uint8_t start_paused, int8_t save_slot)
      * else will: AHB holds whatever the last core left there. */
     memset(__gba_ahb_start__, 0, (size_t)(__gba_ahb_end__ - __gba_ahb_start__));
 
+    /* STATIC_RESERVE. .gba_ahbram is OVERLAID on the AHB heap (explicit VMA of
+     * ORIGIN(AHBRAM), no output region), so those 34 KB are no longer reserved
+     * while some other core runs — but that also means the heap's bump pointer
+     * starts *inside* them. Claim them here, before the first ahb_malloc(), or the
+     * framebuffer below would be handed the same addresses as bios_rom / cheats /
+     * sound_buffer. A link-time ASSERT keeps __ahbram_heap_start__ ==
+     * __gba_ahb_start__, so this reproduces the pre-overlay layout exactly. */
+    {
+        size_t gba_ahb_static = (size_t)(__gba_ahb_end__ - __gba_ahb_start__);
+        void *reserved = ahb_only_malloc(gba_ahb_static);
+        if (reserved != (void *)__gba_ahb_start__)
+            gba_fatal("AHB heap misaligned", "GBA AHB reservation missed __gba_ahb_start__");
+    }
+
     gba_framebuffer = ahb_malloc(GBA_FRAMEBUFFER_BYTES);
     if (gba_framebuffer == NULL)
         gba_fatal("Out of AHB SRAM", "The 75KB framebuffer could not be allocated");
