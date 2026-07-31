@@ -215,11 +215,21 @@ else
     # Native QEMU doesn't have a built-in --timeline argument like the Docker python wrapper does,
     # but we map QMP equally to both environments.
     
+    # gwemu resolves these itself, so hand it an absolute path. Only prefix
+    # $PWD when the caller gave a relative one -- blindly prefixing turned an
+    # absolute --timeline/--record path into "$PWD/tmp/x.tl" and gwemu then
+    # reported "cannot read ...: No such file or directory".
     if [ -n "$RECORD_FILE" ]; then
-        export GNW_TIMELINE_RECORD="$PWD/$RECORD_FILE"
+        case "$RECORD_FILE" in
+            /*) export GNW_TIMELINE_RECORD="$RECORD_FILE" ;;
+            *)  export GNW_TIMELINE_RECORD="$PWD/$RECORD_FILE" ;;
+        esac
     fi
     if [ -n "$TIMELINE_FILE" ]; then
-        export GNW_TIMELINE="$PWD/$TIMELINE_FILE"
+        case "$TIMELINE_FILE" in
+            /*) export GNW_TIMELINE="$TIMELINE_FILE" ;;
+            *)  export GNW_TIMELINE="$PWD/$TIMELINE_FILE" ;;
+        esac
     fi
 
     # SD_CARD=0 (FrogFS) builds have no SD image - the filesystem lives in
