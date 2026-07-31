@@ -381,9 +381,37 @@ static void clut_push(void)
   /* An external palette owns the whole hardware table. Re-push it rather than
    * the cache -- pushing the cache here would stamp active_clut[0..67] over the
    * guest's first 68 colours, which is exactly what lcd_set_overlay_clut()
-   * would otherwise do the moment the Retro-Go theme changed. */
+   * would otherwise do the moment the Retro-Go theme changed.
+   *
+   * BUT the Retro-Go overlay lives at [64..64+overlay_clut_count), and that
+   * range is INSIDE a 256-entry external palette. Pushing the guest's table
+   * alone puts guest colours in those slots, so every menu pixel drawn with an
+   * overlay index comes out an arbitrary colour -- menu text unreadable over a
+   * 256-colour game. Re-assert the overlay entries on top.
+   *
+   * The trade is deliberate and this way round: while a menu is open, up to
+   * LCD_OVERLAY_CLUT_MAX of the guest's 256 colours are wrong, which is close to
+   * invisible on a photographic 256-colour frame. Unreadable menu text is not. */
   if (ext_clut != NULL) {
     HAL_LTDC_ConfigCLUT(&hltdc, (uint32_t *)ext_clut, ext_clut_count, 0);
+
+    /* The HAL takes the CLUT index from the ARRAY POSITION, so the overlay
+     * entries cannot be pushed on their own -- &active_clut[64] would land at
+     * slots 0-3 and corrupt the guest instead. Restage the low 68 slots: the
+     * guest's own colours below the overlay base, the overlay on top. Slots
+     * 68..255 keep what the first push wrote. 272 bytes of stack, only while a
+     * menu is actually open. */
+    if (overlay_clut_count > 0) {
+      uint32_t staged[LCD_OVERLAY_CLUT_BASE + LCD_OVERLAY_CLUT_MAX];
+      uint16_t low = (ext_clut_count < LCD_OVERLAY_CLUT_BASE)
+                       ? ext_clut_count : LCD_OVERLAY_CLUT_BASE;
+      for (uint16_t i = 0; i < low; i++)        staged[i] = ext_clut[i];
+      for (uint16_t i = low; i < LCD_OVERLAY_CLUT_BASE; i++) staged[i] = 0;
+      for (uint16_t i = 0; i < overlay_clut_count; i++)
+        staged[LCD_OVERLAY_CLUT_BASE + i] = active_clut[LCD_OVERLAY_CLUT_BASE + i];
+      HAL_LTDC_ConfigCLUT(&hltdc, staged,
+                          (uint32_t)(LCD_OVERLAY_CLUT_BASE + overlay_clut_count), 0);
+    }
     HAL_LTDC_EnableCLUT(&hltdc, 0);
     return;
   }
