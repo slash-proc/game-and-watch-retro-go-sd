@@ -1843,7 +1843,7 @@ GWEMU_STAMP   := $(BUILD_DIR)/sdcard.img
 define GWEMU_MEDIA_PREP
 echo "Creating 64MB empty extflash image..."; \
 dd if=/dev/zero of=$(BUILD_DIR)/extflash.bin bs=1M count=64 2>/dev/null; \
-$(PYTHON3) scripts/make_sdcard_image.py $(BUILD_DIR)/sdcard.img --size-mb 256; \
+$(PYTHON3) scripts/make_sdcard_image.py $(BUILD_DIR)/sdcard.img --fit sd_content --fit $(GWEMU_ROMS_SRC); \
 mformat -i $(BUILD_DIR)/sdcard.img@@1M -F -v RETROGO ::; \
 mcopy -i $(BUILD_DIR)/sdcard.img@@1M -s sd_content/* ::/
 endef
