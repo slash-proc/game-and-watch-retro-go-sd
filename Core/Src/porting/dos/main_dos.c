@@ -15,6 +15,7 @@
 #include "dos_osk.h"
 #include "dos_cpu.h"
 #include "dos_audio.h"
+#include "gw_malloc.h"   /* ahb_calloc() */
 #include <string.h>
 
 /* Guest memory is a BSS array inside this overlay (.overlay_dos_bss), zeroed by
@@ -22,6 +23,14 @@
 extern unsigned char mem[];
 /* Guest RAM footprint, owned by 8086tiny.c so the two cannot drift. */
 extern const unsigned int dos_mem_required;
+/* The guest's other physical region. The fold returns a POINTER, not an index,
+ * so the guest's 1 MB no longer has to come out of one allocation: the cold
+ * windows (colour text at 0xB8000, the two BIOS shadows, the scratch page) live
+ * in AHB SRAM instead, which nothing else uses while a DOS core is resident.
+ * That is 44 KB of AXI returned to .overlay_dos_bss. See dos_fold() in
+ * 8086tiny.c for what moved and, more importantly, what must not. */
+extern const unsigned int dos_mem_ahb_required;
+extern void dos_mem_set_ahb(unsigned char *p);
 extern unsigned short *regs16;
 extern unsigned char *regs8;
 extern unsigned char io_ports[];
@@ -138,6 +147,20 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     printf("DOS: guest RAM %u KB at %p, ends %p (limit %p)\n",
            (unsigned)(dos_mem_required / 1024), (void *)mem,
            (void *)(mem + dos_mem_required), (void *)&__RAM_EMU_END__);
+
+    /* ahb_calloc, not ahb_malloc: unlike mem[] this block is NOT inside
+     * .overlay_dos_bss, so the launcher's overlay memset does not reach it and
+     * a dirty colour-text window would show the previous core's garbage. Must
+     * be handed over BEFORE dos_cpu_init(), which runs BIOS setup code that
+     * already touches the shadows. There is no failure path: ahb_only_malloc()
+     * asserts if the pool is short, which is the same contract every other AHB
+     * user in this tree has. */
+    {
+        unsigned char *ahb = (unsigned char *)ahb_calloc(1, dos_mem_ahb_required);
+        printf("DOS: guest AHB %u KB at %p\n",
+               (unsigned)(dos_mem_ahb_required / 1024), (void *)ahb);
+        dos_mem_set_ahb(ahb);
+    }
 
     /* Literal path, matching every other core in this tree (/bios/nes/palettes.bin,
      * /bios/msx/msxromdb.bin, /bios/mini/bios.min, ...). Do NOT use

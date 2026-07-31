@@ -130,11 +130,19 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
 
 ## The memory map — resolved, for reference
 
-`dos_fold()` (`8086tiny.c`) folds the guest 1 MB into 780 KB: 640 KB conventional
-identity-mapped, a 64 KB video aperture at guest `0xB0000`, a 64 KB BIOS+register window at
-guest `0xF0000`, 4 KB windows for the BIOS's `C000:0` and `C800:0` shadows, everything else
-to a scratch page. Dropping the `0xC0000`-`0xEFFFF` option-ROM hole is what makes it fit —
-**that hole is not entirely dead, which is why the two 4 KB windows exist.**
+`dos_fold()` (`8086tiny.c`) maps the guest 1 MB onto **two physical regions**, and it
+returns a **pointer**, not an index — an index into one array is what used to force every
+guest-addressable byte into one AXI allocation. AXI `mem[]` holds 640 KB conventional plus
+the 64 KB aperture at guest `0xA0000` (identity, one compare for both) and the 64 KB
+BIOS+register window at guest `0xF0000`. AHB SRAM holds the 32 KB colour-text window at
+`0xB8000`, the BIOS's `C000:0`/`C800:0` shadows and the scratch page — all cold, all behind
+the two hot tests in `dos_fold_cold()`. Dropping most of the `0xC0000`-`0xEFFFF` option-ROM
+hole is what makes it fit — **that hole is not entirely dead, which is why the two 4 KB
+windows exist.** Full accounting: `external/8086tiny/docs/memory/01-two-region-fold.md`.
+
+**Three ways to break this silently** (all compile): using a folded address as a *number*
+(LEA), bounding a transfer against `RAM_SIZE` alone, and adding a region test in front of
+the two hot compares. See `docs/traps.md` under *Memory and layout*.
 
 `REGS_BASE` is back at a stock `0xF0000` guest address, so `0xB8000` is reachable and
 `-DNO_GRAPHICS` is gone. Only two sites apply the fold: `SEGREG` and the instruction fetch.
@@ -145,8 +153,10 @@ area, PICO-8 pattern — and because `.lcd_pool` spans all of RAM_UC (`__lcd_poo
 __RAM_EMU_START__`) that yields **874 KB in one unbroken run**. 780 KB guest + code/BSS
 reaches 813 KB, leaving 61 KB.
 
-Total budget, verified: 874 KB AXI (LUT8) + 120 KB AHB + 64 KB ITCM. **DTCM is not
-available** — it is firmware's (~17 KB data/bss, 85 KB heap, 20 KB stack); apps reach it
+Total budget, verified: 874 KB AXI (LUT8) + **87,904 B AHB** (not 120 KB — `.gba_ahbram`
+statically reserves 34,976 B whichever core is resident, and the top 8 KB is the `.audio`
+DMA buffer) + 64 KB ITCM. AXI headroom is **49,368 bytes** after the two-region fold, up
+from 4,312. **DTCM is not available** — it is firmware's (~17 KB data/bss, 85 KB heap, 20 KB stack); apps reach it
 only through `malloc`. See the RAM ownership contract.
 
 ## Submodule hygiene
