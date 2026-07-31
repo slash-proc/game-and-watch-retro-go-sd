@@ -117,6 +117,17 @@ IMAGE_SIZE = TOTAL_SECTORS * BYTES_PER_SECTOR
 
 TEMPLATE = Path("external/8086tiny/fd.img")
 MEDIA_DIR = Path("external/8086tiny/dos_variants")
+# The XMS/HMA shim. See external/8086tiny/bios_source/xmshook.asm for the whole
+# story; the short version is that bios.asm's INT 2Fh handler is unreachable
+# once DOS boots (DOS installs the FIRST 2Fh handler on a real PC and therefore
+# does not chain down to a BIOS one), so the XMS driver has to be republished
+# from a DEVICE= line that loads above the kernel. Without it DOS=HIGH cannot
+# work and every game reports "Extended 0 Kbytes".
+XMSHOOK = Path("external/8086tiny/xmshook.sys")
+XMSHOOK_NAME = "XMSHOOK.SYS"
+# No drive letter: DOS resolves a DEVICE= path with a leading backslash against
+# the boot drive, which is A: for a floppy image and C: for --hdd.
+XMSHOOK_LINE = "DEVICE=\\" + XMSHOOK_NAME
 
 # Files copied out of the template to make the image bootable. KERNEL.SYS and
 # COMMAND.COM are mandatory; CONFIG.SYS sets SHELL= and is what makes
@@ -878,11 +889,67 @@ class DosSource:
         raise NotImplementedError
 
 
+def xmshook_bytes() -> bytes:
+    """The XMSHOOK.SYS blob, or raise if it has not been assembled.
+
+    Committed next to `bios` and rebuilt by the same `make -C external/8086tiny
+    bios` step -- NASM is a host tool kept out of the ARM image, so both blobs
+    ship prebuilt.
+    """
+    if not XMSHOOK.is_file():
+        raise DiskFullError(
+            f"{XMSHOOK} is missing -- run `make -C external/8086tiny bios` to "
+            f"assemble it, or pass --no-dos-high to build an image without an "
+            f"XMS driver (and without the HMA, costing the guest ~45 KB)")
+    return XMSHOOK.read_bytes()
+
+
+def enable_dos_high(config: bytes) -> bytes:
+    """Uncomment DOS=HIGH in a CONFIG.SYS lifted from the FreeDOS template.
+
+    fd.img ships `;DOS=HIGH,UMB` commented out. That was correct while the core
+    was an 8086 with no memory above the 1 MB line; it is not any more. The core
+    is a 286 and implements the HMA (external/8086tiny/8086tiny.c, dos_fold(),
+    and XMS functions 01h/02h in dos_xms.c), so the FreeDOS kernel can relocate
+    itself out of conventional memory -- which is worth ~45 KB to every game on
+    every generated image.
+
+    Emitted as plain `DOS=HIGH`, NOT `DOS=HIGH,UMB`:
+
+      * HIGH is backed. The HMA is 64 KB of AHB SRAM the fold answers with when
+        A20 is on, and the kernel finds the XMS driver at INT 2Fh AX=4300h --
+        installed by our BIOS, not by HIMEM.EXE. There is no HIMEM.EXE on these
+        images and none is wanted; the DEVICE= line stays commented.
+      * UMB is not. Upper memory blocks need real RAM inside the guest's own
+        1 MB between 0xC0000 and 0xEFFFF, and dos_fold() has two 4 KB BIOS
+        shadow windows there and nothing else. Asking for UMBs we cannot
+        provide gets DOSDATA=UMB placed nowhere.
+
+    Rewrites the exact commented line rather than appending, so the result still
+    looks like the template a reader can diff against.
+    """
+    text = config.decode("latin1")
+    sep = "\r\n" if "\r\n" in text else "\n"
+    for commented in (";DOS=HIGH,UMB", ";DOS=HIGH"):
+        if commented in text:
+            text = text.replace(commented, XMSHOOK_LINE + sep + "DOS=HIGH", 1)
+            break
+    else:
+        if "DOS=HIGH" not in text:
+            # Nothing to uncomment: append. CONFIG.SYS is order-insensitive
+            # for DOS=, and the kernel relocates after the whole file is read.
+            text = text.rstrip(sep) + sep + XMSHOOK_LINE + sep + "DOS=HIGH" + sep
+        elif XMSHOOK_LINE not in text:
+            text = XMSHOOK_LINE + sep + text
+    return text.encode("latin1")
+
+
 class FreeDosSource(DosSource):
     """external/8086tiny/fd.img -- the shipped, redistributable default."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, dos_high: bool = True):
         self.path = path
+        self.dos_high = dos_high
         self.reader = Fat12Reader(path)
         self.label = describe_dos(self.reader, path)
 
@@ -900,7 +967,11 @@ class FreeDosSource(DosSource):
                 if name in REQUIRED_SYSTEM_FILES:
                     raise DiskFullError(f"{self.path}: missing required {name}")
                 continue
+            if name == "CONFIG.SYS" and self.dos_high:
+                content = enable_dos_high(content)
             out.append((name, content, ATTR_ARCHIVE))
+        if self.dos_high:
+            out.append((XMSHOOK_NAME, xmshook_bytes(), ATTR_ARCHIVE))
         return out
 
     def listing(self):
@@ -918,7 +989,7 @@ class MsDosSource(DosSource):
     """
 
     def __init__(self, media: list[Path], utils: list[str] = (),
-                 quitemu: bytes | None = None):
+                 quitemu: bytes | None = None, dos_high: bool = True):
         if not media:
             raise DiskFullError("no MS-DOS media given (--media)")
         self.readers = {}
@@ -944,6 +1015,7 @@ class MsDosSource(DosSource):
             )
         self.utils = [u.upper() for u in utils]
         self.quitemu = quitemu
+        self.dos_high = dos_high
         self.label = describe_dos(self.readers[self.boot_disk], self.boot_disk)
 
     @property
@@ -971,8 +1043,11 @@ class MsDosSource(DosSource):
             ("IO.SYS", boot.read("IO.SYS"), ATTR_SYSTEM_FILE),
             ("MSDOS.SYS", boot.read("MSDOS.SYS"), ATTR_SYSTEM_FILE),
             ("COMMAND.COM", boot.read("COMMAND.COM"), ATTR_ARCHIVE),
-            ("CONFIG.SYS", msdos_config_sys().encode("latin1"), ATTR_ARCHIVE),
+            ("CONFIG.SYS", msdos_config_sys(self.dos_high).encode("latin1"),
+             ATTR_ARCHIVE),
         ]
+        if self.dos_high:
+            out.append((XMSHOOK_NAME, xmshook_bytes(), ATTR_ARCHIVE))
         if self.quitemu is not None:
             out.append(("QUITEMU.COM", self.quitemu, ATTR_ARCHIVE))
         for name in self.utils:
@@ -991,19 +1066,30 @@ class MsDosSource(DosSource):
         )
 
 
-def msdos_config_sys() -> str:
+def msdos_config_sys(dos_high: bool = True) -> str:
     """CONFIG.SYS for the MS-DOS path.
 
     Deliberately almost empty. There is no SHELL= line: MS-DOS defaults to
     COMMAND.COM in the root of the boot drive, and hardcoding A:\\ or C:\\ would
-    be a guess about how the core maps the image. HIMEM/EMM386/DOS=HIGH are all
-    absent because this is an 8086 -- they need a 286/386 and would abort.
+    be a guess about how the core maps the image.
+
+    DOS=HIGH used to be absent here with the comment "8086, so no
+    HIMEM/EMM386/DOS=HIGH". That was true when it was written and is not any
+    more: the core is a 286 and implements the HMA. See enable_dos_high() for
+    why HIGH is on and UMB is not, and why no HIMEM.SYS line is needed -- the
+    XMS driver is installed by our BIOS before the kernel starts.
+
+    NOTE the difference from the FreeDOS path: MS-DOS's own DOS=HIGH is more
+    demanding than FreeDOS's. It relocates a larger kernel and, unlike FreeDOS,
+    will fall back to conventional memory silently if anything about the HMA
+    displeases it -- so a generated MS-DOS image that shows no saving is a
+    result to investigate, not a build failure.
     """
-    return "\r\n".join([
-        "REM Generated by tools/mkdosdisk.py -- 8086, so no HIMEM/EMM386/DOS=HIGH.",
-        "FILES=20",
-        "BUFFERS=15",
-    ]) + "\r\n"
+    lines = ["REM Generated by tools/mkdosdisk.py -- 286 core with an HMA (no HIMEM needed)."]
+    if dos_high:
+        lines += [XMSHOOK_LINE, "DOS=HIGH"]
+    lines += ["FILES=20", "BUFFERS=15"]
+    return "\r\n".join(lines) + "\r\n"
 
 
 def resolve_media(paths: list[Path] | None) -> list[Path]:
@@ -1545,6 +1631,11 @@ def main() -> int:
     parser.add_argument("--subdir", type=str, default=None, metavar="DIR",
                         help="Hard-disk mode: put a flat payload in \\DIR instead of "
                              "the root, e.g. --subdir DF")
+    parser.add_argument("--no-dos-high", action="store_true",
+                        help="Do not put DOS=HIGH in CONFIG.SYS. The kernel then "
+                             "stays in conventional memory, costing a game ~45 KB "
+                             "-- an escape hatch for a guest that dislikes the HMA, "
+                             "not a default worth choosing.")
     parser.add_argument("--verify", action="store_true",
                         help="Re-open each written image and check it structurally")
     parser.add_argument("--list-template", "--list-source", dest="list_template",
@@ -1568,12 +1659,13 @@ def main() -> int:
             # keeping the root directory to exactly what boots makes an image
             # comparable against the hand-built ones it replaces.
             quitemu = None if args.hdd else load_quitemu(args.template)
-            source: DosSource = MsDosSource(media, utils, quitemu)
+            source: DosSource = MsDosSource(media, utils, quitemu,
+                                            dos_high=not args.no_dos_high)
         else:
             if not args.template.is_file():
                 print(f"error: template not found: {args.template}", file=sys.stderr)
                 return 1
-            source = FreeDosSource(args.template)
+            source = FreeDosSource(args.template, dos_high=not args.no_dos_high)
     except DiskFullError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
