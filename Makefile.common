@@ -2311,6 +2311,16 @@ DOS_CFLAGS += -O3
 DOS_CFLAGS_EXTRA ?=
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
 
+# ...but NOT for the XMS services. Every entry point in dos_xms.c is a cold hook
+# (an INT 15h call or an XMS driver call), never a memory operand, so -O3 buys
+# nothing there and costs overlay CODE -- which is the scarcer resource: the
+# overlay's BSS starts at ALIGN(_OVERLAY_DOS_LOAD_END, 4096), so the first byte
+# of code past the alignment pad moves .overlay_dos_bss up a whole 4 KB page and
+# takes that 4 KB straight out of the guest's RAM_EMU headroom. A cliff, not a
+# slope. Measured: -O3 3,460 B of text, -Os 2,236 B, for no measurable difference
+# on a path that is bounded by SD latency anyway.
+$(BUILD_DIR)/dos/dos_xms.o: DOS_CFLAGS += -Os
+
 $(BUILD_DIR)/dos/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) "[ CC dos ] $(notdir $<)"
 	$(V)$(CC) -c $(CFLAGS) $(DOS_CFLAGS) $(DOS_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/dos/$(notdir $(<:.c=.lst)) $< -o $@
