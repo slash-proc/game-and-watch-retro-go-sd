@@ -28,7 +28,27 @@ typedef struct {
     int is_open;
 } FatFSFile;
 
-#define MAX_OPEN_FILES 3
+/* System-wide open-file table. This is every fopen() in the firmware, not a
+ * per-subsystem budget.
+ *
+ * Was 3, which the MS-DOS core exhausts on its own: it holds disk[0] (hard
+ * disk), disk[1] (floppy) and disk[2] (the BIOS image) open for the whole
+ * session (8086tiny.c:774-776). With all three taken, _open() returns -1 for
+ * everyone else -- and the failures are SILENT, because callers treat a NULL
+ * FILE* as "not present" rather than "no handles":
+ *
+ *   - rg_i18n.c:245 fopen()s the font file on a glyph-cache miss and returns
+ *     unknown_glyph_entry on failure, so the UI renders diamonds for every
+ *     character not already cached. Lowercase survives (cached while the
+ *     launcher drew), uppercase and symbols do not.
+ *   - the guest cannot open what it needs either, so a boot stalls with no
+ *     fault and no message.
+ *
+ * 8 leaves room for the DOS core's 3, a font read, an i18n strings read, a
+ * savestate, and slack. Each entry is a FatFs FIL, which at FF_MAX_SS 512 and
+ * FF_FS_TINY 0 carries its own sector buffer, so this costs ~560 bytes each in
+ * DTCM .bss and comes out of the user heap. */
+#define MAX_OPEN_FILES 8
 FatFSFile file_table[MAX_OPEN_FILES];
 
 void init_file_table() {
