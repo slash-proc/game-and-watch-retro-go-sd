@@ -17,6 +17,7 @@
  */
 
 #include "dos_input.h"
+#include "dos_osk.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -86,11 +87,10 @@ typedef struct {
  * ("not connected on mario", Core/Inc/main.h:228), so the keys that make a DOS
  * prompt usable are kept on inputs that exist on every unit.
  *
- * 'n' is bound twice, to SELECT and to GAME, because 'y'/'n' are a pair for DOS
- * confirmation prompts and SELECT does not exist on a mario unit. Two rows for
- * one keysym is harmless: each edge-detects independently, so pressing both
- * sends 'n' twice and releasing either sends one key-up -- and with no BIOS
- * typematic repeat a spurious key-up has no observable effect.
+ * GAME (ODROID_INPUT_START) is NOT in this table any more: it is the on-screen
+ * keyboard toggle. See dos_input_update() for why it, and not the zelda-only
+ * START button, got the job. It used to send 'n'; 'n' is still on SELECT for
+ * zelda units and is reachable from the OSK on every unit.
  *
  * Unassigned: the physical START button (ODROID_INPUT_X, zelda only).
  */
@@ -103,7 +103,6 @@ static const dos_key_binding_t dos_key_map[] = {
     { ODROID_INPUT_B,      SDLK_ESCAPE, 0 },   /* B button                   */
     { ODROID_INPUT_SELECT, SDLK_y,      0 },   /* TIME button                */
     { ODROID_INPUT_Y,      SDLK_n,      0 },   /* SELECT button (zelda only) */
-    { ODROID_INPUT_START,  SDLK_n,      0 },   /* GAME button -- 'n' on mario too */
     /* Unassigned: ODROID_INPUT_X, the physical START button (zelda only).
      * SDLK_SPACE and DOS_KMOD_CTRL are the usual DOS-game wants if it is ever
      * given a job. Verified as a working slot: binding it to 'k' (0x6B) is what
@@ -113,6 +112,10 @@ static const dos_key_binding_t dos_key_map[] = {
 #define DOS_KEY_MAP_LEN ((int)(sizeof dos_key_map / sizeof dos_key_map[0]))
 
 static uint8_t dos_prev_down[DOS_KEY_MAP_LEN];
+
+/* Edge state for the OSK toggle button, tracked separately because it is not a
+ * table row -- it produces no keystroke at all. */
+static uint8_t dos_toggle_prev;
 
 static unsigned short dos_input_key_word(const dos_key_binding_t *b, bool down)
 {
@@ -124,10 +127,74 @@ void dos_input_reset(void)
 {
     for (int i = 0; i < DOS_KEY_MAP_LEN; i++)
         dos_prev_down[i] = 0;
+    dos_toggle_prev = 0;
+    dos_osk_reset();
+}
+
+/* Release every game-mode key that is still held, before the OSK takes the
+ * buttons. Not tidiness: once a key has arrived in the SDL format the BIOS
+ * stops synthesising releases (last_key_sdl latches, bios.asm:393; auto-release
+ * skipped at :937), so a key-down whose button is "let go" by a mode switch
+ * rather than by the user would stick down forever. */
+static void dos_input_release_all(void)
+{
+    for (int i = 0; i < DOS_KEY_MAP_LEN; i++) {
+        if (!dos_prev_down[i])
+            continue;
+        dos_prev_down[i] = 0;
+        if (dos_key_map[i].keysym)
+            dos_key_event(dos_input_key_word(&dos_key_map[i], false));
+    }
 }
 
 void dos_input_update(const odroid_gamepad_state_t *js)
 {
+    /* ---- Mode toggle ------------------------------------------------------
+     *
+     * GAME (ODROID_INPUT_START on the case's legend -- see the naming warning
+     * above) opens and closes the on-screen keyboard.
+     *
+     * docs/input-roadmap.md flagged this as a CONFLICT and suggested the
+     * zelda-only START button (ODROID_INPUT_X) as "the obvious spare". That is
+     * the wrong call and this deliberately diverges from it: START does not
+     * exist on a mario unit (Core/Inc/main.h:228), and a mario unit is precisely
+     * the one with no spare button -- which docs/input/02-button-mapping.md
+     * itself calls "the strongest single argument for the OSK". Putting the only
+     * door to the keyboard on a button half the fleet lacks would make the
+     * feature unreachable exactly where it matters most.
+     *
+     * GAME is the cheapest button to spend. It carried 'n', which was always a
+     * duplicate of SELECT's 'n' and which the OSK now makes reachable on every
+     * unit. The cost on mario is that 'n' is no longer a single button press;
+     * the gain is 90-odd keys that were not reachable at all.
+     *
+     * While the OSK is up it owns the d-pad, A, B and TIME; GAME stays the
+     * toggle so there is always a way out. */
+    const bool osk_was_up = dos_osk_visible();
+    const uint8_t toggle_now = js->values[ODROID_INPUT_START] ? 1 : 0;
+
+    if (toggle_now && !dos_toggle_prev) {
+        if (!osk_was_up)
+            dos_input_release_all();
+        dos_osk_toggle();
+    }
+    dos_toggle_prev = toggle_now;
+
+    const bool osk_now = dos_osk_visible();
+
+    if (osk_now && osk_was_up)
+        dos_osk_input(js);
+
+    if (osk_now || osk_was_up) {
+        /* The keyboard consumes the frame -- including the frame it opens on and
+         * the frame it closes on. Keep tracking raw button state so that a
+         * button still held across the transition does not look like a fresh
+         * press on the next frame, but emit nothing from the table. */
+        for (int i = 0; i < DOS_KEY_MAP_LEN; i++)
+            dos_prev_down[i] = js->values[dos_key_map[i].button] ? 1 : 0;
+        return;
+    }
+
     /* One event per edge, never per frame. The BIOS's INT 7h accumulates
      * modifier state with `add`, not `or` (bios.asm:449-462), so re-sending a
      * key-down for a still-held button would corrupt keyflags1. Repeat, if a
