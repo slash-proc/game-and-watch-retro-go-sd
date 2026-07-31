@@ -1725,18 +1725,6 @@ flash_sd: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin cr
 		$(RESET_DBGMCU_CMD)
 endif
 
-# Pushes the FreeDOS test floppy shipped with the 8086tiny submodule to
-# /roms/dos/freedos.dsk so "does DOS boot at all" is reproducible.
-#
-# Deliberately NOT part of create_sd_data: the `release` target tars everything
-# under sd_content into a distributable package, and fd.img contains
-# ALLEYCAT.EXE, which is commercial software we have no right to redistribute.
-# Keeping this a separate developer-only target keeps it out of the release.
-flash_dos_testdisk: | $(BUILD_DIR)
-	@cp external/8086tiny/fd.img $(BUILD_DIR)/freedos.dsk
-	@$(GNWMANAGER) sdpush --file $(BUILD_DIR)/freedos.dsk --dest-path "/roms/dos/"
-.PHONY: flash_dos_testdisk
-
 firmware_update: create_sd_folders
 	@$(MAKE) -j$(nproc) -C external/firmware_update
 	@cp external/firmware_update/build/firmware_update.bin $(RELEASE_FOLDER)/
@@ -1870,33 +1858,6 @@ gwemu_release: $(GWEMU_PREREQS)
 	$(GWEMU_WRITE_BUILDINFO)
 .PHONY: gwemu_release
 
-# Injects the FreeDOS test floppy into the gwemu SD image as a bootable .dsk.
-#
-# This is deliberately NOT part of `release`: `release` tars sd_content/ into
-# gw_update.tar, and the test image carries software that is not redistributable.
-# Keeping it a separate post-step on build/sdcard.img means it can never end up
-# in a release artifact.
-#
-#   make ... release gwemu_release gwemu_dos_testdisk && ./scripts/run_gwemu.sh
-DOS_TESTDISK_SRC ?= external/8086tiny/fd.img
-DOS_TESTDISK_DST ?= ::/roms/dos/freedos.dsk
-
-# Ordered after gwemu_release, not just documented as such: with -j the two would
-# otherwise race and this would run against a nonexistent (or half-written) image.
-gwemu_dos_testdisk: gwemu_release
-	$(V)if [ ! -f $(BUILD_DIR)/sdcard.img ]; then \
-		echo "ERROR: $(BUILD_DIR)/sdcard.img does not exist - run 'make gwemu_release' first."; \
-		exit 1; \
-	fi
-	$(V)if [ ! -f $(DOS_TESTDISK_SRC) ]; then \
-		echo "ERROR: $(DOS_TESTDISK_SRC) not found."; \
-		exit 1; \
-	fi
-	$(V)mmd -i $(BUILD_DIR)/sdcard.img@@1M -D s ::/roms ::/roms/dos 2>/dev/null || true
-	$(V)mcopy -i $(BUILD_DIR)/sdcard.img@@1M -o $(DOS_TESTDISK_SRC) $(DOS_TESTDISK_DST)
-	@echo "[ DOS ] $(DOS_TESTDISK_SRC) -> sdcard.img $(DOS_TESTDISK_DST)"
-.PHONY: gwemu_dos_testdisk
-
 # Mirrors roms/ into the gwemu SD image under ::/roms/, keeping the per-console
 # subdirectory layout the launcher scans for.
 #
@@ -1908,7 +1869,7 @@ gwemu_dos_testdisk: gwemu_release
 # roms/ into its filesystem image -- gen_frogfs_image.py:657-658 -- which is why
 # the SD_CARD=1 behaviour reads like a bug rather than a policy.)
 #
-# Same reasoning as gwemu_dos_testdisk above, and the same shape:
+# Same reasoning as external/8086tiny/push-testdisk.sh, and the same shape:
 #
 #   * NOT part of `release`, and it never writes sd_content/. `release` tars
 #     sd_content/ into gw_update.tar; ROMs are not redistributable, so the only
@@ -2224,16 +2185,13 @@ help:
 	@echo "  dump_screenshot   - Downloads the stored screenshot."
 	@echo "  flash             - Programs the internal and external flash"
 	@echo "  flash_all         - Alias for 'flash' (deprecated)"
-	@echo "  flash_dos_testdisk - Pushes the FreeDOS test floppy to /roms/dos/freedos.dsk"
-	@echo "                      (developer only; not part of a release -- see the target)"
 	@echo "  flash_extflash    - Flash FrogFS image only (SD_CARD=0; respects EXTFLASH_OFFSET)"
 	@echo "  flash_intflash    - Only programs the internal flash"
 	@echo "  gdb               - Starts gdb and attaches to gdbserver"
 	@echo "  gwemu_release     - Builds the images gwemu boots (implies 'release' on SD_CARD=1)"
 	@echo "  gwemu_roms        - Mirrors roms/ into build/sdcard.img under /roms (post-step on"
 	@echo "                      gwemu_release; never touches sd_content/, so never in a release)"
-	@echo "  gwemu_dos_testdisk - Injects external/8086tiny/fd.img into build/sdcard.img as"
-	@echo "                      /roms/dos/freedos.dsk (developer only; not part of a release)"
+	@echo "                      (DOS test floppy: external/8086tiny/push-testdisk.sh)"
 	@echo "  gdb_intflash      - Flashes intflash and then starts gdb and attaches to gdbserver"
 	@echo "  reset_dbgmcu      - Resets the unit and turns off DBGMCU (lowers battery drain)"
 	@echo "  reset_mcu         - Resets the unit"

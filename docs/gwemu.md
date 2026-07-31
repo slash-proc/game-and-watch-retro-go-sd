@@ -191,9 +191,15 @@ is a skip, not an error.
 
 **It is a post-step on `build/sdcard.img` and never writes `sd_content/`**, because
 `release` tars `sd_content/` into `gw_update.tar` and ROMs are not redistributable.
-`gwemu_dos_testdisk` exists for the same reason and stays separate: the DOS test floppy
-is `external/8086tiny/fd.img`, not something under `roms/`, and it has to be renamed to
-`freedos.dsk` on the way in. Run both when you want both.
+The DOS test floppy is handled the same way but lives outside the build entirely, in
+`external/8086tiny/push-testdisk.sh` — it is `external/8086tiny/fd.img`, not something
+under `roms/`, and it has to be renamed to `freedos.dsk` on the way in:
+
+```bash
+make ... release gwemu_release gwemu_roms
+./external/8086tiny/push-testdisk.sh image     # defaults to build/sdcard.img
+./external/8086tiny/push-testdisk.sh device    # or push to a connected unit
+```
 
 Everything under `roms/` is copied, unfiltered. The launcher already filters what it
 lists per system (`roms/dos/CAT.EXE` is ignored because only `.dsk` is offered for DOS),
