@@ -567,6 +567,10 @@ static void blit_vga13(uint8_t *fb)
 #define EGA_ROWBYTES  (EGA_WIDTH / 8)   /* 40 bytes per plane per row */
 
 extern const unsigned char *dos_ega_planes(void);
+extern unsigned int dos_ega_plane_bytes(void);
+extern unsigned int dos_ega_row_bytes(void);
+extern unsigned int dos_ega_start_byte(void);
+extern unsigned int dos_ega_pel_panning(void);
 extern const unsigned char *dos_ega_attr_palette(void);
 extern int dos_ega_is_active(void);
 
@@ -617,24 +621,43 @@ static void ega_sync_palette(void)
 static void blit_ega16(uint8_t *fb)
 {
     const uint8_t *planes = (const uint8_t *)dos_ega_planes();
+    const unsigned vram   = dos_ega_plane_bytes();
+    /* The display is a WINDOW onto plane memory, not the bottom of it. A game
+     * that scrolls moves the CRTC start address and widens the row stride; both
+     * have to be honoured or the picture is a sheared crop. Commander Keen 4
+     * runs at stride 124 with a moving start. */
+    const unsigned stride = dos_ega_row_bytes();
+    const unsigned pan    = dos_ega_pel_panning();
+    unsigned addr = dos_ega_start_byte();
     uint8_t *dst_row = fb + DOS_LETTERBOX * DOS_LCD_WIDTH;
 
-    for (unsigned y = 0; y < EGA_ROWS; y++, dst_row += DOS_LCD_WIDTH) {
-        const uint8_t *src = planes + 4 * (y * EGA_ROWBYTES);
-        uint8_t *dst = dst_row;
+    /* One extra group so the pel-panning shift has 8 more pixels to pull from. */
+    for (unsigned y = 0; y < EGA_ROWS; y++, dst_row += DOS_LCD_WIDTH, addr += stride) {
+        uint8_t line[EGA_WIDTH + 8];
+        unsigned a = addr;
+        uint8_t *out = line;
 
-        for (unsigned g = 0; g < EGA_ROWBYTES; g++, src += 4) {
-            /* One 32-bit load, four planes. Bit 7 is the leftmost pixel. */
-            uint32_t q = *(const uint32_t *)src;
-            uint32_t p0 = q & 0xFF, p1 = (q >> 8) & 0xFF;
-            uint32_t p2 = (q >> 16) & 0xFF, p3 = (q >> 24) & 0xFF;
+        for (unsigned g = 0; g < EGA_ROWBYTES + 1; g++, a++) {
+            uint32_t p0, p1, p2, p3;
 
+            if (a < vram) {
+                /* One 32-bit load, four planes. Bit 7 is the leftmost pixel. */
+                const uint8_t *src = planes + 4 * a;
+                uint32_t q = *(const uint32_t *)src;
+                p0 = q & 0xFF; p1 = (q >> 8) & 0xFF;
+                p2 = (q >> 16) & 0xFF; p3 = (q >> 24) & 0xFF;
+            } else {
+                /* Past the memory this card has fitted: reads as zero, the same
+                 * as the store path discards writes there. */
+                p0 = p1 = p2 = p3 = 0;
+            }
             for (int bit = 7; bit >= 0; bit--)
-                *dst++ = (uint8_t)(((p0 >> bit) & 1)
+                *out++ = (uint8_t)(((p0 >> bit) & 1)
                                  | (((p1 >> bit) & 1) << 1)
                                  | (((p2 >> bit) & 1) << 2)
                                  | (((p3 >> bit) & 1) << 3));
         }
+        memcpy(dst_row, line + pan, EGA_WIDTH);
     }
 }
 
