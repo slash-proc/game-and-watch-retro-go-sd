@@ -12,6 +12,7 @@
 #include "odroid_settings.h" /* odroid_settings_cpu_oc_level_get() */
 #include "dos_video.h"
 #include "dos_input.h"
+#include "dos_osk.h"
 #include "dos_cpu.h"
 #include <string.h>
 
@@ -313,6 +314,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
              * per *blit* are different numbers, and both are reported. */
             dos_prof_blit_begin();
             dos_blit();
+            /* After the guest blit, before the swap. The OSK owns rows 0-19 and
+             * 220-239, which dos_blit() never touches, so ordering only matters
+             * for the mode-change case where video clears the whole buffer --
+             * drawing second means the bars survive that. It is a no-op unless
+             * OSK state changed, and a state change paints on two consecutive
+             * painted frames so both framebuffers get it (dos_osk.c). */
+            dos_osk_draw((uint8_t *)lcd_get_active_buffer());
             lcd_swap();
             dos_prof_blit_end();
         }

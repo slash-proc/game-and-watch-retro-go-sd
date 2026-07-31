@@ -1,10 +1,11 @@
 # MS-DOS core (8086tiny) — porting notes
 
-Status: **boots to a DOS prompt and takes button input.** MS-DOS 6.22 and FreeDOS both
+Status: **boots to a DOS prompt and can be typed at.** MS-DOS 6.22 and FreeDOS both
 reach `A:\>`. Text mode renders in authentic CP437 and the CGA blit now renders real
 games — Alley Cat is playable. G&W buttons reach the guest keyboard
 (`dos_input.c`): TOPBENCH was driven with the d-pad and A/Enter to a **SCORE of 23**.
-No audio, no on-screen keyboard, so only five distinct keys are reachable.
+The on-screen keyboard (`dos_osk.c`) makes the rest of the keyboard reachable —
+`dir` has been typed at a FreeDOS prompt under gwemu and echoed back. No audio.
 
 **This file is a summary and a list of traps. `external/8086tiny/STATUS.md` is the
 authority on current state** — it is maintained per-change and this one is not.
@@ -76,6 +77,17 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
   one key-down per press and one key-up per release, encoded in the BIOS's SDL word
   format. **Change the mapping by editing the table, nothing else.** Traps live in
   `external/8086tiny/STATUS.md` (queue, word format, absence of typematic repeat).
+  GAME is no longer a table row — it toggles the on-screen keyboard.
+- `Core/Src/porting/dos/dos_osk.c` — the on-screen keyboard, drawn into the two 20-row
+  letterbox bars that `dos_video.c` reserves and never writes. Three layers (letters /
+  digits+punctuation / function keys), sticky Shift/Ctrl/Alt, d-pad to move and A to
+  press; GAME toggles it, TIME cycles the layer, B is Backspace. **Two things here fail
+  silently if changed carelessly:** every state change repaints into *both*
+  framebuffers, because a single paint looks correct in a screenshot and flickers at
+  the swap rate on hardware; and a Shifted key must set `0x1000` itself, because the
+  SDL decode path never consults `a2shift_tbl` (only the ASCII path does,
+  `bios.asm:694`) — so keysym `!` alone types `1`. Design and the full trap list:
+  `external/8086tiny/docs/input/03-onscreen-keyboard.md`, `docs/traps.md` under *Input*.
 - `APPID_DOS` in `Core/Inc/retro-go/appid.h`, and an `add_emulator("MS-DOS", "dos", ...)`
   entry in `Core/Src/retro-go/rg_emulators.c`.
 - Build wiring in `Makefile` (`DOS_C_SOURCES`) and `Makefile.common` (`DOS_OBJECTS`, vpath,
@@ -83,24 +95,19 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
 
 ## What is missing, roughly in order
 
-1. **On-screen keyboard.** Basic input is done (`dos_input.c` + the injection queue in
-   `8086tiny.c`), but only eight physical inputs exist, so the guest can be handed five
-   distinct keys — enough to play a game, not enough to type a command. The OSK in the
-   reserved letterbox bars is mandatory, not optional. Design in
-   `external/8086tiny/docs/input/03-onscreen-keyboard.md`.
-2. **Graphics modes beyond CGA.** CGA, **VGA mode 13h** (320x200x256 linear) and **EGA
+1. **Graphics modes beyond CGA.** CGA, **VGA mode 13h** (320x200x256 linear) and **EGA
    mode 0Dh** (320x200x16 planar) all render, each host-verified pixel-exact
    (`test286/run13h.sh`, `test286/run_ega.sh`). Planar reuses the existing 64 KB A-segment
    aperture — 16 KB CPU read shadow at the bottom, four interleaved planes above — and
    allocates no new guest RAM. **EGA 0Eh/10h, page flipping, Mode X and Hercules are not
    built, and 0Eh/10h/page-flipping are blocked on RAM, not effort** (the arithmetic is in
    `external/8086tiny/docs/video/11-ega-planar.md`).
-3. **Audio.** Not wired. PC speaker only for v1; see `docs/audio-roadmap.md`.
-4. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
+2. **Audio.** Not wired. PC speaker only for v1; see `docs/audio-roadmap.md`.
+3. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
    all, so a game setting its background that way gets defaults. And
    `int10_switch_to_cga_gfx` clears with `char=0/attr=7`, which as pixel data is a stripe
    pattern for one frame.
-5. **CPU speed is selectable and instrumented; the numbers are not yet explained.**
+4. **CPU speed is selectable and instrumented; the numbers are not yet explained.**
    Profiles (XT/Turbo/286/MAX) live in `dos_cpu.c` and a per-second `DOS: prof …` line
    reports achieved instructions/frame, instructions/second, **ARM cycles per guest
    instruction**, and the cpu/blit/idle split. TOPBENCH scores **34/35 on the device**
