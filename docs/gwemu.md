@@ -281,6 +281,7 @@ Launches the emulator, attaches GDB, and gives you logs and exceptions.
 | `--docker` | Run headless in a container. Reproducible, CI-friendly. |
 | `--gdb` | Interactive GDB session instead of the batch forwarder. |
 | `--gdb-script <f>` | Run your own GDB script instead of the default forwarder. One-off diagnostics only. |
+| `--keep-on-fault` | Print the fault report and **resume** instead of exiting. See below. |
 | `--log-file <path>` | Session log destination (default `./gwemu.log`). |
 | `--timeline <f.tl>` | Play back a recorded input timeline. |
 | `--record <f.tl>` | Record an input timeline. Local only — needs the SDL window. |
@@ -305,6 +306,14 @@ run that silently swallows a fault is worse than no run at all.
   emulated LCD.
 - **Exit status** — a trapped fault or failed assertion exits non-zero, so CI can detect a
   crashed run without parsing text.
+- **`--keep-on-fault`** — prints the same report and then **`continue`s**
+  (`scripts/gwemu_log.gdb:82`). `common_fault_handler_c()` goes on to call `BSOD()`, so the
+  firmware paints its own blue screen and the emulator stays up — the only way to see,
+  photograph or drive the BSOD, which is firmware that needs testing too. It is also what
+  you want when the interesting behaviour is what happens *after* the first fault.
+  **The trade: the exit code stops being a fault signal in this mode** — measured, a resumed
+  run whose inferior then exited normally still returned 1. Callers must grep the log for
+  `FAULT CAUGHT` rather than trusting `$?`.
 - **Session log** — everything also goes to `./gwemu.log`, overwritten each run. It sits at
   the repo root, not under `build/`, so `make clean` cannot delete the log you are reading.
   `*.log` is gitignored.
@@ -524,3 +533,43 @@ Before drawing conclusions:
 A worked example — a MemManage that reproduced deterministically under gwemu and never on
 silicon, traced to an `UNPREDICTABLE` MPU register write — is preserved in the gwemu
 project's `backup/memfault/`, with both images and a script reproducing each outcome.
+
+### `scripts/gwharness.py` — replay the same timeline on real hardware
+
+The tool that closes the loop, and it exists because of a probe-contention problem:
+**`gnwmanager monitor` and `scripts/remote_input.py` each spawn their own OpenOCD and evict
+one another** ("Disconnected from openocd"), so on hardware you could press buttons or read
+logs, never both at once. That makes timeline replay impossible, because a timeline is by
+definition presses interleaved with a running capture.
+
+`gwharness.py` opens **one** `OpenOCDBackend` and interleaves both jobs in a single loop —
+the shadow-cell write `remote_input` uses for buttons, and the `logbuf`/`log_idx` poll
+`gnwmanager monitor` uses for stdout. No threads; the loop services whichever is due.
+
+```bash
+scripts/gwharness.py replay TIMELINE [--capture SECS] [--out FILE] [--json] [--boot]
+scripts/gwharness.py run --keys a,a [--capture SECS] [--out FILE] [--json] [--boot]
+scripts/gwharness.py parse LOGFILE [--json]
+```
+
+- **It is the same `.tl` format gwemu records and replays**, so a recording made against
+  the emulator runs on silicon unchanged and the two logs can be diffed directly. That is
+  the intended use: it is the mechanism for answering the question this whole section is
+  about.
+- `--boot` reset-halts the device and starts the clock at the instant of resume, so `t=0`
+  is the same event as gwemu's machine start. Combined with the absolute-time `.tl` format,
+  that makes a run reproducible across emulator and silicon.
+- **Requires firmware built with `REMOTE_INPUT=1`** — it defaults to 0. Costs nothing at
+  runtime; measured identical `cpi` with and without.
+
+### Sizing the SD image: `scripts/make_sdcard_image.py --fit`
+
+`--size-mb N` fixes the image size. `--fit DIR` (repeatable) instead measures what is
+there and picks the size — **rounding each file up to the FAT cluster size**, because that
+is what the filesystem will do, and then snapping to the next of
+**256M / 512M / 1G / 2G / 4G / 8G**. Powers of two because that is what real SD cards come
+in, and testing on a size no card has is testing the wrong thing. The two flags are
+mutually exclusive.
+
+This matters for DOS more than for other cores: a single `.dsk` is megabytes, so the card
+size crosses a rung as soon as you add a second game.
