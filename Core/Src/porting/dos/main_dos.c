@@ -31,6 +31,8 @@ extern const unsigned int dos_mem_required;
  * 8086tiny.c for what moved and, more importantly, what must not. */
 extern const unsigned int dos_mem_ahb_required;
 extern void dos_mem_set_ahb(unsigned char *p);
+extern const unsigned int dos_mem_hma_required;
+extern void dos_mem_set_hma(unsigned char *p);
 extern unsigned short *regs16;
 extern unsigned char *regs8;
 extern unsigned char io_ports[];
@@ -173,6 +175,30 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         printf("DOS: guest AHB %u KB at %p\n",
                (unsigned)(dos_mem_ahb_required / 1024), (void *)ahb);
         dos_mem_set_ahb(ahb);
+    }
+
+    /* The HMA: 64 KB more of the same pool, and the reason DOS=HIGH works.
+     * Same ahb_only_malloc reasoning as the block above -- do not "simplify"
+     * this to ahb_calloc().
+     *
+     * It is a SEPARATE allocation rather than an extension of the AHB block
+     * because it is optional: dos_fold() wraps at 1 MB like an 8086 when it is
+     * absent and XMS function 01h answers "HMA does not exist", which is a
+     * machine that shipped. Merging them would turn a tight pool into a dead
+     * core.
+     *
+     * Budget: the AHB heap is 128 KB less the 8 KB .audio DMA reserve =
+     * 122,880 B, and .gba_ahbram is overlaid at the bottom rather than charged
+     * to the region (STM32H7B0VBTx_SDCARD.ld), so it is all ours while DOS is
+     * resident. 45,060 (above) + 65,536 (here) = 110,596, leaving ~12 KB.
+     * ahb_only_malloc() asserts rather than returning NULL if that ever stops
+     * being true, so a regression here is loud. */
+    {
+        unsigned char *hma = (unsigned char *)ahb_only_malloc(dos_mem_hma_required);
+        memset(hma, 0, dos_mem_hma_required);
+        printf("DOS: guest HMA %u KB at %p\n",
+               (unsigned)(dos_mem_hma_required / 1024), (void *)hma);
+        dos_mem_set_hma(hma);
     }
 
     /* Literal path, matching every other core in this tree (/bios/nes/palettes.bin,
