@@ -33,6 +33,9 @@
  * into a 768 KB array; raw guest addresses must never index mem[] directly,
  * which is exactly what this accessor exists to prevent. */
 extern unsigned char *dos_mem_ptr(unsigned int guest_addr);
+/* 256 entries x 3 channels, 6 bits each, live in 8086tiny.c's DAC model
+ * (ports 0x3C7/0x3C8/0x3C9). */
+extern const unsigned char *dos_vga_palette(void);
 extern unsigned char io_ports[];
 
 /* ---------------------------------------------------------------------------
@@ -139,6 +142,9 @@ static const uint32_t cga_palette[16] = {
  * and its low nibble to pixels 4-7.
  * ------------------------------------------------------------------------- */
 static uint32_t expand4[16];
+
+/* Set when vga13_clut[] matches the guest DAC; see vga13_sync_palette(). */
+static bool     vga13_clut_valid = false;
 
 /* Graphics expansion tables. Both turn one source byte into one 32-bit store of
  * four CLUT indices, so a 320-pixel row is 80 loads and 80 stores.
@@ -317,6 +323,7 @@ void dos_video_init(void)
     last_cols = 0;
     last_colsel = 0xFF;
     last_gfx_mode = 0xFF;
+    vga13_clut_valid = false;
     initialised = true;
 }
 
@@ -474,6 +481,74 @@ static void blit_text(uint8_t *fb, uint16_t cols)
  * 320x200 lands 1:1 on the panel with the 20-row letterbox, so there is no
  * scaling in either mode; mode 6 halves horizontally by OR-ing pixel pairs.
  * ------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * VGA mode 13h -- 320x200, 256 colours, LINEAR
+ *
+ * One byte per pixel at guest A000:0000, row y at y*320, 64000 bytes. No banks,
+ * no interleave, no planes, no CRTC start address to honour. It is byte-for-byte
+ * our LUT8 framebuffer format, so the blit is a memcpy per row into the
+ * letterboxed origin -- 200 rows of 320, never touching rows 0-19 or 220-239.
+ *
+ * Deliberately NOT a single 64000-byte memcpy: the destination is contiguous
+ * only because the panel happens to be exactly 320 wide. Keeping the per-row
+ * form means the letterbox and any future non-320-wide mode cost nothing.
+ *
+ * The palette is a CLUT reprogram, not a repaint: the guest's byte IS the CLUT
+ * index. That is what makes palette animation and fades -- how most DOS-era
+ * 256-colour effects are done -- free here.
+ * ------------------------------------------------------------------------- */
+#define VGA13_BASE   0xA0000   /* guest base of the linear 8bpp aperture */
+#define VGA13_WIDTH  320
+#define VGA13_ROWS   200
+
+/* RGB888 mirror of the guest DAC, rebuilt only when the DAC changed. Lives in
+ * the DOS overlay, NOT in firmware DTCM -- the whole point of
+ * lcd_set_clut_ext() taking a caller-owned array. */
+static uint32_t vga13_clut[256];
+static uint8_t  vga13_dac_shadow[256 * 3];
+
+static void vga13_sync_palette(void)
+{
+    const unsigned char *dac = dos_vga_palette();
+
+    /* 768-byte compare against a shadow rather than a dirty flag from the DAC
+     * write path. A dirty flag would be one more thing on the guest's OUT path
+     * and one more thing to get wrong; 768 bytes of memcmp is nothing next to
+     * the 64000-byte blit beside it, and it cannot miss an update. */
+    if (vga13_clut_valid && memcmp(vga13_dac_shadow, dac, sizeof vga13_dac_shadow) == 0)
+        return;
+
+    memcpy(vga13_dac_shadow, dac, sizeof vga13_dac_shadow);
+
+    for (unsigned i = 0; i < 256; i++) {
+        /* 6 bits to 8 as (v << 2) | (v >> 4), so 63 becomes 255 and not 252 --
+         * a plain << 2 makes every "white" 1.2% grey and every fade end short
+         * of full brightness. */
+        const unsigned r = dac[i * 3 + 0], g = dac[i * 3 + 1], b = dac[i * 3 + 2];
+        vga13_clut[i] = (uint32_t)(((r << 2 | r >> 4) & 0xFF) << 16) |
+                        (uint32_t)(((g << 2 | g >> 4) & 0xFF) <<  8) |
+                        (uint32_t)( ((b << 2 | b >> 4) & 0xFF)      );
+    }
+
+    lcd_set_clut_ext(vga13_clut, 256);
+    vga13_clut_valid = true;
+}
+
+static void blit_vga13(uint8_t *fb)
+{
+    /* The aperture folds contiguously, so one dos_mem_ptr() covers all 64000
+     * bytes and rows are plain offsets. Do NOT reach for a fold constant here --
+     * where 0xA0000 lands is dos_fold()'s business. */
+    const uint8_t *src = (const uint8_t *)dos_mem_ptr(VGA13_BASE);
+    uint8_t *dst = fb + DOS_LETTERBOX * DOS_LCD_WIDTH;
+
+    for (unsigned y = 0; y < VGA13_ROWS; y++) {
+        memcpy(dst, src, VGA13_WIDTH);
+        src += VGA13_WIDTH;
+        dst += DOS_LCD_WIDTH;
+    }
+}
+
 static void blit_cga(uint8_t *fb, uint8_t mode)
 {
     /* The whole 64 KB aperture folds contiguously (guest 0xB0000-0xBFFFF ->
@@ -997,6 +1072,13 @@ void dos_video_blit(void)
         /* A geometry change leaves stale pixels from the previous mode, and a
          * 200-row mode does not overwrite bars a previous mode may have used. */
         clear_framebuffers();
+        /* Leaving mode 13h hands the CLUT back to the cached 32-entry path;
+         * entering it must re-push, because lcd_set_clut() cleared ext_clut. */
+        vga13_clut_valid = false;
+        if (mode != 0x13) {
+            lcd_set_clut_ext(NULL, 0);
+            last_colsel = 0xFF;          /* force program_clut() on the way back */
+        }
         last_mode = mode;
         last_cols = cols;
     }
@@ -1007,9 +1089,10 @@ void dos_video_blit(void)
      * 2 and 7 to 3 (bios.asm:1080-1083), so mode 7 never appears. 4/5 are CGA
      * 320x200 and 6 is CGA 640x200.
      *
-     * Anything else -- Hercules, EGA, mode 13h -- is unsupported: leave the
-     * screen alone rather than render one mode's memory through another mode's
-     * decoder, which produces confident-looking garbage. Note that the BIOS
+     * Mode 0x13 is VGA 320x200x256 linear. Anything else -- Hercules, EGA,
+     * Mode X/Y -- is unsupported: leave the screen alone rather than render one
+     * mode's memory through another mode's decoder, which produces
+     * confident-looking garbage. Note that the BIOS
      * programs the *Hercules* CRTC to 640x400 even for CGA modes
      * (bios.asm:1086-1112); that is upstream's pixel-doubling for its SDL path
      * and is deliberately ignored -- we read the real 320x200 buffer. */
@@ -1018,5 +1101,8 @@ void dos_video_blit(void)
     } else if (mode <= 6) {
         cga_sync_palette(mode);
         blit_cga(fb, mode);
+    } else if (mode == 0x13) {
+        vga13_sync_palette();
+        blit_vga13(fb);
     }
 }
