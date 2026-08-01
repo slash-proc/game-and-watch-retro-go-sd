@@ -188,6 +188,75 @@ MSDOS_UTIL_SETS = {
 
 EXECUTABLE_SUFFIXES = (".EXE", ".COM", ".BAT")
 
+# ---------------------------------------------------------------------------
+# The per-title COW pool high-water mark, in 4 KB pages.
+# ---------------------------------------------------------------------------
+#
+# Measured by external/8086tiny/test286/poolmeasure.sh, which runs each image in
+# the host harness -- the same emulator the device runs -- and reports the pool
+# pages it actually needed. Written beside the .dsk as a 64-byte `.dosmeta`
+# sidecar (tools/dosmeta.py); read on the device by dos_meta_parse() and applied
+# by dos_cow_reserve(). external/8086tiny/dos_meta.h carries the design and, in
+# particular, why a wrong number here cannot lose a guest store.
+#
+# THESE ARE LOWER BOUNDS, and saying so is the whole reason the runtime treats
+# them as a reservation to grow past rather than a cap. No input is injected, so
+# a title that stops at its title screen has not dirtied what gameplay will
+# dirty (docs/traps.md, "WOLF3D 0/144"). Re-measure with a canned key sequence
+# (improvement-brainstorming.md §A2) and these become real figures.
+#
+# A title that is not here gets no sidecar and therefore the full pool, which is
+# today's behaviour. That is the correct default: an absent measurement must
+# never be read as "needs nothing".
+COW_PAGES = {
+    "ALLEYCAT": 35,
+    "BATTLECHESS": 105,
+    "CAT": 35,
+    "KEEN4": 83,
+    "PRINCE_OF_PERSIA": 59,
+    "SIMCITY": 113,
+    "STAR_WARS_DARKFORCES": 35,
+    "TANKWARS": 85,
+    "TOPBENCH": 88,
+    "WOLF3D": 90,
+    "freedos": 44,
+    "msdos622": 34,
+}
+
+
+# Set once from the command line in main(); read by write_dosmeta(). A module
+# global rather than a parameter because pack() and pack_hdd() already take
+# eight arguments each and this one is a property of the invocation, not of the
+# image being built.
+COW_PAGES_OVERRIDE: int | None = None
+EMIT_META = True
+
+
+def write_dosmeta(dsk: Path, pages: int | None = None, verbose: bool = True) -> None:
+    """Emit the .dosmeta sidecar for a freshly built image.
+
+    Called at the end of every pack, because the sidecar's key is the .dsk's
+    size and CRC and both are only knowable once the image exists. A missing
+    entry in COW_PAGES writes nothing at all rather than writing a guess.
+    """
+    if not EMIT_META:
+        return
+    if pages is None:
+        pages = COW_PAGES_OVERRIDE
+    if pages is None:
+        pages = COW_PAGES.get(dsk.stem)
+    if not pages:
+        return
+    try:
+        import dosmeta
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import dosmeta
+    out = dosmeta.write_for(dsk, pages)
+    if verbose:
+        print(f"  {out.name}: COW pool reservation {pages} pages "
+              f"({pages * 4104:,} B)")
+
 # Names that are almost never the thing you want to run. Checked before the
 # generic pick so a directory shipping SETUP.EXE next to the real binary does
 # not boot into the installer.
@@ -1584,6 +1653,7 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
     out = dst / f"{stem}.dsk"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(img.build())
+    write_dosmeta(out)
 
     if verbose:
         used = img.total_clusters * img.cluster_bytes - img.free_bytes
@@ -1664,6 +1734,7 @@ def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | N
     out = dst / f"{stem}.dsk"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(img.build())
+    write_dosmeta(out)
 
     if verbose:
         used = IMAGE_SIZE - img.free_bytes
@@ -1831,12 +1902,24 @@ def main() -> int:
                              "stays in conventional memory, costing a game ~45 KB "
                              "-- an escape hatch for a guest that dislikes the HMA, "
                              "not a default worth choosing.")
+    parser.add_argument("--cow-pages", type=int, default=None, metavar="N",
+                        help="COW pool reservation for the .dosmeta sidecar, "
+                             "overriding the measured COW_PAGES table. Measure "
+                             "with external/8086tiny/test286/poolmeasure.sh")
+    parser.add_argument("--no-meta", action="store_true",
+                        help="do not write a .dosmeta sidecar (the image then "
+                             "gets the full COW pool at runtime, which is the "
+                             "pre-sidecar behaviour)")
     parser.add_argument("--verify", action="store_true",
                         help="Re-open each written image and check it structurally")
     parser.add_argument("--list-template", "--list-source", dest="list_template",
                         action="store_true",
                         help="List what the selected DOS source contains, and exit")
     args = parser.parse_args()
+
+    global COW_PAGES_OVERRIDE, EMIT_META
+    COW_PAGES_OVERRIDE = args.cow_pages
+    EMIT_META = not args.no_meta
 
     system = args.system or ("msdos" if args.media is not None else "freedos")
 

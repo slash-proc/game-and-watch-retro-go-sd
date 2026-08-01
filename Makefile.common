@@ -744,6 +744,7 @@ C_INCLUDES +=  \
 -ICore/Inc/porting/tama \
 -ICore/Inc/porting/pkmini \
 -ICore/Inc/porting/dos \
+-Iexternal/8086tiny \
 -ICore/Inc/retro-go \
 -IDrivers/STM32H7xx_HAL_Driver/Inc \
 -IDrivers/STM32H7xx_HAL_Driver/Inc/Legacy \

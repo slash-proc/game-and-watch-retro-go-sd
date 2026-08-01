@@ -18,7 +18,9 @@
 #include "dos_ospi_bench.h"
 #include "gw_malloc.h"   /* ahb_calloc() */
 #include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
+#include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
 #include <string.h>
+#include <stdio.h>
 
 /* Guest memory is a BSS array inside this overlay (.overlay_dos_bss), zeroed by
  * the launcher before we are entered. Not a pointer, and nothing to allocate. */
@@ -64,6 +66,30 @@ extern const unsigned int dos_mem_trim;
 extern int dos_mem_map_ro(unsigned int gbase, unsigned int len, unsigned char *host);
 extern void dos_cow_stats(unsigned *faults, unsigned *pages_used,
                           unsigned *pool_pages, unsigned *lost);
+
+/* ---- Per-title COW pool sizing --------------------------------------------
+ *
+ * The pool array is linked for the WORST title, so the AXI it guarantees back
+ * is the worst case and the per-title figure (110-458 KB) is thrown away.
+ * external/8086tiny/dos_meta.h carries a measured per-title page count from
+ * package time in a 64-byte `.dosmeta` sidecar beside the `.dsk`;
+ * dos_cow_reserve() applies it, and everything the reservation does not claim
+ * becomes the SPARE that dos_cow_arena_spare() offers to EGA planes, page
+ * flipping and the 4K decode cache.
+ *
+ * READ dos_meta.h BEFORE CHANGING ANY OF THIS. The one thing that matters here:
+ * the number is a reservation, not a cap. A title that exceeds it grows back
+ * into the spare, and with no borrower installed -- which is the state of this
+ * file today, because nothing has taken the spare yet -- growth always succeeds
+ * up to the full array. So a missing, stale or simply wrong sidecar costs
+ * nothing but a few out-of-line grow calls, and can never lose a guest store.
+ * Anything that later TAKES the spare must install a reclaim callback and
+ * honour it; a borrower that will not give a page back is the only way this
+ * mechanism can cost correctness, and dos_cow_pool_stats()'s `grows` plus
+ * dos_cow_stats()'s `lost` are how that shows up in the log. */
+extern unsigned int dos_cow_reserve(unsigned int pages);
+extern void dos_cow_pool_stats(unsigned *arena, unsigned *reserved,
+                               unsigned *live, unsigned *grows);
 #if DOS_INT13_OBS
 /* 8086tiny.c's INT 13h observer, built only under -DDOS_INT13_OBS=1. */
 extern void dos_int13_obs_report(void);
@@ -239,6 +265,99 @@ static void dos_cow_log(const char *when)
         return;                         /* feature not built in; say nothing */
     printf("DOS: cow %s faults=%u pages=%u/%u lost=%u\n",
            when, faults, pages, pool, lost);
+}
+
+/* ---- The .dosmeta sidecar -------------------------------------------------
+ *
+ * `<image>.dsk` -> `<image>.dosmeta`, 64 bytes, written at package time by
+ * tools/mkdosdisk.py. Read it, check its key against the image we are actually
+ * booting, and hand the page count to dos_cow_reserve().
+ *
+ * EVERY failure here is silent-by-design in the sense that it changes nothing:
+ * no file, a stale file, a file from another emulator ABI, a file for a
+ * different disk -- all end with the full pool, i.e. exactly the behaviour of
+ * the build before sidecars existed. That is why there is no error return. What
+ * is NOT silent is the log line: a title that reserves and then grows says so,
+ * and `grows` climbing every boot is how a stale measurement is noticed.
+ *
+ * ONE fopen, held for the length of this function. MAX_OPEN_FILES is 8 and
+ * running out fails silently (../../../../CLAUDE.md); dos_cpu_init() takes
+ * three afterwards, so this handle must be closed before it runs -- and it is.
+ * The .dsk is opened a second time here for the key CRC, again transiently. */
+static void dos_pool_reserve_from_meta(const char *dsk_path, uint32_t dsk_size)
+{
+    unsigned char raw[DOS_META_BYTES];
+    char path[256];
+    dos_meta_t m;
+    dos_meta_status_t st;
+    unsigned long crc = 0;
+    unsigned arena = 0, resv = 0, live = 0, grows = 0;
+    size_t n, i;
+    FILE *f;
+
+    n = strlen(dsk_path);
+    if (n + 8 >= sizeof path)
+        return;
+    memcpy(path, dsk_path, n + 1);
+    /* Replace the extension, not append: "KEEN4.dsk" -> "KEEN4.dosmeta". */
+    for (i = n; i > 0; i--)
+        if (path[i - 1] == '.') { n = i - 1; break; }
+        else if (path[i - 1] == '/') break;
+    strcpy(path + n, ".dosmeta");
+
+    f = fopen(path, "rb");
+    if (!f)
+        return;                         /* no sidecar: full pool, as before */
+    n = fread(raw, 1, sizeof raw, f);
+    fclose(f);
+
+    /* The key's CRC half: the first DOS_META_CRC_SPAN bytes of the image. A
+     * bounded read because BATTLECHESS.dsk is 66 MB and this runs during boot;
+     * dsk_size carries the rest of the discrimination. It is a cache key, not a
+     * correctness boundary -- being wrong about it costs the reservation, not
+     * the guest. */
+    f = fopen(dsk_path, "rb");
+    if (f) {
+        static unsigned char buf[1024];
+        unsigned long left = DOS_META_CRC_SPAN, done = 0;
+        unsigned long acc = 0xFFFFFFFFUL;
+        size_t got;
+
+        while (left && (got = fread(buf, 1, left < sizeof buf ? left : sizeof buf, f)) > 0) {
+            /* Streamed CRC32: dos_meta_crc32() is one-shot, so fold by hand
+             * with the same polynomial rather than buffering 64 KB. */
+            size_t k;
+            for (k = 0; k < got; k++) {
+                int b;
+                acc ^= buf[k];
+                for (b = 0; b < 8; b++)
+                    acc = (acc >> 1) ^ (0xEDB88320UL & (unsigned long)(-(long)(acc & 1)));
+            }
+            left -= got;
+            done += got;
+        }
+        fclose(f);
+        crc = (acc ^ 0xFFFFFFFFUL) & 0xFFFFFFFFUL;
+        (void)done;
+    }
+
+    st = dos_meta_parse(raw, (unsigned long)n, dsk_size, crc, &m);
+    if (st != DOS_META_OK) {
+        printf("DOS: meta %s ignored (%s)\n", path, dos_meta_status_name(st));
+        return;
+    }
+    /* xip_armed = 0: the .xipimg window is armed later, by code that does not
+     * exist yet (improvement-brainstorming.md §H). When it does, arm it BEFORE
+     * this call and pass 1 -- the pages_xip figure is the smaller of the two and
+     * believing it without the window is the one way to under-reserve on
+     * purpose. */
+    if (dos_cow_reserve((unsigned)dos_meta_pages(&m, 0)) == 0) {
+        printf("DOS: meta pool reservation refused\n");
+        return;
+    }
+    dos_cow_pool_stats(&arena, &resv, &live, &grows);
+    printf("DOS: pool reserved %u of %u pages (%u B spare)\n",
+           resv, arena, (unsigned)((arena - resv) * 4104u));
 }
 
 static void dos_blit(void) {
@@ -432,6 +551,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     /* The BIOS is mandatory: 8086tiny reads its instruction-decode tables out of
      * the BIOS image, so a missing file yields garbage decoding that looks exactly
      * like a broken memory map. Fail loudly here instead of burning debug time. */
+    /* BEFORE dos_cpu_init() as well, and for a harder reason than the trim's:
+     * dos_cow_reserve() refuses once a pool page has been handed out, and
+     * dos_cpu_init() runs guest-visible BIOS setup. There is no failure path --
+     * every way this can go wrong ends with the full pool, which is what the
+     * build was linked for. */
+    dos_pool_reserve_from_meta(ACTIVE_FILE->path, (uint32_t)st.size);
+
     /* BEFORE dos_cpu_init(), and after the .dsk cache: init reads the BIOS
      * decode tables through the fold, so the window over the trimmed tail has
      * to already be there. */
