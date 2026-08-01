@@ -41,6 +41,29 @@ extern unsigned char io_ports[];
 
 extern int dos_cpu_init(int argc, char **argv);   /* 0 = ok, <0 = BIOS load failed */
 extern int dos_cpu_frame(int cycles);
+
+/* ---- The AXI SRAM the mapping fold actually gives back ---------------------
+ *
+ * DOS_MEM_TRIM shortens mem[] by removing guest [dos_mem_trim_base, 0x100000).
+ * Those bytes then have NO SRAM behind them and must be served from somewhere
+ * read-only, or dos_cpu_init() refuses to run rather than execute a BIOS that
+ * is half scratch page. Copy-on-write is what makes serving them from
+ * read-only storage safe: a store into the region costs a 4 KB pool page and a
+ * memcpy instead of being silently lost.
+ *
+ * Both constants come from 8086tiny.c so the porting layer cannot drift from
+ * the fold. When the core is built without a trim they are 0 and every branch
+ * below folds away.
+ *
+ * dos_mem_map_ro() is the read-only form of dos_mem_map(): the granules it
+ * covers get the real pointer in the READ map and DOS_COW_TRAP in the WRITE
+ * map. dos_cow_stats() is what makes an undersized pool visible -- `lost` is
+ * the count of stores that had nowhere to go, and it must be 0. */
+extern const unsigned int dos_mem_trim_base;
+extern const unsigned int dos_mem_trim;
+extern int dos_mem_map_ro(unsigned int gbase, unsigned int len, unsigned char *host);
+extern void dos_cow_stats(unsigned *faults, unsigned *pages_used,
+                          unsigned *pool_pages, unsigned *lost);
 #if DOS_INT13_OBS
 /* 8086tiny.c's INT 13h observer, built only under -DDOS_INT13_OBS=1. */
 extern void dos_int13_obs_report(void);
@@ -131,6 +154,92 @@ static void dos_xip_cache(const char *path, uint32_t known_size)
            (unsigned long)dos_xip_size, (unsigned long)(HAL_GetTick() - t0));
 }
 #endif
+
+/* Arm the read-only window over the trimmed BIOS tail. Returns 0 on success,
+ * -1 if there is nothing to map it from -- in which case the caller must NOT
+ * start the guest, because dos_cpu_init() would be reading its instruction
+ * decode tables out of the scratch page.
+ *
+ * WHERE THE BYTES COME FROM, and why this is not store_file_in_flash() on the
+ * BIOS. The BIOS image is 8,096 bytes and loads at guest 0xF0100, so it ends at
+ * 0xF203F; the trim starts at 0xF3000 at the earliest. EVERY BYTE OF THE
+ * TRIMMED TAIL IS A ZERO that a real machine's power-on left there, and stays
+ * zero for the whole session (docs/memory/05-copy-on-write.md section 7).
+ * So what is needed is not the BIOS file -- it is any dos_mem_trim bytes of
+ * memory-mapped, readable, permanently-zero storage.
+ *
+ * The cached .dsk is that, and it is already in flash and already held live by
+ * gw_flash_alloc's live-range set (invariant I2 in dos_xipimg.h). A FAT floppy
+ * image is mostly unallocated clusters, which are zeros. So: scan the cached
+ * image for a run of dos_mem_trim zero bytes and map that. If there is no such
+ * run -- or no cache at all -- say so and refuse, rather than mapping something
+ * that merely looks blank.
+ *
+ * THE SCAN IS THE PROOF, not a heuristic: it reads every byte it is about to
+ * promise is zero. It costs one linear pass over flash once per session. */
+#if DOS_XIP_CACHE
+static int dos_trim_arm(void)
+{
+    uint32_t run = 0, i;
+
+    if (dos_mem_trim == 0)
+        return 0;                       /* nothing trimmed, nothing to serve */
+    if (dos_xip_base == NULL || dos_xip_size < dos_mem_trim) {
+        printf("DOS: TRIM %u B but no flash image to serve it from\n",
+               (unsigned)dos_mem_trim);
+        return -1;
+    }
+    for (i = 0; i < dos_xip_size; i++) {
+        if (dos_xip_base[i] != 0) { run = 0; continue; }
+        if (++run < dos_mem_trim)
+            continue;
+        {
+            uint8_t *p = dos_xip_base + (i + 1 - dos_mem_trim);
+            /* dos_mem_map() rejects an unaligned host pointer -- the fold's
+             * DOS_COW_TRAP sentinel is 1 and relies on every real entry being
+             * 0 mod 4. Walk the run forward to the first 4-aligned start. */
+            uint8_t *a = (uint8_t *)(((uintptr_t)p + 3u) & ~(uintptr_t)3);
+            if ((uint32_t)(a - p) + dos_mem_trim > run)
+                continue;               /* alignment ate the run; keep looking */
+            if (dos_mem_map_ro(dos_mem_trim_base, dos_mem_trim, a) != 0) {
+                printf("DOS: TRIM window did not take\n");
+                return -1;
+            }
+            printf("DOS: TRIM mem[] is %u B shorter; guest %05X+%X from flash %p\n",
+                   (unsigned)dos_mem_trim, (unsigned)dos_mem_trim_base,
+                   (unsigned)dos_mem_trim, (void *)a);
+            return 0;
+        }
+    }
+    printf("DOS: TRIM no %u B zero run in the cached image\n",
+           (unsigned)dos_mem_trim);
+    return -1;
+}
+#else
+static int dos_trim_arm(void)
+{
+    if (dos_mem_trim == 0)
+        return 0;
+    printf("DOS: TRIM needs DOS_XIP_CACHE=1 to have flash to map\n");
+    return -1;
+}
+#endif
+
+/* One line per session. `lost` is the only number that can be wrong silently:
+ * it counts stores that reached a granule with no writable page behind it and
+ * were routed to the scratch page. A nonzero value means the pool is too small
+ * for what is mapped, and the fix is DOS_COW_POOL_PAGES -- subtracting 4,104
+ * bytes per page from whatever the trim reclaimed. */
+static void dos_cow_log(const char *when)
+{
+    unsigned faults = 0, pages = 0, pool = 0, lost = 0;
+
+    dos_cow_stats(&faults, &pages, &pool, &lost);
+    if (pool == 0 && faults == 0)
+        return;                         /* feature not built in; say nothing */
+    printf("DOS: cow %s faults=%u pages=%u/%u lost=%u\n",
+           when, faults, pages, pool, lost);
+}
 
 static void dos_blit(void) {
     dos_video_blit();
@@ -323,6 +432,14 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     /* The BIOS is mandatory: 8086tiny reads its instruction-decode tables out of
      * the BIOS image, so a missing file yields garbage decoding that looks exactly
      * like a broken memory map. Fail loudly here instead of burning debug time. */
+    /* BEFORE dos_cpu_init(), and after the .dsk cache: init reads the BIOS
+     * decode tables through the fold, so the window over the trimmed tail has
+     * to already be there. */
+    if (dos_trim_arm() != 0) {
+        printf("DOS: refusing to start with a trimmed mem[] and no window\n");
+        return;
+    }
+
     int init_rc = dos_cpu_init(argc, argv);
     if (init_rc != 0) {
         printf("DOS: BIOS load failed (%d) - expected %s\n", init_rc, dos_bios_path);
@@ -413,6 +530,11 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         }
 
         ++dbg_frames;
+        /* Once, a couple of seconds in: by then the guest has booted and the
+         * copy-on-write pool has taken whatever the boot was going to take, so
+         * this is the reading that sizes it. Silent when no window is armed. */
+        if (dbg_frames == 128)
+            dos_cow_log("boot");
 #if DOS_DEBUG_STATUS > 0
         if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames: ~1.07s at 60Hz */
             /* BDA clk_dtimer (guest 0x40:0x6C = 0x46C) is the 32-bit BIOS
