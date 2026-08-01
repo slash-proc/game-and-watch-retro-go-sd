@@ -1028,10 +1028,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1070,6 +1070,8 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_osk.o (.rodata .rodata* .text .text*)
     build/dos/dos_xms.o (.rodata .rodata* .text .text*)
     build/dos/dos_ems.o (.rodata .rodata* .text .text*)
+    build/dos/dos_xipsm.o (.rodata .rodata* .text .text*)
+    build/dos/dos_xipimg.o (.rodata .rodata* .text .text*)
     . = ALIGN(8);
     __xip_dos_end__ = .;
     ASSERT(ABSOLUTE(__xip_dos_end__) <= ORIGIN(DOS_CODE) + LENGTH(DOS_CODE),
