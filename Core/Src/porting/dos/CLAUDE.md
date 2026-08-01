@@ -168,13 +168,30 @@ Three hazards the table creates. All are fixed and regression-tested; all were s
 - **Pool exhaustion.** `dos_cow_lost > 0` means writes were dropped. `dos_cow_log()`
   reports it; it must be 0.
 
-`dos_trim_arm()` (`main_dos.c`) is the only part wired into firmware: it maps the
-trimmed tail of `mem[]` read-only and **refuses to start unless it can prove the region
-is zero**. `DOS_MEM_TRIM=0xD000` reclaims **36,776 B of AXI**. Nothing else in the XIP
-/ demand-paging program is wired up, and **no guest has executed from external flash on
-hardware.**
+`dos_trim_arm()` (`main_dos.c`) maps the trimmed tail of `mem[]` read-only and
+**refuses to start unless it can prove the region is zero**. `DOS_MEM_TRIM=0xD000`
+reclaims **36,776 B of AXI**.
 
-**AXI headroom is 8,176 B** (`__RAM_EMU_END__ 0x24100000` − `_OVERLAY_DOS_BSS_END`).
+The **`.xipimg` state machine is now also wired** (`dos_xipsm_boot()` /
+`dos_xipsm_frame()` in `main_dos.c`, `DOS_XIPSM_ENABLE=1` by default). First run of a
+title captures `/saves/dos/<title>.xipimg`; later runs cache it with
+`store_file_in_flash()`, verify it against live guest RAM and arm a window over
+external flash. Design and evidence:
+`external/8086tiny/docs/memory/17-xipimg-state-machine.md`. Three things to know:
+
+- The window is armed with `dos_mem_map_ro()`, so **a wrong snapshot costs pool pages,
+  never correctness** — a store into it is COW'd, not lost in NOR.
+- **Still no guest has executed from external flash on hardware.** The firmware links
+  and the mechanism is byte-exact on the host (`test286/runxipsm.sh`: 430 KB and 360 KB
+  executed out of `mmap(PROT_READ)` memory, byte-identical to a run from SD). Nothing
+  has run on silicon or under gwemu.
+- **`pages_xip` is measured EQUAL to `pages_cold`** and the `.dosmeta` sidecar's second
+  number is unearnable by window arming alone — it needs load elision. Do not quote a
+  `pages_xip` saving.
+
+**AXI headroom is 10,368 B** (`__RAM_EMU_END__ 0x24100000` − `_OVERLAY_DOS_BSS_END`
+`0x240fd780`), measured on `feat/xipimg-state-machine-parent`. It was 15,320 B before the
+`.xipimg` glue; the 4,952 B is reclaimable via `.xip_dos` and has not been.
 The 49,352 / 49,368 figures in older docs are stale.
 
 **Guest conventional memory is not a constraint.** An MCB walk shows DOS hands Keen 4

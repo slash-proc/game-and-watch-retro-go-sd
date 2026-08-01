@@ -20,6 +20,7 @@
 #include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
 #include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
 #include "dos_xms.h"     /* dos_xms_grown_bytes -- the backing-store zero-fill */
+#include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
 #include <string.h>
 #include <stdio.h>
 
@@ -389,6 +390,279 @@ static int dos_trim_arm(void)
 }
 #endif
 
+/* ---- The .xipimg state machine -------------------------------------------
+ *
+ * external/8086tiny/docs/improvement-brainstorming.md §H, and the answer to
+ * docs/memory/04-xip-execute.md §5's "the firmware glue is not written".
+ *
+ * FIRST RUN of a title: observe the demand region at 4 KB granule resolution
+ * over [T1, T2), take the longest run of granules the guest did not change, and
+ * write /saves/dos/<title>.xipimg. Nothing is armed.
+ *
+ * EVERY RUN AFTER: store_file_in_flash() the sidecar, check its key, its ABI
+ * word and its payload CRC, then at T2 byte-compare it against live guest RAM
+ * and -- only on a match -- install the window over external flash.
+ *
+ * The design, the invalidation rules and the reason the window is armed
+ * READ-ONLY-WITH-COW rather than read-only-hard are all in
+ * external/8086tiny/dos_xipsm.h, which is worth reading before changing
+ * anything here. The one line to carry away:
+ *
+ *     A WRONG SNAPSHOT COSTS POOL PAGES. IT CANNOT COST CORRECTNESS.
+ *
+ * because dos_mem_map_ro() puts DOS_COW_TRAP in the write map, so a guest store
+ * into the window is copied to a pool page instead of being lost in NOR (where
+ * erase-before-write means a write neither faults nor lands).
+ *
+ * FOUR THINGS THIS FILE OWES THE MECHANISM, none of which are in the submodule:
+ *
+ *  1. T1/T2 IN FRAMES. dos_xipsm.c compares the caller's monotonic measure of
+ *     GUEST WORK against t1/t2 and has no clock. 04-xip-execute.md §3.3 is the
+ *     reason it must be work and not wall time: an idle interval reported
+ *     128 of 128 granules clean and a store landed in the very next one. On a
+ *     handheld the user is playing, so frames are work.
+ *
+ *  2. THE KEY. Byte-identical to .dosmeta's -- CRC32 of the first
+ *     DOS_META_CRC_SPAN bytes of the .dsk plus its size -- and computed ONCE,
+ *     by dos_pool_reserve_from_meta(), which now hands it back rather than
+ *     dropping it. Reading 64 KB of a 66 MB image twice during boot would be
+ *     the second-most expensive thing this core does before the guest starts.
+ *
+ *  3. ONE fopen AT A TIME. MAX_OPEN_FILES is 8 (Core/Src/syscalls.c:51) and
+ *     running out fails SILENTLY (../../../../CLAUDE.md). dos_cpu_init() holds
+ *     three for the whole run, so the capture's handle is opened at T2 and
+ *     closed before the function returns.
+ *
+ *  4. GRACEFUL DEGRADATION, WHICH IS NOT OPTIONAL. Missing, stale, corrupt,
+ *     unwritable, or no flash at all: every one of them ends with the guest
+ *     running from SD exactly as it does today. There is no failure return in
+ *     this section and nothing below it consults the window.
+ *
+ * A FULL FLASH IS NORMAL, NOT AN ERROR: BATTLECHESS.dsk is 66,060,288 bytes
+ * against a 64 MB part, so find_write_slot() (gw_flash_alloc.c:144) answering
+ * "no" is an outcome the design owes an answer to, and the answer is "run from
+ * SD" (02-guest-xip.md §5, "the one new obligation").
+ */
+#ifndef DOS_XIPSM_ENABLE
+#define DOS_XIPSM_ENABLE 1
+#endif
+
+static void dos_cow_log(const char *when);   /* defined below; used at arm time */
+
+#if DOS_XIPSM_ENABLE
+/* The observation range: the whole conventional demand region. Deliberately
+ * NOT a program image -- this port has no INT 21h hook and should not grow one
+ * (02-guest-xip.md §10), and the longest-clean-run rule needs no idea where the
+ * program is. Must match 8086tiny.c's DOS_DEMAND_BASE/TOP when demand paging is
+ * built in; when it is not, this is still a legal range to observe. */
+#define DOS_XIPSM_OBS_BASE 0x10000u
+#define DOS_XIPSM_OBS_LEN  0x90000u
+
+/* ~5 s and ~25 s at 60 Hz. T1 is late enough that DOS has booted and the title
+ * has loaded (02-guest-xip.md §10 puts EXEC at ~13.5 M instructions), T2 far
+ * enough past it that the interval contains real play. Both are frames, not
+ * milliseconds: a slow frame is more guest work, not less. */
+#ifndef DOS_XIPSM_T1_FRAMES
+#define DOS_XIPSM_T1_FRAMES 300u
+#endif
+#ifndef DOS_XIPSM_T2_FRAMES
+#define DOS_XIPSM_T2_FRAMES 1500u
+#endif
+
+/* 8086tiny.c's fold-aware guest pointer. Every read below is granule-aligned
+ * and at most one granule long, which is what makes a single memcpy correct
+ * despite the seam (a COW'd granule is a pool page and is NOT contiguous with
+ * its neighbour). */
+extern unsigned char *dos_mem_ptr(unsigned int guest_addr);
+
+static dos_xipsm_t dos_sm;
+static char dos_sm_path[128];
+static uint8_t *dos_sm_flash;
+static uint32_t dos_sm_flash_size;
+
+static void dos_sm_read(unsigned int lin, unsigned char *dst, unsigned int len, void *ctx)
+{
+    (void)ctx;
+    memcpy(dst, dos_mem_ptr(lin), len);
+}
+
+static unsigned long dos_sm_write(const void *src, unsigned long len, void *ctx)
+{
+    return (unsigned long)fwrite(src, 1, (size_t)len, (FILE *)ctx);
+}
+
+static void dos_sm_progress(uint32_t total, uint32_t done, uint8_t pct)
+{
+    static uint8_t last = 255;
+    (void)total; (void)done;
+    if (pct / 25 != last / 25 || last == 255) {
+        last = pct;
+        printf("DOS: xipimg caching %u%%\n", pct);
+    }
+    wdog_refresh();
+}
+
+/* "/roms/dos/KEEN4.dsk" -> "/saves/dos/KEEN4.xipimg". /saves/dos is where the
+ * SD half lives because store_file_in_flash() takes a PATH: SD is where a
+ * snapshot is produced, flash is where it is consumed, and keeping those
+ * separate is what stops a guest store from ever reaching flash
+ * (dos_xipimg.h, "SAFETY MODEL"). */
+static int dos_sm_make_path(const char *dsk_path)
+{
+    const char *base = dsk_path, *p, *dot;
+    size_t n;
+
+    for (p = dsk_path; *p; p++)
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    dot = 0;
+    for (p = base; *p; p++)
+        if (*p == '.')
+            dot = p;
+    n = dot ? (size_t)(dot - base) : strlen(base);
+    if (n == 0 || n + sizeof("/saves/dos/.xipimg") >= sizeof dos_sm_path)
+        return -1;
+    strcpy(dos_sm_path, "/saves/dos/");
+    memcpy(dos_sm_path + 11, base, n);
+    strcpy(dos_sm_path + 11 + n, ".xipimg");
+    return 0;
+}
+
+/* Boot half. Runs BEFORE dos_pool_reserve_from_meta() so that its answer --
+ * "will a window be armed this run?" -- is available to dos_meta_pages().
+ * Returns 1 when a snapshot passed every static check, i.e. when the window
+ * WILL be armed at the gate unless guest RAM diverges from it.
+ *
+ * WHY THE WINDOW IS NOT ARMED HERE, AT T0, WHICH IS WHAT §H ASKED FOR.
+ * Arming at boot was tried on paper and is UNSAFE, and the reason is worth
+ * recording because it looks like it should work. A snapshot is the SETTLED
+ * image -- what the guest's memory looks like after DOS has loaded the program
+ * and the program has decompressed itself. Arming it at T0 would make the guest
+ * READ those settled bytes before the loader has written them: DOS walks MCB
+ * chains and free-block headers through exactly that range while it is coming
+ * up, and it would see a program image where it expects its own allocator
+ * state. Copy-on-write does not help, because COW protects STORES and this is a
+ * LOAD returning the wrong bytes.
+ *
+ * Making a T0 arm correct is the LOAD-ELISION problem 04-xip-execute.md §3.1
+ * names -- "the bytes must already be in flash and the INT 13h read that would
+ * write them must become a remap instead of a copy" -- and that is not built.
+ * So the arm is at the gate, and the reservation is told what is going to
+ * happen rather than what has happened.
+ *
+ * That distinction costs nothing measurable today, and the measurement is in
+ * external/8086tiny/docs/memory/17-xipimg-state-machine.md §5: pages_xip came
+ * out EQUAL to pages_cold on both images tested, because arming a window at T2
+ * cannot retroactively free pool pages that the load spike already took at T1.
+ * The sidecar's second number is real, but it is load elision's to earn. */
+static int dos_xipsm_boot(const char *dsk_path, uint32_t dsk_size, unsigned long key_crc)
+{
+    uint32_t t0 = HAL_GetTick();
+
+    dos_xipsm_init(&dos_sm, DOS_XIPSM_OBS_BASE, DOS_XIPSM_OBS_LEN,
+                   DOS_XIPSM_T1_FRAMES, DOS_XIPSM_T2_FRAMES,
+                   key_crc, (unsigned long)dsk_size);
+    if (dos_sm.st == DOS_XIPSM_OFF) {
+        printf("DOS: xipimg disabled (observation range refused)\n");
+        return 0;
+    }
+    if (dos_sm_make_path(dsk_path) != 0) {
+        printf("DOS: xipimg path too long for %s\n", dsk_path);
+        dos_sm.st = DOS_XIPSM_OFF;
+        return 0;
+    }
+
+    /* store_file_in_flash() opens the file itself and closes it before
+     * returning, so no handle is held across dos_cpu_init(). NULL is the
+     * missing-file case AND the full-flash case, and neither is an error. */
+    dos_sm_flash_size = 0;
+    dos_sm_flash = store_file_in_flash(dos_sm_path, &dos_sm_flash_size,
+                                       false, &dos_sm_progress);
+    dos_xipsm_offer(&dos_sm, dos_sm_flash, (unsigned long)dos_sm_flash_size);
+
+    printf("DOS: xipimg %s -> %s (%s), flash %p %lu B, %lu ms\n",
+           dos_sm_path, dos_xipsm_state_name(dos_sm.st),
+           dos_xipsm_reason_name(dos_sm.reason), (void *)dos_sm_flash,
+           (unsigned long)dos_sm_flash_size,
+           (unsigned long)(HAL_GetTick() - t0));
+
+    return dos_sm.st == DOS_XIPSM_LOADED;
+}
+
+/* Frame half. One call per frame; everything below T1 is a single compare. */
+static void dos_xipsm_frame(unsigned int frames)
+{
+    if (dos_sm.st == DOS_XIPSM_OFF)
+        return;
+    if (!dos_xipsm_tick(&dos_sm, (unsigned long)frames, &dos_sm_read, NULL))
+        return;
+
+    switch (dos_sm.st) {
+    case DOS_XIPSM_ARMED:
+        printf("DOS: xipimg ARMED %lu B at guest %05X from flash\n",
+               dos_sm.win_len, dos_sm.win_base);
+        dos_cow_log("armed");
+        break;
+
+    case DOS_XIPSM_REJECTED:
+        printf("DOS: xipimg not armed (%s, first_diff %lu) - running from SD\n",
+               dos_xipsm_reason_name(dos_sm.reason), dos_sm.first_diff);
+        break;
+
+    case DOS_XIPSM_CAPTURED: {
+        /* The one visible cost of this feature: ~400 KB streamed to SD, once,
+         * on the first run of a title. It is a hitch of a few hundred ms in one
+         * frame, not a stall every boot. Writing it at teardown instead was
+         * considered and is WRONG: the payload has to be the bytes as they were
+         * at T2, because T2 is where the next run's gate compares. */
+        uint32_t t0 = HAL_GetTick();
+        unsigned long want = 64UL + dos_sm.win_len, got = 0;
+        FILE *f = fopen(dos_sm_path, "wb");
+
+        if (!f) {
+            /* /saves/dos may not exist, or the card may be read-only. Neither
+             * is worth failing a game over. */
+            printf("DOS: xipimg cannot write %s - snapshot skipped\n", dos_sm_path);
+            dos_sm.st = DOS_XIPSM_OFF;
+            break;
+        }
+        got = dos_xipsm_capture(&dos_sm, &dos_sm_read, NULL, &dos_sm_write, f);
+        fclose(f);
+        if (got != want) {
+            /* A truncated payload with a good header is the ONE shape this
+             * design cannot detect on the way back in -- the payload CRC covers
+             * `len` bytes that are no longer there -- so delete it rather than
+             * leave it. */
+            remove(dos_sm_path);
+            printf("DOS: xipimg short write %lu of %lu - deleted\n", got, want);
+        } else {
+            printf("DOS: xipimg captured %lu B at guest %05X (%lu of %u granules "
+                   "clean), %lu B written to %s in %lu ms\n",
+                   dos_sm.win_len, dos_sm.win_base, dos_sm.clean_gran,
+                   dos_sm.ngran, got, dos_sm_path,
+                   (unsigned long)(HAL_GetTick() - t0));
+        }
+        dos_sm.st = DOS_XIPSM_OFF;      /* one capture per session */
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+static void dos_xipsm_report(void)
+{
+    printf("DOS: xipimg final state %s (%s), window %lu B at %05X\n",
+           dos_xipsm_state_name(dos_sm.st), dos_xipsm_reason_name(dos_sm.reason),
+           dos_sm.win_len, dos_sm.win_base);
+}
+#else
+static int dos_xipsm_boot(const char *dsk_path, uint32_t dsk_size, unsigned long key_crc)
+{ (void)dsk_path; (void)dsk_size; (void)key_crc; return 0; }
+static void dos_xipsm_frame(unsigned int frames) { (void)frames; }
+static void dos_xipsm_report(void) { }
+#endif
+
 /* One line per session. `lost` is the only number that can be wrong silently:
  * it counts stores that reached a granule with no writable page behind it and
  * were routed to the scratch page. A nonzero value means the pool is too small
@@ -397,12 +671,23 @@ static int dos_trim_arm(void)
 static void dos_cow_log(const char *when)
 {
     unsigned faults = 0, pages = 0, pool = 0, lost = 0;
+    unsigned arena = 0, resv = 0, live = 0, grows = 0;
 
     dos_cow_stats(&faults, &pages, &pool, &lost);
     if (pool == 0 && faults == 0)
         return;                         /* feature not built in; say nothing */
-    printf("DOS: cow %s faults=%u pages=%u/%u lost=%u\n",
-           when, faults, pages, pool, lost);
+    dos_cow_pool_stats(&arena, &resv, &live, &grows);
+    /* Both halves on one line, because they are only interpretable together.
+     * `lost` must be 0 -- it counts stores that reached a granule with no
+     * writable page behind it and were routed to the scratch page. `grows`
+     * climbing is how a stale .dosmeta measurement announces itself, and
+     * `faults` climbing on a title that has a .xipimg armed is the COST of a
+     * stale snapshot becoming visible: dos_xipsm.h §2 says a wrong snapshot
+     * buys pool pages instead of losing stores, and this is the bill. */
+    printf("DOS: cow %s faults=%u pages=%u/%u lost=%u | pool arena=%u resv=%u "
+           "live=%u grows=%u spare=%uB\n",
+           when, faults, pages, pool, lost, arena, resv, live, grows,
+           (unsigned)((arena > live ? arena - live : 0) * 4104u));
 }
 
 /* ---- The .dosmeta sidecar -------------------------------------------------
@@ -422,13 +707,50 @@ static void dos_cow_log(const char *when)
  * running out fails silently (../../../../CLAUDE.md); dos_cpu_init() takes
  * three afterwards, so this handle must be closed before it runs -- and it is.
  * The .dsk is opened a second time here for the key CRC, again transiently. */
-static void dos_pool_reserve_from_meta(const char *dsk_path, uint32_t dsk_size)
+/* The cache key both sidecars share: CRC32 of the first DOS_META_CRC_SPAN bytes
+ * of the image. Bounded because BATTLECHESS.dsk is 66 MB and this runs during
+ * boot; dsk_size carries the rest of the discrimination. It is a cache key, not
+ * a correctness boundary -- being wrong about it costs a reservation and a
+ * snapshot, never the guest.
+ *
+ * Computed ONCE per boot and handed to both dos_pool_reserve_from_meta() and
+ * dos_xipsm_boot(). Reading 64 KB of a 66 MB image twice before the guest's
+ * first instruction is not free on this device, and the two callers must agree
+ * anyway or a .dosmeta and a .xipimg could disagree about which image is
+ * mounted. */
+static unsigned long dos_image_key_crc(const char *dsk_path)
+{
+    static unsigned char buf[1024];
+    unsigned long left = DOS_META_CRC_SPAN;
+    unsigned long acc = 0xFFFFFFFFUL;
+    size_t got;
+    FILE *f = fopen(dsk_path, "rb");
+
+    if (!f)
+        return 0;
+    while (left && (got = fread(buf, 1, left < sizeof buf ? left : sizeof buf, f)) > 0) {
+        /* Streamed CRC32: dos_meta_crc32() is one-shot, so fold by hand with
+         * the same polynomial rather than buffering 64 KB. */
+        size_t k;
+        for (k = 0; k < got; k++) {
+            int b;
+            acc ^= buf[k];
+            for (b = 0; b < 8; b++)
+                acc = (acc >> 1) ^ (0xEDB88320UL & (unsigned long)(-(long)(acc & 1)));
+        }
+        left -= got;
+    }
+    fclose(f);
+    return (acc ^ 0xFFFFFFFFUL) & 0xFFFFFFFFUL;
+}
+
+static void dos_pool_reserve_from_meta(const char *dsk_path, uint32_t dsk_size,
+                                       unsigned long crc, int xip_armed)
 {
     unsigned char raw[DOS_META_BYTES];
     char path[256];
     dos_meta_t m;
     dos_meta_status_t st;
-    unsigned long crc = 0;
     unsigned arena = 0, resv = 0, live = 0, grows = 0;
     size_t n, i;
     FILE *f;
@@ -449,53 +771,42 @@ static void dos_pool_reserve_from_meta(const char *dsk_path, uint32_t dsk_size)
     n = fread(raw, 1, sizeof raw, f);
     fclose(f);
 
-    /* The key's CRC half: the first DOS_META_CRC_SPAN bytes of the image. A
-     * bounded read because BATTLECHESS.dsk is 66 MB and this runs during boot;
-     * dsk_size carries the rest of the discrimination. It is a cache key, not a
-     * correctness boundary -- being wrong about it costs the reservation, not
-     * the guest. */
-    f = fopen(dsk_path, "rb");
-    if (f) {
-        static unsigned char buf[1024];
-        unsigned long left = DOS_META_CRC_SPAN, done = 0;
-        unsigned long acc = 0xFFFFFFFFUL;
-        size_t got;
-
-        while (left && (got = fread(buf, 1, left < sizeof buf ? left : sizeof buf, f)) > 0) {
-            /* Streamed CRC32: dos_meta_crc32() is one-shot, so fold by hand
-             * with the same polynomial rather than buffering 64 KB. */
-            size_t k;
-            for (k = 0; k < got; k++) {
-                int b;
-                acc ^= buf[k];
-                for (b = 0; b < 8; b++)
-                    acc = (acc >> 1) ^ (0xEDB88320UL & (unsigned long)(-(long)(acc & 1)));
-            }
-            left -= got;
-            done += got;
-        }
-        fclose(f);
-        crc = (acc ^ 0xFFFFFFFFUL) & 0xFFFFFFFFUL;
-        (void)done;
-    }
-
     st = dos_meta_parse(raw, (unsigned long)n, dsk_size, crc, &m);
     if (st != DOS_META_OK) {
         printf("DOS: meta %s ignored (%s)\n", path, dos_meta_status_name(st));
         return;
     }
-    /* xip_armed = 0: the .xipimg window is armed later, by code that does not
-     * exist yet (improvement-brainstorming.md §H). When it does, arm it BEFORE
-     * this call and pass 1 -- the pages_xip figure is the smaller of the two and
-     * believing it without the window is the one way to under-reserve on
-     * purpose. */
-    if (dos_cow_reserve((unsigned)dos_meta_pages(&m, 0)) == 0) {
+    /* `xip_armed` now carries an answer instead of a TODO. It is set by
+     * dos_xipsm_boot(), which runs BEFORE this call and has already decided:
+     * 1 means a .xipimg passed its magic, version, ABI, key, geometry and
+     * payload CRC, so the window WILL be installed at the gate unless live
+     * guest RAM diverges from it.
+     *
+     * That is one step short of "armed", and the step is deliberate --
+     * dos_xipsm.h explains why a T0 arm is unsafe without load elision. The
+     * risk the old comment named ("believing pages_xip without the window is
+     * the one way to under-reserve on purpose") is bounded twice over:
+     *
+     *   - the number is a RESERVATION, NOT A CAP. With no borrower installed
+     *     the spare belongs to nobody, dos_cow_grow() always succeeds, and a
+     *     wrong number cannot lose a store (dos_meta.h; test286/runpool.sh with
+     *     -DDOS_COW_GROW=0 as the negative control).
+     *   - measured, pages_xip EQUALS pages_cold, because arming at the gate
+     *     cannot retroactively free the pool pages the load spike already took.
+     *     Every shipped .dosmeta carries pages_xip = 0 today, and
+     *     dos_meta_pages() falls back to pages_cold when it is 0 -- so this
+     *     argument currently selects nothing at all.
+     *     (external/8086tiny/docs/memory/17-xipimg-state-machine.md §5.)
+     */
+    if (dos_cow_reserve((unsigned)dos_meta_pages(&m, xip_armed)) == 0) {
         printf("DOS: meta pool reservation refused\n");
         return;
     }
     dos_cow_pool_stats(&arena, &resv, &live, &grows);
-    printf("DOS: pool reserved %u of %u pages (%u B spare)\n",
-           resv, arena, (unsigned)((arena - resv) * 4104u));
+    printf("DOS: pool reserved %u of %u pages (%u B spare, xip_armed=%d, "
+           "cold=%lu xip=%lu)\n",
+           resv, arena, (unsigned)((arena - resv) * 4104u), xip_armed,
+           m.pages_cold, m.pages_xip);
 }
 
 static void dos_blit(void) {
@@ -705,9 +1016,19 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * every way this can go wrong ends with the full pool, which is what the
      * build was linked for. */
     {
+        /* One 64 KB read of the image, shared by both sidecars. Measured at
+         * 43 ms when each computed its own; the duplicate read is gone. */
         uint32_t t0_meta = HAL_GetTick();
-        dos_pool_reserve_from_meta(ACTIVE_FILE->path, (uint32_t)st.size);
-        printf("DOS: meta path took %lu ms\n", (unsigned long)(HAL_GetTick() - t0_meta));
+        unsigned long key = dos_image_key_crc(ACTIVE_FILE->path);
+        /* BEFORE the reservation, so its answer can select pages_xip -- that is
+         * the whole reason these two are adjacent. Also before dos_cpu_init()
+         * for the fopen budget: store_file_in_flash() opens and closes the
+         * .xipimg itself, and dos_cpu_init() then holds three handles out of
+         * MAX_OPEN_FILES = 8 for the whole run. */
+        int xip = dos_xipsm_boot(ACTIVE_FILE->path, (uint32_t)st.size, key);
+        dos_pool_reserve_from_meta(ACTIVE_FILE->path, (uint32_t)st.size, key, xip);
+        printf("DOS: meta+xipsm path took %lu ms\n",
+               (unsigned long)(HAL_GetTick() - t0_meta));
     }
 
     /* BEFORE dos_cpu_init(), and after the .dsk cache: init reads the BIOS
@@ -813,6 +1134,12 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
          * this is the reading that sizes it. Silent when no window is armed. */
         if (dbg_frames == 128)
             dos_cow_log("boot");
+
+        /* The .xipimg state machine. Below T1 this is one compare; at T1 and T2
+         * it is 144 granule CRC32s (~576 KB read, once each); at T2 on a hit it
+         * is the ~100 KB memcmp against memory-mapped OSPI that decides whether
+         * the window is armed. Nothing here runs after the machine settles. */
+        dos_xipsm_frame(dbg_frames);
 #if DOS_DEBUG_STATUS > 0
         if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames: ~1.07s at 60Hz */
             /* BDA clk_dtimer (guest 0x40:0x6C = 0x46C) is the 32-bit BIOS
@@ -875,6 +1202,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
              * the last thing read. */
             dos_int13_obs_report();
 #endif
+            /* Alongside the prof line, on the same cadence and for the same
+             * reason it is not behind a debug flag: an undersized pool, a stale
+             * .dosmeta and a stale .xipimg all show up here and nowhere else,
+             * and a diagnostic that has to be specially built is one nobody
+             * runs. Silent when no window is armed, so a build without COW
+             * costs one call and prints nothing. */
+            dos_cow_log("run");
         }
 
         if (!lcd_is_swap_pending() && drawFrame) {
@@ -936,4 +1270,12 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
             dos_prof_idle_end();
         }
     }
+
+    /* Teardown. Reached only when the guest halts (the loop's `break` above);
+     * a return to the launcher via the pause menu does not come through here.
+     * Worth having anyway: it is the one reading taken after everything the
+     * session was going to do has happened, and `lost` at teardown is the
+     * number that decides whether the pool was big enough. */
+    dos_cow_log("final");
+    dos_xipsm_report();
 }
