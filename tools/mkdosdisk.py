@@ -1170,7 +1170,27 @@ def dos_name(path: Path, taken: set[str]) -> str:
         n += 1
 
 
-def make_autoexec(entry: str | None, chdir: str | None = None) -> str:
+# --- LASTFIT.COM -------------------------------------------------------------
+
+LASTFIT_NAME = "LASTFIT.COM"
+
+# 12 bytes, hand-assembled because this repo has no DOS assembler in the build
+# path and a 12-byte .COM does not justify one:
+#
+#   B8 01 58     mov ax, 5801h      ; DOS "set allocation strategy"
+#   BB 02 00     mov bx, 0002h      ; 2 = last fit (low memory, highest block)
+#   CD 21        int 21h
+#   B4 4C        mov ah, 4Ch
+#   CD 21        int 21h            ; terminate, strategy stays set
+#
+# The strategy is a global in the DOS kernel and is NOT reset when a program
+# exits, which is the whole reason a separate 12-byte .COM works at all.
+LASTFIT_COM = bytes([0xB8, 0x01, 0x58, 0xBB, 0x02, 0x00, 0xCD, 0x21,
+                     0xB4, 0x4C, 0xCD, 0x21])
+
+
+def make_autoexec(entry: str | None, chdir: str | None = None,
+                  last_fit: bool = False) -> str:
     """AUTOEXEC.BAT: run the payload, then fall back to the DOS prompt.
 
     It deliberately does NOT call QUITEMU.COM afterwards. That was the original
@@ -1193,6 +1213,17 @@ def make_autoexec(entry: str | None, chdir: str | None = None) -> str:
         # root gets you a game that cannot find its own .GOB files.
         if chdir:
             lines.append(f"CD \\{chdir.upper()}")
+        if last_fit:
+            # Guest XIP phase 4 (external/8086tiny/docs/memory/02-guest-xip.md
+            # sec.3, consequence 2): the fold can only afford one window and it
+            # has to be a HIGH suffix of the identity range, so the application
+            # must be loaded as high as DOS can be persuaded to put it.
+            # LASTFIT.COM lives in the root; the CD above may have moved us.
+            stem = LASTFIT_NAME.split(".")[0]
+            lines += [
+                "REM Guest-XIP: load the next program as high as DOS will.",
+                ("\\" + stem) if chdir else stem,
+            ]
         lines += [
             entry.upper(),
             "",
@@ -1323,7 +1354,8 @@ def parse_size(text: str) -> int:
 def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
              entry_override: str | None, verbose: bool = True,
              out_name: str | None = None, size_sectors: int | None = None,
-             only: list[str] | None = None, subdir: str | None = None) -> Path:
+             only: list[str] | None = None, subdir: str | None = None,
+             last_fit: bool = False) -> Path:
     """Write one partitioned FAT16 .dsk image.
 
     The write order is the whole game and is the same one the floppy path uses:
@@ -1339,6 +1371,8 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
 
     system = source.system_files()
     reserved = {n for n, _, _ in system}
+    if last_fit:
+        reserved.add(LASTFIT_NAME)
     if src is None:
         files, names = [], []
     else:
@@ -1367,9 +1401,10 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
             full = next(n for n in names if n.rsplit("\\", 1)[-1] == picked)
             entry_dir, _, entry = full.rpartition("\\")
 
-    autoexec = make_autoexec(entry, entry_dir or None).encode("latin1")
+    autoexec = make_autoexec(entry, entry_dir or None, last_fit).encode("latin1")
 
     content = (sum(len(c) for _, c, _ in system) + len(autoexec)
+               + (len(LASTFIT_COM) if last_fit else 0)
                + sum(len(c) for _, _, c in files))
     total = size_sectors or auto_hdd_sectors(content)
 
@@ -1382,6 +1417,8 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
             for name, data, attr in system:
                 img.add(name, data, attr)
             img.add("AUTOEXEC.BAT", autoexec)
+            if last_fit and entry:
+                img.add(LASTFIT_NAME, LASTFIT_COM)
 
             # One directory at a time, each created immediately before its own
             # contents. Creating all the directories up front would work just as
@@ -1442,13 +1479,16 @@ def _assert_hdd_boot_layout(img: Fat16Image) -> None:
 
 def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | None,
          verbose: bool = True, verify: bool = False,
-         out_name: str | None = None) -> Path:
+         out_name: str | None = None, last_fit: bool = False) -> Path:
     """Write one .dsk. `src is None` builds a bare bootable disk (see --bare)."""
     system = source.system_files()
+    reserved = {n for n, _, _ in system}
+    if last_fit:
+        reserved.add(LASTFIT_NAME)
     if src is None:
         payload, names = [], []
     else:
-        payload, names = collect_payload(src, {n for n, _, _ in system})
+        payload, names = collect_payload(src, reserved)
         if not payload:
             raise DiskFullError(f"{src}: nothing to pack")
 
@@ -1467,8 +1507,10 @@ def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | N
     for name, content, attr in system:
         img.add(name, content, attr)
 
-    autoexec = make_autoexec(entry).encode("latin1")
+    autoexec = make_autoexec(entry, None, last_fit).encode("latin1")
     img.add("AUTOEXEC.BAT", autoexec)
+    if last_fit and entry:
+        img.add(LASTFIT_NAME, LASTFIT_COM)
     for name, content in payload:
         img.add(name, content)
 
@@ -1488,6 +1530,8 @@ def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | N
     if verify:
         expect = [(n, c) for n, c, _ in system]
         expect.append(("AUTOEXEC.BAT", autoexec))
+        if last_fit and entry:
+            expect.append((LASTFIT_NAME, LASTFIT_COM))
         expect.extend(payload)
         for line in verify_image(out, source, expect):
             print(f"    ok: {line}")
@@ -1612,6 +1656,14 @@ def main() -> int:
                              "(default: none -- every cluster goes to the payload)")
     parser.add_argument("--entry", type=str, default=None,
                         help="Executable AUTOEXEC.BAT should run (only valid with a single input)")
+    parser.add_argument("--last-fit", action="store_true",
+                        help="Ship a 12-byte LASTFIT.COM and call it from "
+                             "AUTOEXEC.BAT before the payload, so DOS allocates "
+                             "with INT 21h AH=58h strategy 2 (last fit) and the "
+                             "program lands as high as it can. Off by default: "
+                             "it only moves programs whose MZ e_maxalloc is "
+                             "bounded, and nothing consumes the property yet. "
+                             "See external/8086tiny/docs/memory/02-guest-xip.md.")
     parser.add_argument("--bare", action="store_true",
                         help="Build one bootable disk with no payload at all, landing "
                              "at a DOS prompt. Name it with --name (default: DOS).")
@@ -1707,7 +1759,8 @@ def main() -> int:
             return 1
         print(f"Building a bare bootable disk using {source.label}:")
         try:
-            pack(None, dst, source, None, verify=args.verify, out_name=stem)
+            pack(None, dst, source, None, verify=args.verify, out_name=stem,
+                 last_fit=args.last_fit)
         except DiskFullError as e:
             print(f"  {e}", file=sys.stderr)
             return 1
@@ -1764,9 +1817,10 @@ def main() -> int:
             if args.hdd or payload_bytes > floppy_free:
                 pack_hdd(src, dst, source, args.entry, out_name=None,
                          size_sectors=size_sectors, only=args.only,
-                         subdir=args.subdir)
+                         subdir=args.subdir, last_fit=args.last_fit)
             else:
-                pack(src, dst, source, args.entry, verify=args.verify)
+                pack(src, dst, source, args.entry, verify=args.verify,
+                     last_fit=args.last_fit)
         except DiskFullError as e:
             print(f"  {e}", file=sys.stderr)
             failures += 1
