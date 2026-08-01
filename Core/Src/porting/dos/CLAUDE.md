@@ -125,8 +125,10 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
    suspect is the guest clock's 55 ms quantisation, so the aggregate may be usable but
    the breakdown is not. At 280 MHz the default profile costs ~233 ARM cycles per 8086
    instruction against 20–50 for a decent interpreter, so the ceiling looks like an
-   efficiency problem. `external/8086tiny/docs/cpu-roadmap.md` lists the unpulled
-   levers, `.overlay_dos_itc` (reserved, **empty**) first.
+   efficiency problem. `external/8086tiny/docs/cpu-roadmap.md` lists the unpulled levers. It
+   used to name `.overlay_dos_itc` first; **that ordering is obsolete** — ITCM has since been
+   measured and refuted (see *Things already ruled out*). The one remaining double-digit
+   lever the docs endorse is the 4K decode cache (`docs/cpu/07-decode-cache-design.md`).
 
 ## The memory map — resolved, for reference
 
@@ -153,10 +155,23 @@ area, PICO-8 pattern — and because `.lcd_pool` spans all of RAM_UC (`__lcd_poo
 __RAM_EMU_START__`) that yields **874 KB in one unbroken run**. 780 KB guest + code/BSS
 reaches 813 KB, leaving 61 KB.
 
-Total budget, verified: 874 KB AXI (LUT8) + **87,904 B AHB** (not 120 KB — `.gba_ahbram`
-statically reserves 34,976 B whichever core is resident, and the top 8 KB is the `.audio`
-DMA buffer) + 64 KB ITCM. AXI headroom is **49,368 bytes** after the two-region fold, up
-from 4,312. **DTCM is not available** — it is firmware's (~17 KB data/bss, 85 KB heap, 20 KB stack); apps reach it
+Total budget, verified against the linked ELF (`arm-none-eabi-nm build/gw_retro_go.elf`):
+874 KB AXI (LUT8) + **122,880 B AHB** + 64 KB ITCM.
+
+The AHB figure used to read 87,904 B, because `.gba_ahbram` statically reserved 34,976 B
+whichever core was resident. **That reservation is gone** — commit `4252a648` gave the
+section an explicit VMA of `ORIGIN(AHBRAM)` so it is *overlaid* on the AHB heap instead of
+charged to the region (`STM32H7B0VBTx_SDCARD.ld:669`). Verified: `__ahbram_heap_start__ ==
+__gba_ahb_start__ == 0x30000000`, and `__ahbram_audio_start__ = 0x3001e000`, so the pool is
+`0x1e000` = 122,880 B (128 KB less the 8 KB `.audio` DMA reserve). GBA is unharmed because
+`main_gba.c:766` claims those 34,976 B back with an `ahb_only_malloc()` before its first
+allocation, guarded by both a runtime check and the link-time ASSERT at `ld:1104`.
+
+**AXI headroom is 16,520 bytes**, measured: `__RAM_EMU_END__` (`0x24100000`) −
+`_OVERLAY_DOS_BSS_END` (`0x240fbf78`). The older 49,368/49,352 figure predates the HMA and
+the 186/286 opcode work and is **stale — do not quote it**.
+
+**DTCM is not available** — it is firmware's (~17 KB data/bss, 85 KB heap, 20 KB stack); apps reach it
 only through `malloc`. See the RAM ownership contract.
 
 ## Submodule hygiene
@@ -191,13 +206,36 @@ automatically.
   produced an orphan section with no copy-to-ITCM step. `._itcram` and `._itcram_hot` are
   both size 0 in this build.
 
-  **But this is a dead end in method, not destination.** ITCM *is* reachable — PCE and GBA
-  both get it as overlay cores via `.overlay_pce_itc` / `.overlay_gba_itc`
-  (`STM32H7B0VBTx_SDCARD.ld:338`, `:773`), which have explicit LMAs and are memcpy'd in by
-  `run_internal_emu()` before BSS is zeroed (`rg_emulators.c:1416`). Once DOS is an
-  overlay core the same door opens, and for an instruction-dispatch interpreter that 64 KB
-  is the highest-value memory on the chip. Do not re-attempt the attribute; do plan the
-  overlay ITC section.
+  An earlier revision of this file called that "a dead end in method, not destination", and
+  said the overlay ITC section would open the door because "for an instruction-dispatch
+  interpreter that 64 KB is the highest-value memory on the chip".
+
+  **That prediction was tested and is wrong. ITCM is closed for DOS — all three TCM
+  variants were measured and all three LOST** (`external/8086tiny/docs/cpu/05-perf-handover.md:646-692`):
+
+  | variant | what moved | result |
+  |---|---|---|
+  | `DOS_ITC_DATA=1` | `bios_table_lookup` (5 KB) + decode state → ITCM | **−1.4%** (cpi 207→210) |
+  | DTCM | hottest small data → DTCM | **−2%** |
+  | `DOS_ITC_CODE=1` | `dos_cpu_frame` (21 KB) → ITCM, via exactly the overlay ITC section recommended above | **−1.1%** (11,958 → 12,090 µs/f) |
+
+  Branches: superproject `perf/dos-itcm-code` @ `c96d49a8`, submodule `perf/itcm-code` @
+  `6abed58`. The reasoning error is recorded at `05-perf-handover.md:666`: **21 KB is the
+  static size of `dos_cpu_frame`, not its hot working set** — a ~120-case switch is large on
+  disk but only a fraction runs per guest instruction, so the I-cache was never thrashing.
+  And ITCM is not free: it forfeits I-cache prefetch/line-fill and adds a veneer indirection
+  on every call out (`:670`).
+
+  The DWT instrumentation closes both halves directly (`:466-501`): `LSUCNT` is **6.4 of 228
+  cycles = 2.5%**, so the interpreter is not data-latency bound, and no phase of the loop
+  exceeds 29%, so there is no hot spot to relocate. `05-perf-handover.md:674` states it
+  flatly: **"Do not propose a fourth TCM experiment."**
+
+  So `.overlay_dos_itc` stays declared and **empty on purpose**. The plumbing is complete
+  and correct — `rg_emulators.c:1706-1712` copies the image, guarded by `if (dos_itc_size)`,
+  with `__DSB()/__ISB()` before any fetch — so seeding it later is still a one-line change.
+  There is just no evidence that anything should go in it. Do not re-attempt the attribute,
+  and do not re-attempt the overlay ITC section either.
 - **A boot-time MemManage fault in `rg_get_logo`.** A long investigation concluded this was
   a gwemu bug, not firmware: an `UNPREDICTABLE` `MPU_RBAR` write that QEMU resolved
   differently from silicon. **Fixed in gwemu 0.0.19.** It reproduced only under emulation
