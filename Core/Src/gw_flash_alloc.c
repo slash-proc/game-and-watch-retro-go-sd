@@ -391,7 +391,13 @@ static bool circular_flash_write(const char *file_path,
         total_bytes_processed += bytes_read;
 
         if (progress_cb) {
-            progress = (uint8_t)((total_bytes_processed * 100) / (*data_size));
+            /* 64-bit intermediate, and not for tidiness: total_bytes_processed
+             * is uint32, so `* 100` overflows at 42,949,673 bytes and the
+             * percentage wraps to 0 and climbs again. No ROM had ever been
+             * large enough to reach it (GBA tops out at 32 MB); a DOS .dsk is
+             * -- roms/dos/BATTLECHESS.dsk is 66,060,288 bytes, and under gwemu
+             * its progress ran 0,25,50 then 0,25 for exactly this reason. */
+            progress = (uint8_t)(((uint64_t)total_bytes_processed * 100) / (*data_size));
             progress_cb(*data_size, total_bytes_processed, progress);
         }
 

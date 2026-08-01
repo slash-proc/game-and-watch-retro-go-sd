@@ -17,6 +17,7 @@
 #include "dos_audio.h"
 #include "dos_ospi_bench.h"
 #include "gw_malloc.h"   /* ahb_calloc() */
+#include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
 #include <string.h>
 
 /* Guest memory is a BSS array inside this overlay (.overlay_dos_bss), zeroed by
@@ -40,6 +41,10 @@ extern unsigned char io_ports[];
 
 extern int dos_cpu_init(int argc, char **argv);   /* 0 = ok, <0 = BIOS load failed */
 extern int dos_cpu_frame(int cycles);
+#if DOS_INT13_OBS
+/* 8086tiny.c's INT 13h observer, built only under -DDOS_INT13_OBS=1. */
+extern void dos_int13_obs_report(void);
+#endif
 
 /* Monotonic millisecond source for the guest's BIOS timer tick, called from
  * 8086tiny.c's GET_RTC hook (which must stay free of STM32 HAL headers).
@@ -54,6 +59,78 @@ unsigned int dos_host_millis(void)
 {
     return (unsigned int)HAL_GetTick();
 }
+
+/* ------------------------------------------------------------ guest XIP ---
+ * Phase 3 of external/8086tiny/docs/memory/02-guest-xip.md: cache the whole
+ * .dsk into the 64 MB of OSPI NOR that an SD_CARD=1 build leaves entirely
+ * unused at runtime (docs/gwemu.md:194), and hand back the memory-mapped
+ * pointer. NOTHING READS IT YET -- the fold's third case is phase 5. This is
+ * here so the cost, the failure modes and the address are all measured before
+ * anything depends on them.
+ *
+ * OFF BY DEFAULT, and that is the phase's own rule rather than caution: phase 3
+ * is specified as a pure observer, and a multi-second "first boot of this
+ * image" stall in exchange for a pointer nobody dereferences is a behaviour
+ * change. Enable with DOS_CFLAGS_EXTRA=-DDOS_XIP_CACHE=1 (which is NOT a make
+ * dependency -- touch the file, see docs/testing.md section 4).
+ *
+ * store_file_in_flash() and not odroid_overlay_cache_file_in_flash(): the
+ * latter draws the "Caching game" progress bar, and by the time app_main_dos()
+ * runs the LCD is already in LUT8 with the DOS palette loaded (see the note
+ * above the guest-RAM printf below), so that bar would paint in the wrong
+ * colours into a framebuffer this core is about to own. A progress callback
+ * that prints instead costs nothing and works under gwemu, where the log is
+ * the only output that matters.
+ *
+ * The relocation hook is deliberately NULL. A .dsk is data, contains no
+ * absolute host addresses, and phase 5's window is pure arithmetic
+ * (dos_xip + (a - XIP_BASE)) with no alignment requirement -- see
+ * 02-guest-xip.md section 4.2. Nothing needs patching on the way in.
+ */
+#ifndef DOS_XIP_CACHE
+#define DOS_XIP_CACHE 0
+#endif
+
+#if DOS_XIP_CACHE
+static uint8_t *dos_xip_base;
+static uint32_t dos_xip_size;
+
+static void dos_xip_progress(uint32_t total, uint32_t done, uint8_t pct)
+{
+    static uint8_t last = 255;
+    (void)total;
+    (void)done;
+    /* Quarters only. The log ring is 4 KB (Core/Src/main.c:94) and this runs
+     * once per 16 KB of image. */
+    if (pct / 25 != last / 25 || last == 255) {
+        last = pct;
+        printf("DOS: xip caching %u%%\n", pct);
+    }
+    wdog_refresh();
+}
+
+static void dos_xip_cache(const char *path, uint32_t known_size)
+{
+    uint32_t t0 = HAL_GetTick();
+
+    dos_xip_size = 0;   /* 0 = "whole file"; the cache fills it in */
+    dos_xip_base = store_file_in_flash(path, &dos_xip_size, false, &dos_xip_progress);
+
+    if (dos_xip_base == NULL) {
+        /* Expected, not exceptional. BATTLECHESS.dsk is 66,060,288 bytes
+         * against a 64 MB part, and find_write_slot() (gw_flash_alloc.c:144)
+         * answers false for anything that cannot fit clear of the files
+         * already live this boot. A full or failing cache must still boot the
+         * guest -- 02-guest-xip.md section 5, "the one new obligation" -- and it
+         * does, because nothing downstream of here consults the pointer. */
+        printf("DOS: xip NOT cached (%s, %lu bytes) - guest runs from SD as before\n",
+               path, (unsigned long)known_size);
+        return;
+    }
+    printf("DOS: xip .dsk at %p, %lu bytes, %lu ms\n", (void *)dos_xip_base,
+           (unsigned long)dos_xip_size, (unsigned long)(HAL_GetTick() - t0));
+}
+#endif
 
 static void dos_blit(void) {
     dos_video_blit();
@@ -234,6 +311,15 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         argc = 4;
     }
     
+#if DOS_XIP_CACHE
+    /* Before dos_cpu_init(), for one reason worth stating: the cache opens the
+     * .dsk itself, and dos_cpu_init() then holds three FILE* for the whole run.
+     * MAX_OPEN_FILES is 8 (Core/Src/syscalls.c:51) and running out fails
+     * SILENTLY -- see the fopen entry in ../../../../CLAUDE.md. Doing the cache
+     * first keeps its handle transient and the count at three afterwards. */
+    dos_xip_cache(ACTIVE_FILE->path, (uint32_t)st.size);
+#endif
+
     /* The BIOS is mandatory: 8086tiny reads its instruction-decode tables out of
      * the BIOS image, so a missing file yields garbage decoding that looks exactly
      * like a broken memory map. Fail loudly here instead of burning debug time. */
@@ -378,6 +464,14 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
                        (unsigned long)s.int8_resync,
                        (unsigned long)s.frames, (unsigned long)s.ms);
             }
+#if DOS_INT13_OBS
+            /* Retire the open INT 13h run and print the running totals, on the
+             * same cadence. Without this the last run of a boot never prints:
+             * the observer only retires a run when a *later* transfer breaks
+             * it, and the interesting one -- the program image -- is usually
+             * the last thing read. */
+            dos_int13_obs_report();
+#endif
         }
 
         if (!lcd_is_swap_pending() && drawFrame) {
