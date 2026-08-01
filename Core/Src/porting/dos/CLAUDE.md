@@ -7,7 +7,15 @@ G&W buttons reach the guest keyboard
 (`dos_input.c`): TOPBENCH was driven with the d-pad and A/Enter to a **SCORE of 23**.
 The on-screen keyboard (`dos_osk.c`) makes the rest of the keyboard reachable —
 `dir` has been typed at a FreeDOS prompt under gwemu and echoed back. PC-speaker
-audio is built but has never been heard.
+audio is built but has never been heard. VGA mode 13h and EGA 0Dh both render,
+host-verified pixel-exact.
+
+**Memory program (2026-08-01): mechanisms built, not wired.** `dos_fold()` is a table,
+copy-on-write works, demand paging is byte-exact on all 13 images. Only
+`DOS_MEM_TRIM` (36,776 B of AXI) is reachable from firmware; **no guest has executed
+from external flash on hardware.** See *The memory map* below and
+`external/8086tiny/docs/improvement-brainstorming.md` for the full idea list and what
+each item is worth.
 
 **This file is a summary and a list of traps. `external/8086tiny/STATUS.md` is the
 authority on current state** — it is maintained per-change and this one is not.
@@ -130,6 +138,47 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
    measured and refuted (see *Things already ruled out*). The one remaining double-digit
    lever the docs endorse is the 4K decode cache (`docs/cpu/07-decode-cache-design.md`).
 
+## The memory map — now a table, and what that enables
+
+`dos_fold()` is **`host = a + dos_fold_map[(a>>12) & 511]`** — a 512-entry array of
+per-granule offsets, 4 KB granule, three instructions, no branch. `dos_fold_cold()` is
+gone. `dos_mem_map()`/`dos_mem_unmap()` install windows and require 4 KB alignment.
+A second table (`dos_fold_map_w`) carries a `DOS_COW_TRAP` sentinel for granules backed
+by read-only storage, so a store into one is seen rather than silently lost; the read
+path is unchanged. Design: `external/8086tiny/docs/memory/03-mapping-fold.md`,
+`05-copy-on-write.md`.
+
+Measured on hardware 2026-08-01, 340 MHz, idle MS-DOS 6.22 `A:\>`: **cpi 244 before,
+260 after** the mapping fold + COW. Accepted by the user as the cost of the memory
+program. Also measured: cold OSPI 32-byte line fill **223.82 cycles**, `0x90000000`
+**is** cached (cold/warm 111x), an OSPI cold miss costs **34x** an AXI cold miss.
+
+Three hazards the table creates. All are fixed and regression-tested; all were silent:
+
+- **The seam.** A COW'd granule is a pool page, not contiguous with its neighbour, so
+  an access spanning a granule boundary reads stale slack. It is **not** only
+  instruction fetch — a straddling 16-bit *data* read is what made KEEN4 and TOPBENCH
+  diverge under demand paging. `-DDOS_SEAM_FIX=0` / `-DDOS_FETCH_FIX=0` reproduce.
+- **Folded pointers used as numbers.** `LEA` computed `rm_addr - mem`, correct only
+  while the fold is identity.
+- **Pool exhaustion.** `dos_cow_lost > 0` means writes were dropped. `dos_cow_log()`
+  reports it; it must be 0.
+
+`dos_trim_arm()` (`main_dos.c`) is the only part wired into firmware: it maps the
+trimmed tail of `mem[]` read-only and **refuses to start unless it can prove the region
+is zero**. `DOS_MEM_TRIM=0xD000` reclaims **36,776 B of AXI**. Nothing else in the XIP
+/ demand-paging program is wired up, and **no guest has executed from external flash on
+hardware.**
+
+**AXI headroom is 8,176 B** (`__RAM_EMU_END__ 0x24100000` − `_OVERLAY_DOS_BSS_END`).
+The 49,352 / 49,368 figures in older docs are stale.
+
+**Guest conventional memory is not a constraint.** An MCB walk shows DOS hands Keen 4
+621 KB with 18,304 B of total overhead; Keen's "372 KB free" panel is its own heap after
+its 253 KB image is resident. Wolfenstein 3D (528 KB) and SimCity (512 KB+) already have
+what they need. Freeing host SRAM does **not** raise what DOS reports free — the 640 KB
+conventional ceiling is the 8086 address space, not our allocation.
+
 ## The memory map — resolved, for reference
 
 `dos_fold()` (`8086tiny.c`) maps the guest 1 MB onto **two physical regions**, and it
@@ -195,6 +244,27 @@ make -j$(nproc) CHECK_DIRTY_SUBMODULE=0 COVERFLOW=1 SHARED_HIBERNATE_SAVESTATE=1
 ./scripts/run_gwemu.sh
 ```
 
+**Working on hardware.** `gnwmanager monitor` reads the device log and is sufficient —
+do **not** drive the target with gdb inferior calls. An agent doing that
+(`emulator_get_file(...)` with a live `_write` breakpoint) left the device halted with a
+corrupted heap; recovery was killing the stray `gnwmanager gdbserver` and
+`gnwmanager start bank1`. Two further constraints: the log ring is 4 KB and wraps to
+index 0, so once-at-entry output must be captured by attaching `monitor` **before** the
+core launches; and launching a core still requires physical button presses, since
+timelines are a gwemu mechanism (`scripts/gwharness.py` + `REMOTE_INPUT=1` is the only
+path that replays one on silicon).
+
+**`DOS_CFLAGS_EXTRA` is not a make dependency.** Changing it recompiles nothing —
+`touch Core/Src/porting/dos/*.c external/8086tiny/8086tiny.c` first or you will flash
+firmware built with the previous flags. Changing flash/RAM layout variables needs a full
+`make clean`.
+
+**The DOS core lives on the SD card.** `flash_intflash` does not update
+`/cores/dos.bin`; after a core change run `make create_sd_data` and
+`gnwmanager sdpush --file sd_content/cores/dos.bin --dest-path "/cores/"`, or the device
+will run the previous core against new firmware and report
+`CORE: load failed '/cores/dos.bin'`.
+
 See `docs/gwemu.md`. The harness forwards retro-go's log to stdout and traps exceptions
 automatically.
 
@@ -236,6 +306,26 @@ automatically.
   with `__DSB()/__ISB()` before any fetch — so seeding it later is still a one-line change.
   There is just no evidence that anything should go in it. Do not re-attempt the attribute,
   and do not re-attempt the overlay ITC section either.
+- **A per-segment fold base cache (caching `fold(16*DS)` the way `dos_cs_ptr` caches
+  CS).** Measured before being built: the flatness test it would run hits 48-100% on a
+  plain map but **0.0% under demand paging, on every title**. It is structural — the COW
+  pool allocates one granule at a time with stride `GRAN + DOS_COW_SLACK`, so adjacent
+  granules can never be host-contiguous. `test286/runsegflat.sh` measures it. A
+  *last-granule* cache keyed on locality rather than contiguity was not tried and is the
+  surviving variant.
+- **Static mapping of an uncompressed MZ from the disk image.** The bytes the guest ends
+  up with are not the file's bytes: the best shipped title matches 37%, and `PRINCE.EXE`
+  / `SIMDEMO.EXE` are `nreloc = 0` yet diverge from the file at image offsets 17 and 21.
+  DOS EXEs have no section table, so nothing in the file marks what is read-only. Use
+  the snapshot path (`dos_xipimg.c`) for packed *and* unpacked executables.
+- **`INT 21h AH=58h` last fit as a way to force a high load address.** It works on a
+  bounded-`e_maxalloc` MZ (guest `0x04A70` → `0x9BB50`) and is **inert on every shipped
+  title**: they all set `e_maxalloc` past 640 KB, and DOS then hands them the whole
+  largest free block whichever way it searched. `test286/runlastfit.sh` asserts the
+  negative so it cannot rot into a claim of a win.
+- **Recovering guest conventional memory.** There is nothing to recover — see *The
+  memory map* above. This was investigated on a false premise and the premise is
+  recorded in `external/8086tiny/docs/improvement-brainstorming.md` §A.
 - **A boot-time MemManage fault in `rg_get_logo`.** A long investigation concluded this was
   a gwemu bug, not firmware: an `UNPREDICTABLE` `MPU_RBAR` write that QEMU resolved
   differently from silicon. **Fixed in gwemu 0.0.19.** It reproduced only under emulation

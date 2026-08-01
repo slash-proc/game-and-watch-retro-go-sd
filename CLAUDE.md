@@ -75,6 +75,24 @@ The `retro-go-stm32/components/odroid/` API (`odroid_system`, `odroid_overlay`, 
 
 - **`fopen()` handles are a small, shared, system-wide budget, and running out fails *silently*.** `MAX_OPEN_FILES` (`Core/Src/syscalls.c:51`) is **8** — it was 3 until the DOS core, which holds three of them for its entire run (hard disk, floppy, BIOS blob). Once the table is full every other `fopen()` in the firmware returns `NULL`, and the code that calls it usually treats that as "asset missing" and degrades gracefully: `rg_i18n.c:245` falls back to `unknown_glyph_entry`, so the entire UI rendered as diamonds with nothing logged and nothing faulting. If a core wants long-lived handles, count them against 8 first.
 
+- **Never make a gdb inferior call on this target.** Calling a function on the device
+  (`call foo(...)`) while a breakpoint is live re-enters, gdb abandons the call, and the
+  target is left **halted with a corrupted heap/stack frame** — indistinguishable from a
+  hung device. Recovery: kill the stray `gnwmanager gdbserver`, then
+  `gnwmanager start bank1`. `gnwmanager monitor` reads the device log with no
+  breakpoints and no inferior calls; use it.
+- **The device log ring is 4 KB and wraps to index 0**, not a true ring
+  (`Core/Src/main.c:94`, `Core/Src/syscalls.c:142`). Any per-second log line overwrites
+  it within seconds, so **output printed once at startup must be captured by attaching
+  `gnwmanager monitor` before the core launches.** Connecting afterwards and reading
+  what is left silently loses it.
+- **`flash_intflash` does not update a core on the SD card.** Cores are streamed from
+  `/cores/<system>.bin`; after changing core code run `make create_sd_data` and
+  `gnwmanager sdpush`. The symptom of skipping it is `CORE: load failed`, or worse, new
+  firmware silently running the previous core.
+- **`<CORE>_CFLAGS_EXTRA` is not a make dependency.** Changing it recompiles nothing.
+  `touch` the sources first, or you will build and flash the previous flags.
+
 ## Debugging crashes on hardware (BSOD / faults)
 
 - **Faults self-label.** `main()` sets `SCB->SHCSR` BUSFAULTENA/USGFAULTENA/MEMFAULTENA, so the BSOD title reads "Busfault" / "Usagefault" / "Memfault" instead of a generic "Hardfault". The BSOD also prints `CFSR/HFSR/BFAR/MMFAR/ABFSR`.
@@ -92,3 +110,38 @@ Detailed debugging guides live next to each porting layer (not in this file — 
 | MS-DOS (8086tiny) | [Core/Src/porting/dos/CLAUDE.md](Core/Src/porting/dos/CLAUDE.md) — **read its "Where the documentation lives" section first.** Design docs are in the submodule: `external/8086tiny/STATUS.md` (status/budget), `docs/decisions.md` (settled calls + why), **`docs/traps.md` (things that have already cost real time — read before changing anything)**, `docs/<category>-roadmap.md` → `docs/<category>/`. `GNW_PORT.md` is a superseded pointer; `docs/sprint-first-boot.md` is a completed record, not an active plan. |
 
 Add a `CLAUDE.md` under `Core/Src/porting/<system>/` (and optionally `.cursor/rules/<system>.mdc`) when an emulator accumulates non-obvious debug knowledge.
+
+## Working practices that have paid for themselves
+
+These are not style preferences. Each one has a specific failure behind it.
+
+- **Merge, then TEST/VERIFY the merged tree, then delete the branch.** Not
+  merge-and-delete. A merge is itself a change that can be wrong, and the branch is the
+  only cheap way back. `fix/ega-planar-window` had its submodule half merged and its
+  parent half left behind, and was reported as landed. Later, a submodule test failed on
+  the merged tree purely because the parent half of the same change had not been merged
+  yet — the verify caught it, a delete would have hidden it.
+- **A parent change and its submodule change are one atomic change.** Both land or
+  neither is done.
+- **During a multi-agent run, branches stay alive; clean up as a batch at the end.**
+  Accounting for what happened beats tidiness mid-flight. Agent worktrees pin their
+  branches, so tear the worktrees down first or `git branch -d` fails.
+- **A hot-path claim is a disassembly or it is nothing.** Shape arguments have lost
+  repeatedly here. A `REJECT ON SIGHT` rule against a page-table fold survived for
+  months on an argument that turned out to be based on sampling one call site; 37 of 78
+  sites had the cheap arm out of line. When it was finally built and disassembled it was
+  three instructions with no branch.
+- **Measure before building, when the measurement is cheaper than the build.** The
+  per-segment fold cache was killed by a 30-line script measuring the hit rate it would
+  have had: 0.0%.
+- **A test that cannot fail is not a test.** Mutation-test the check itself, and keep a
+  negative control (`-DDOS_SEAM_FIX=0`, `-DDOS_FETCH_FIX=0`, `negctl.sh`). Several
+  correctness "proofs" here passed while silently absorbing the very error they existed
+  to catch, because the backing store was `malloc`'d rather than `mprotect(PROT_READ)`.
+- **Do not repeat an agent's number without checking what it means.** `WOLF3D 0/144
+  dirty pages` was reported as 589,824 bytes reclaimed; it meant the title never
+  launched. A run with no input injection produces lower bounds, not results.
+- **gwemu cannot produce timing numbers.** Measured: 0.58 cyc/line where hardware
+  measured 223.82 — off by ~385x — and it inverts the cpu/blit ratio ~100x. It is for
+  plumbing and correctness. Prove a procedure under gwemu *before* running it on
+  hardware; the device can be damaged and gwemu cannot.
