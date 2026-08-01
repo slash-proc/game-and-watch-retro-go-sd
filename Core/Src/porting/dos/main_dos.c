@@ -120,8 +120,8 @@ unsigned int dos_host_millis(void)
  * starts at the first 4 KB boundary after .overlay_dos's code and rodata. So
  * code removed from the overlay becomes guest memory -- but only in 4,096-byte
  * quanta, which is why three objects move and not one. Measured:
- * _OVERLAY_DOS_BSS_END 0x240fe010 -> 0x240fb010 against __RAM_EMU_END__
- * 0x24100000, i.e. 8,176 B of headroom -> 20,464 B. That is what unblocks EGA
+ * _OVERLAY_DOS_BSS_END 0x240fe010 -> 0x240fb018 against __RAM_EMU_END__
+ * 0x24100000, i.e. 8,176 B of headroom -> 20,456 B. That is what unblocks EGA
  * 0Eh/0Fh/10h and the 4K decode cache (external/8086tiny/docs/handover.md).
  *
  * NO POSITION-INDEPENDENT CODE, and that is the whole trick -- the GBA
