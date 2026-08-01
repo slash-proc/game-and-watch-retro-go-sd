@@ -19,6 +19,7 @@
 #include "gw_malloc.h"   /* ahb_calloc() */
 #include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
 #include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
+#include "dos_xms.h"     /* dos_xms_grown_bytes -- the backing-store zero-fill */
 #include <string.h>
 #include <stdio.h>
 
@@ -703,7 +704,11 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * dos_cpu_init() runs guest-visible BIOS setup. There is no failure path --
      * every way this can go wrong ends with the full pool, which is what the
      * build was linked for. */
-    dos_pool_reserve_from_meta(ACTIVE_FILE->path, (uint32_t)st.size);
+    {
+        uint32_t t0_meta = HAL_GetTick();
+        dos_pool_reserve_from_meta(ACTIVE_FILE->path, (uint32_t)st.size);
+        printf("DOS: meta path took %lu ms\n", (unsigned long)(HAL_GetTick() - t0_meta));
+    }
 
     /* BEFORE dos_cpu_init(), and after the .dsk cache: init reads the BIOS
      * decode tables through the fold, so the window over the trimmed tail has
@@ -848,7 +853,7 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
             if (dos_prof_take_sample(&s)) {
                 printf("DOS: prof %s @%luMHz ipf=%lu ips=%lu cpi=%lu | cpu=%u%% (%luus/f) "
                        "blit=%u%% (%luus x%lu) idle=%u%% other=%u%% "
-                       "putc=%lu tick=%lu/%lu rs=%lu frames=%lu/%lums\n",
+                       "putc=%lu tick=%lu/%lu rs=%lu frames=%lu/%lums xms=w%lu/%luK r%lu/%luK g%luK\n",
                        dos_cpu_profile_name(), (unsigned long)s.mhz,
                        (unsigned long)s.insn_per_frame, (unsigned long)s.insn_per_sec,
                        (unsigned long)s.cyc_per_insn,
@@ -857,7 +862,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
                        s.idle_pct, s.other_pct, (unsigned long)s.putchars,
                        (unsigned long)s.int8_fired, (unsigned long)s.int8_due,
                        (unsigned long)s.int8_resync,
-                       (unsigned long)s.frames, (unsigned long)s.ms);
+                       (unsigned long)s.frames, (unsigned long)s.ms,
+                       dos_xms_write_calls, dos_xms_written_bytes / 1024UL,
+                       dos_xms_read_calls, dos_xms_read_bytes / 1024UL,
+                       dos_xms_grown_bytes / 1024UL);
             }
 #if DOS_INT13_OBS
             /* Retire the open INT 13h run and print the running totals, on the
