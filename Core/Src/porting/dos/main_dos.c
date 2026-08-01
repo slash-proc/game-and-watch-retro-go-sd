@@ -109,6 +109,143 @@ unsigned int dos_host_millis(void)
     return (unsigned int)HAL_GetTick();
 }
 
+/* ------------------------------------------------------- emulator XIP ---
+ * The cold half of the port does not live in RAM. dos_font_data.o (the CP437
+ * glyphs), dos_osk.o (the on-screen keyboard) and dos_xms.o (the XMS/HMA
+ * driver) are linked at a sentinel address instead, shipped as one file --
+ * /cores/dos.xip -- cached into QSPI NOR, and executed and read straight out
+ * of it.
+ *
+ * WHY, in bytes. .overlay_dos_bss holds mem[], 778 KB of guest RAM, and it
+ * starts at the first 4 KB boundary after .overlay_dos's code and rodata. So
+ * code removed from the overlay becomes guest memory -- but only in 4,096-byte
+ * quanta, which is why three objects move and not one. Measured:
+ * _OVERLAY_DOS_BSS_END 0x240fe010 -> 0x240fb010 against __RAM_EMU_END__
+ * 0x24100000, i.e. 8,176 B of headroom -> 20,464 B. That is what unblocks EGA
+ * 0Eh/0Fh/10h and the 4K decode cache (external/8086tiny/docs/handover.md).
+ *
+ * NO POSITION-INDEPENDENT CODE, and that is the whole trick -- the GBA
+ * precedent (main_gba.c:224-243). The blob is linked at DOS_CODE_BASE and
+ * relocated to wherever the flash cache put it. Two passes do it:
+ *
+ *   1. on the way IN: dos_relocate_xip() rewrites every sentinel word in each
+ *      buffer BEFORE it is programmed. Not by rewriting flash afterwards -- a
+ *      rewrite needs an erase, and an erase interrupted by a flat battery
+ *      leaves a blank hole indistinguishable from a finished job. On a cache
+ *      hit nothing is written and nothing needs to be: that copy was relocated
+ *      to the same address when it was first stored.
+ *   2. in the overlay: every call veneer and rodata reference the RAM half
+ *      holds still contains a sentinel. dos_cache_xip_to_flash() patches
+ *      [_DOS_MAIN_CODE_END, _OVERLAY_DOS_LOAD_END) before a single line of
+ *      core code runs. main_dos.o is deliberately outside that window -- it
+ *      defines DOS_CODE_BASE, and a scan that cannot tell the constant from a
+ *      reference would rewrite the constant it is built on.
+ *
+ * This is MANDATORY, unlike the .dsk cache below: if it fails the OSK and the
+ * font are still at 0xD05Cxxxx and the first text blit jumps into nothing. The
+ * caller returns to the launcher rather than starting the guest.
+ *
+ * One thing that does NOT need handling here: circular_flash_write() reads in
+ * 16 KB buffers (gw_flash_alloc.c:302) and the blob is ~10 KB, so it arrives
+ * as a single call and no sentinel word can straddle a buffer boundary. If
+ * the blob ever exceeds 16 KB, revisit -- the pass truncates to a word
+ * multiple per buffer exactly as gba_relocate_xip() does. */
+#define DOS_CODE_BASE  0xD05C0000u
+#define DOS_XIP_PATH   "/cores/dos.xip"
+
+static uint8_t *g_dos_xip_addr;
+static uint32_t g_dos_xip_size;
+
+static int patch_dos_sentinels(uint32_t *start, uint32_t *end, int32_t offset, uint32_t size)
+{
+    int patched = 0;
+    for (uint32_t *p = start; p < end; p++) {
+        uint32_t v = *p;
+        /* & ~1 so a Thumb function pointer matches; the bit is preserved by
+         * adding the offset to the original value. */
+        if ((v & ~1u) >= DOS_CODE_BASE && (v & ~1u) < DOS_CODE_BASE + size) {
+            *p = (uint32_t)(v + offset);
+            patched++;
+        }
+    }
+    return patched;
+}
+
+static void dos_relocate_xip(uint8_t *buffer, uint32_t length, uint32_t offset_in_file,
+                             uint8_t *file_address, uint32_t file_size)
+{
+    (void)offset_in_file;
+    int32_t offset = (int32_t)((uint32_t)file_address - DOS_CODE_BASE);
+    patch_dos_sentinels((uint32_t *)buffer, (uint32_t *)(buffer + (length & ~3u)),
+                        offset, file_size);
+}
+
+static void dos_xip_code_progress(uint32_t total, uint32_t done, uint8_t pct)
+{
+    (void)total; (void)done; (void)pct;
+    wdog_refresh();
+}
+
+/* 0 = ok, -1 = the core cannot run. */
+static int dos_cache_xip_to_flash(void)
+{
+    uint32_t t0 = HAL_GetTick();
+    int32_t  offset;
+    int      n;
+
+    g_dos_xip_size = 0;   /* 0 = "whole file"; the cache fills it in */
+    g_dos_xip_addr = store_file_in_flash_relocate(DOS_XIP_PATH, &g_dos_xip_size,
+                                                  false, &dos_xip_code_progress,
+                                                  &dos_relocate_xip);
+    if (g_dos_xip_addr == NULL || g_dos_xip_size == 0) {
+        printf("DOS: %s missing or uncacheable - cannot start\n", DOS_XIP_PATH);
+        return -1;
+    }
+
+    offset = (int32_t)((uint32_t)g_dos_xip_addr - DOS_CODE_BASE);
+    n = patch_dos_sentinels((uint32_t *)_DOS_MAIN_CODE_END,
+                            (uint32_t *)_OVERLAY_DOS_LOAD_END,
+                            offset, g_dos_xip_size);
+    __DSB();
+    __ISB();
+
+    /* The one fragile assumption, made loud rather than left implicit.
+     *
+     * main_dos.c CALLS into the blob (dos_osk_*, dos_xms_*), so ld synthesises
+     * long-branch veneers for those calls, and each veneer carries a sentinel
+     * literal. Measured on this link, ld places them immediately AFTER
+     * main_dos.o -- i.e. inside the scanned window, at 0x24025c94 -- which is
+     * why the pass works. Nothing in the ELF spec pins that down.
+     *
+     * So: the unscanned region [__ram_emu_dos_start__, _DOS_MAIN_CODE_END)
+     * must contain no sentinel word except the DOS_CODE_BASE constant itself
+     * (bare 0xD05C0000, two copies: the range compare above and the offset
+     * computation in dos_relocate_xip). Anything else there is a reference the
+     * pass could not reach, and would fault on first use with no clue why.
+     * Costs one 1,168-byte scan, once. */
+    {
+        const uint32_t *q = (const uint32_t *)__ram_emu_dos_start__;
+        const uint32_t *qe = (const uint32_t *)_DOS_MAIN_CODE_END;
+        int stranded = 0;
+        for (; q < qe; q++) {
+            uint32_t v = *q;
+            if ((v & ~1u) >= DOS_CODE_BASE && (v & ~1u) < DOS_CODE_BASE + g_dos_xip_size
+                && v != DOS_CODE_BASE)
+                stranded++;
+        }
+        if (stranded) {
+            printf("DOS: FATAL %d unrelocated xip refs ahead of the scan window\n",
+                   stranded);
+            return -1;
+        }
+    }
+
+    printf("DOS: xip code at %p, %lu bytes, %d refs patched, %lu ms\n",
+           (void *)g_dos_xip_addr, (unsigned long)g_dos_xip_size, n,
+           (unsigned long)(HAL_GetTick() - t0));
+    return 0;
+}
+
 /* ------------------------------------------------------------ guest XIP ---
  * Phase 3 of external/8086tiny/docs/memory/02-guest-xip.md: cache the whole
  * .dsk into the 64 MB of OSPI NOR that an SD_CARD=1 build leaves entirely
@@ -445,6 +582,16 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     }
 
     odroid_system_init(APPID_DOS, AUDIO_SAMPLE_RATE);
+
+    /* FIRST thing after system init, and before anything can reach the cold
+     * half: until this returns, every reference to the font, the OSK and the
+     * XMS driver still holds a 0xD05Cxxxx sentinel. Also before the .dsk cache
+     * below, so the blob is live_add()'ed first and find_write_slot() cannot
+     * later erase it. */
+    if (dos_cache_xip_to_flash() != 0) {
+        printf("DOS: refusing to start without %s\n", DOS_XIP_PATH);
+        return;
+    }
 
     /* Measurement build only (-DDOS_OSPI_BENCH=1); compiles to nothing when
      * off. Runs here, AFTER SystemClock_Config() so the OSPI clock is the one

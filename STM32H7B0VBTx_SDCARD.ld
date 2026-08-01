@@ -120,6 +120,11 @@ MEMORY
    * as PICO8_CODE — see .xip_gba below. */
   GBA_CODE   (x) : ORIGIN = 0xDEC00000,   LENGTH = 512K
 
+  /* MS-DOS: the cold half of the 8086tiny port (font glyphs, the on-screen
+   * keyboard, the XMS driver). Same sentinel trick as PICO8_CODE/GBA_CODE —
+   * see .xip_dos below. */
+  DOS_CODE   (x) : ORIGIN = 0xD05C0000,   LENGTH = 512K
+
   /* External flash (QSPI XIP) — for ITCM hot code LMA */
   EXTFLASH   (xr) : ORIGIN = __EXTFLASH_START__, LENGTH = 32M
 }
@@ -1004,17 +1009,72 @@ INCLUDE build/fceumm_mappers.ld
   .overlay_dos __overlay_dos_vma : {
     . = ALIGN(4);
     __ram_emu_dos_start__ = .;
-    /* main_dos .text stays here: it calls launcher APIs (odroid_*, lcd_*,
+    /* main_dos FIRST, and on its own, for the same reason main_gba.o is first
+     * in .overlay_gba: it holds DOS_CODE_BASE itself, and the sentinel pass
+     * that rewrites blob references cannot tell the defining constant from a
+     * reference to the blob. The pass therefore starts at _DOS_MAIN_CODE_END
+     * and main_dos.c relocates its own one blob pointer by hand.
+     *
+     * main_dos .text stays in RAM: it calls launcher APIs (odroid_*, lcd_*,
      * common_emu_*) and ITCM→flash veneers fail on arm-none-eabi 15.x with
      * "Unknown destination type ARM/Thumb" — same reason main_pce.o is
      * excluded from .overlay_pce_itc. */
-    build/dos/*.o (.data .data* .rodata .rodata*)
-    build/dos/*.o (.text .text*)
+    build/dos/main_dos.o (.data .data* .rodata .rodata* .text .text*)
+    . = ALIGN(4);
+    _DOS_MAIN_CODE_END = .;
+
+    /* Everything else. The three objects .xip_dos takes are excluded from the
+     * .rodata/.text globs ONLY — input sections go to whichever output section
+     * names them first, and .data must stay in RAM because flash is not
+     * writable (dos_xms.o has 4 bytes of it). */
+    build/dos/*.o (.data .data*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
   _OVERLAY_DOS_LOAD_START = LOADADDR(.overlay_dos);
   _OVERLAY_DOS_SIZE = SIZEOF(.overlay_dos);
+
+  /* ------------------------------------------------ MS-DOS cold code → XIP ---
+   * Linked at a sentinel address, shipped as one file — /cores/dos.xip —
+   * cached into QSPI NOR by main_dos.c and executed and read straight out of
+   * it. Identical mechanism to .xip_gba; the reasoning for relocating on the
+   * way IN rather than rewriting programmed flash is written out at
+   * main_gba.c:224-243.
+   *
+   * WHY THESE THREE, and the rule that decides it. .overlay_dos is not just
+   * code: .overlay_dos_bss (mem[], 778 KB of guest RAM) starts at the next 4 KB
+   * boundary after it, so every byte of code removed here is a byte of AXI the
+   * guest can have — but only in 4,096-byte quanta. These three are the largest
+   * set that is provably off the interpreter's per-instruction path:
+   *
+   *   dos_font_data.o  4,096 B  pure CP437 glyph rodata, read by the text blit
+   *   dos_osk.o        3,889 B  runs only while the on-screen keyboard is open
+   *   dos_xms.o        2,065 B  the XMS/HMA driver — one INT 2Fh/15h call deep
+   *
+   * NOT here, on purpose: 8086tiny.o (dos_cpu_frame, the ~21 KB dispatch loop —
+   * never), dos_video.o and dos_cpu.o (both run every frame, and dos_cpu.o's
+   * MAX-mode chunk loop is inside the frame), dos_input.o and dos_audio.o (per
+   * frame and too small to change the quantum), and main_dos.o (excluded from
+   * the scan, see above).
+   *
+   * Everything in the blob is reached only through references the load-time
+   * sentinel pass patches; nothing in it runs before that pass. */
+  .xip_dos : {
+    . = ALIGN(8);
+    __xip_dos_start__ = .;
+    build/dos/dos_font_data.o (.rodata .rodata* .text .text*)
+    build/dos/dos_osk.o (.rodata .rodata* .text .text*)
+    build/dos/dos_xms.o (.rodata .rodata* .text .text*)
+    . = ALIGN(8);
+    __xip_dos_end__ = .;
+    ASSERT(ABSOLUTE(__xip_dos_end__) <= ORIGIN(DOS_CODE) + LENGTH(DOS_CODE),
+           "Error: DOS XIP blob overflows the sentinel window");
+  } > DOS_CODE
+  _XIP_DOS_SIZE = SIZEOF(.xip_dos);
 
   /* ITCM reserved for the 8086 instruction-dispatch loop.
      Currently EMPTY on purpose — see docs/decisions.md. dos_cpu_frame() is the

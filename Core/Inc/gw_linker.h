@@ -114,6 +114,12 @@ extern void * _GBA_MAIN_CODE_END[];
  * run_internal_emu()'s memset never reaches them — main_gba.c zeroes this range. */
 extern uint8_t __gba_ahb_start__[];
 extern uint8_t __gba_ahb_end__[];
+/* MS-DOS overlay: the window the XIP sentinel pass walks. It starts at
+ * _DOS_MAIN_CODE_END so it does not rewrite DOS_CODE_BASE itself, which is
+ * defined in main_dos.o (same reasoning as _GBA_MAIN_CODE_END above). */
+extern void * _DOS_MAIN_CODE_END[];
+extern void * _OVERLAY_DOS_LOAD_END[];
+extern void * __ram_emu_dos_start__[];
 extern void * _OVERLAY_VIDEOPAC_LOAD_START[];
 extern uint8_t _OVERLAY_VIDEOPAC_SIZE;
 extern void * _OVERLAY_VIDEOPAC_BSS_START[];
