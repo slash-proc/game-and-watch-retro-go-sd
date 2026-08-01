@@ -41,6 +41,23 @@ the "hard disk" section further down this file, and the short version is:
         --only CDCHESS --only DATA --entry 'CDCHESS\\CDCHESS.EXE' \\
         --size 66060288 games/BATTLECHESS
 
+Regenerating the whole of roms/dos from the masters (2026-08-01). The three
+hard disks are the commands above with --dst roms/dos; the rest need no options
+at all, because the entry-point heuristic picks correctly for every one of them
+(WOLF3D included -- it is listed above with --entry only for illustration):
+
+    for g in ALLEYCAT KEEN4 PRINCE_OF_PERSIA SIMCITY TANKWARS TOPBENCH; do
+        python3 tools/mkdosdisk.py --dst roms/dos --verify \\
+            external/8086tiny/games/$g
+    done
+    python3 tools/mkdosdisk.py --dst roms/dos --verify roms/dos/CAT.EXE
+    python3 tools/mkdosdisk.py --dst roms/dos --verify \\
+        --bare --system msdos --name msdos622
+
+roms/dos/freedos.dsk is NOT generated -- it is external/8086tiny/fd.img
+verbatim, a real FreeDOS floppy with 5 fragmented files, and push-testdisk.sh
+ships it precisely because it is fragmented. Do not regenerate it.
+
 Usage:
     python3 tools/mkdosdisk.py                     # pack everything in roms/dos
     python3 tools/mkdosdisk.py --src roms/dos --dst roms/dos
@@ -89,6 +106,7 @@ for the annotated listing):
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import sys
 from pathlib import Path
@@ -1137,22 +1155,141 @@ def load_quitemu(path: Path) -> bytes | None:
 
 # --- entry-point selection ---------------------------------------------------
 
-def pick_entry(names: list[str]) -> str | None:
+# Words that appear at the head of a .BAT line but never name a program on the
+# disk. Used by bat_launches() so `echo keen.exe` or `del keen.exe` is not
+# mistaken for an invocation.
+BAT_INTERNAL = {
+    "ECHO", "REM", "SET", "CD", "CHDIR", "IF", "GOTO", "CALL", "PAUSE", "EXIT",
+    "CLS", "PATH", "PROMPT", "DEL", "ERASE", "COPY", "REN", "RENAME", "MD",
+    "MKDIR", "RD", "RMDIR", "DIR", "TYPE", "VER", "VERIFY", "VOL", "SHIFT",
+    "FOR", "CHOICE", "@ECHO", "CTTY", "BREAK", "LH", "LOADHIGH",
+}
+
+# Tokens like KEEN4E.EXE or DF.EXE. DOS 8.3 names allow a fair amount of
+# punctuation; this is deliberately permissive because a false positive only
+# matters if the named file also exists on the disk.
+BAT_PROGRAM_RE = re.compile(r"([A-Z0-9_~!#$%^&(){}'`\-@]{1,8})\.(EXE|COM|BAT)\b")
+BAT_BARE_RE = re.compile(r"^([A-Z0-9_~!#$%^&(){}'`\-@]{1,8})$")
+
+
+def bat_launches(text: bytes, present: set[str], self_name: str) -> str | None:
+    """Does this .BAT actually run a program that exists on the disk?
+
+    This is the discriminator between a real launcher and a shovelware remnant.
+    A launcher ends by running something -- Dark Forces' DFDEMO.BAT is
+    `@echo off` + `df.exe %1 %2 ...`, and running DF.EXE directly would skip
+    whatever the launcher set up. Keen 4's APOGEE.BAT *looks* the same to a
+    grep: it contains the line `keen.exe`. The difference is that KEEN.EXE is
+    not on the disk (the shipped binary is KEEN4E.EXE) -- the line sits behind
+    `if "%1"=="1" goto unpack` and is dead. Everything the batch file reaches
+    on a plain run is `echo`.
+
+    So: existence of the invoked program is the test, not the presence of a
+    plausible-looking line. `present` is the set of uppercase base names that
+    will be on the image.
+
+    Returns the name it would launch, or None. Only used for ranking; a wrong
+    answer here downgrades a candidate, it never invents one.
+    """
+    for raw in text.decode("latin1", "replace").splitlines():
+        line = raw.strip().lstrip("@").strip()
+        if not line or line.startswith(":"):
+            continue
+        upper = line.upper()
+        head = upper.split()[0] if upper.split() else ""
+        # `if exist x del x` / `echo run game.exe` are not invocations. Skip the
+        # whole line when it starts with an internal command, with one
+        # exception: CALL and LOADHIGH/LH do launch what follows.
+        if head in BAT_INTERNAL and head not in ("CALL", "LH", "LOADHIGH"):
+            continue
+        if head in ("CALL", "LH", "LOADHIGH"):
+            upper = upper.split(None, 1)[1] if len(upper.split()) > 1 else ""
+        for stem, ext in BAT_PROGRAM_RE.findall(upper):
+            cand = f"{stem}.{ext}"
+            if cand in present and cand != self_name:
+                return cand
+        # A bare `MENU` with MENU.EXE next to it is an invocation too.
+        first = upper.split()[0] if upper.split() else ""
+        if BAT_BARE_RE.match(first):
+            for ext in ("COM", "EXE", "BAT"):
+                cand = f"{first}.{ext}"
+                if cand in present and cand != self_name:
+                    return cand
+    return None
+
+
+def pick_entry(names: list[str], dirname: str | None = None,
+               contents: dict[str, bytes] | None = None) -> str | None:
     """Choose which program AUTOEXEC.BAT should run.
 
-    Order: .BAT first (a game shipping a launcher .BAT almost always wants it
-    used), then .COM/.EXE. Within each, installer-ish names are pushed to the
-    back. Ties break alphabetically so the result is deterministic.
-    """
-    def rank(n: str):
-        stem, _, ext = n.upper().partition(".")
-        ext = "." + ext
-        by_ext = {".BAT": 0, ".COM": 1, ".EXE": 1}.get(ext, 9)
-        deprioritised = 1 if any(stem.startswith(p) for p in ENTRY_DEPRIORITISED) else 0
-        return (deprioritised, by_ext, n.upper())
+    Ranking, best first:
 
+      0. a .BAT that demonstrably invokes an executable present on the image
+      1. an .EXE/.COM whose stem matches the image/directory name
+      2. any other .EXE/.COM
+      3. a .BAT that invokes nothing
+
+    Rank 0 keeps what the old ".BAT first" rule was defending, which was not
+    stupid: a launcher batch file often sets BLASTER, cd's somewhere or picks a
+    config, and running the .EXE behind it skips all of that in ways that are
+    hard to notice. Rank 3 is the Apogee case (see bat_launches and
+    docs/traps.md "Storage and test media") -- APOGEE.BAT prints "this batch
+    file is a remnant ... it serves no other purpose" and exits, and under the
+    old ranking it beat KEEN4E.EXE because .BAT sorted first and A < K.
+
+    Rank 1 encodes the other regularity of the era: the binary is named after
+    the game. Matching is prefix-either-way on the alphanumeric stem, so
+    KEEN4/KEEN4E.EXE and PRINCE_OF_PERSIA/PRINCE.EXE both hit.
+
+    ENTRY_DEPRIORITISED is applied unchanged, ahead of everything, so a
+    directory shipping SETUP.EXE still does not boot into the installer.
+
+    Ties break alphabetically so the result is deterministic.
+
+    "Biggest executable wins" was considered as a rank-2 tiebreak -- the main
+    binary is usually the largest -- and REJECTED on measurement. Across the
+    nine game directories it changes exactly one outcome, and it changes it
+    wrong: TANKWARS has BOMB.EXE (106,192 B, the game) next to BOMBCFG.EXE
+    (109,952 B, its settings editor), and size picks the editor. Everywhere
+    else it is redundant, because a launcher .BAT or the directory-name match
+    had already decided. The reasons it does not generalise are structural, not
+    bad luck:
+
+      * Packed executables understate themselves. KEEN4E.EXE is 105,108 B on
+        disk and ~259 KB resident (LZEXE 0.91); TOPBENCH.EXE and SWCBBS.EXE are
+        PKLITE. A packed main can be smaller than an unpacked utility beside it.
+      * Overlay-based games have small mains -- the resident .EXE stays small by
+        design and pulls code off the disk at runtime. TANKWARS is exactly this
+        shape: BOMB.EXE is 106 KB with a 128 KB BOMB.OVR behind it.
+      * Installers are often the largest executable in a shareware directory.
+
+    If it is ever reinstated it must sit below ENTRY_DEPRIORITISED, or a
+    directory shipping a fat SETUP.EXE boots the installer.
+    """
     candidates = [n for n in names if n.upper().endswith(EXECUTABLE_SUFFIXES)]
-    return sorted(candidates, key=rank)[0] if candidates else None
+    if not candidates:
+        return None
+
+    present = {n.upper() for n in names}
+    contents = contents or {}
+    dstem = "".join(c for c in (dirname or "").upper() if c.isalnum())
+
+    def rank(n: str):
+        up = n.upper()
+        stem, _, ext = up.partition(".")
+        ext = "." + ext
+        deprioritised = 1 if any(stem.startswith(p) for p in ENTRY_DEPRIORITISED) else 0
+        astem = "".join(c for c in stem if c.isalnum())
+        if ext == ".BAT":
+            launches = bat_launches(contents.get(up, b""), present, up)
+            tier = 0 if launches else 3
+        elif dstem and astem and (astem.startswith(dstem) or dstem.startswith(astem)):
+            tier = 1
+        else:
+            tier = 2
+        return (deprioritised, tier, up)
+
+    return sorted(candidates, key=rank)[0]
 
 
 def dos_name(path: Path, taken: set[str]) -> str:
@@ -1396,7 +1533,9 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
                 + f" (have: {', '.join(names)})")
         entry_dir, _, entry = match[0].rpartition("\\")
     else:
-        picked = pick_entry([n.rsplit("\\", 1)[-1] for n in names])
+        picked = pick_entry(
+            [n.rsplit("\\", 1)[-1] for n in names], src.stem if src else None,
+            {name.upper(): data for _, name, data in files})
         if picked:
             full = next(n for n in names if n.rsplit("\\", 1)[-1] == picked)
             entry_dir, _, entry = full.rpartition("\\")
@@ -1492,7 +1631,11 @@ def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | N
         if not payload:
             raise DiskFullError(f"{src}: nothing to pack")
 
-    entry = entry_override.upper() if entry_override else pick_entry(names)
+    if entry_override:
+        entry = entry_override.upper()
+    else:
+        entry = pick_entry(names, src.stem if src is not None else None,
+                           {n.upper(): c for n, c in payload})
     if entry_override and entry not in {n.upper() for n in names}:
         raise DiskFullError(
             f"{src}: --entry {entry_override} not found (have: {', '.join(names)})"
