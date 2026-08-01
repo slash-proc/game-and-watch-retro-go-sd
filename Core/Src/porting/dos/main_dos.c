@@ -15,6 +15,7 @@
 #include "dos_osk.h"
 #include "dos_cpu.h"
 #include "dos_audio.h"
+#include "dos_ospi_bench.h"
 #include "gw_malloc.h"   /* ahb_calloc() */
 #include <string.h>
 
@@ -139,6 +140,12 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     }
 
     odroid_system_init(APPID_DOS, AUDIO_SAMPLE_RATE);
+
+    /* Measurement build only (-DDOS_OSPI_BENCH=1); compiles to nothing when
+     * off. Runs here, AFTER SystemClock_Config() so the OSPI clock is the one
+     * a real DOS session uses, and BEFORE any guest activity so nothing else
+     * is contending for the bus or the D-cache. See dos_ospi_bench.c. */
+    dos_ospi_bench();
 
     /* NOTE: the LCD is already in LUT8 mode and mem[] is already zeroed by the
      * time we get here -- the launcher must switch modes before copying this

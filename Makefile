@@ -545,6 +545,7 @@ Core/Src/porting/dos/dos_input.c \
 Core/Src/porting/dos/dos_osk.c \
 Core/Src/porting/dos/dos_cpu.c \
 Core/Src/porting/dos/dos_audio.c \
+Core/Src/porting/dos/dos_ospi_bench.c \
 Core/Src/porting/dos/dos_font_data.c
 
 WSV_C_SOURCES = 
