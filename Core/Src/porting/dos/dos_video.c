@@ -164,6 +164,22 @@ static bool     vga13_clut_valid = false;
 static uint32_t expand2[256];
 static uint32_t expand1[256];
 
+/* The 8x8 CP437 font, for the core's CGA graphics teletype.
+ *
+ * INT 10h AH=0Eh in mode 4/5/6 has to rasterise a glyph rather than store a
+ * char/attr pair, and that happens inside 8086tiny.c (dos_gfx_putchar) because
+ * only the BIOS knows when it is a teletype call. The font is here, so the core
+ * asks for it through this accessor instead of the BIOS blob carrying a second
+ * 2 KB copy. 8086tiny.c has a weak stub so host test builds still link.
+ *
+ * dos_font_8x8 is the full byte, bit 7 leftmost (dos_font_data.c:9) -- the same
+ * orientation CGA pixel bytes use, which is why the mode 6 path can store the
+ * row verbatim. */
+const unsigned char *dos_glyph8(unsigned char ch)
+{
+    return dos_font_8x8[ch];
+}
+
 static void build_expand_table(void)
 {
     for (unsigned n = 0; n < 16; n++) {

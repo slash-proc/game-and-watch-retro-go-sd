@@ -120,10 +120,14 @@ plus a `docs/<name>/` subdirectory. Add a row to the category table in `STATUS.m
    `dos_audio_submit()` because the firmware itself bounds-checks nothing. Host
    tests: `external/8086tiny/test286/runaudio.sh` (pitch) and `runspkr.sh`
    (latch/gate). Design in `docs/audio-roadmap.md`.
-3. **Two BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
+3. **Three BIOS gaps.** `INT 10h AH=0Bh` (set CGA palette/background) is not implemented at
    all, so a game setting its background that way gets defaults. And
    `int10_switch_to_cga_gfx` clears with `char=0/attr=7`, which as pixel data is a stripe
-   pattern for one frame.
+   pattern for one frame. Third: **AH=09h/0Ah and the scroll routines are still
+   text-shaped in graphics modes** — they store char/attr pairs and move 160-byte text
+   rows into a buffer where those bytes are pixels. AH=0Eh (teletype) was the same and is
+   fixed (`extended_gfx_putchar`, `test286/runcgatty.sh`); see `docs/traps.md` under
+   *Video*. Anything that scrolls text over a graphics screen will hit the rest.
 4. **CPU speed is selectable and instrumented; the numbers are not yet explained.**
    Profiles (XT/Turbo/286/MAX) live in `dos_cpu.c` and a per-second `DOS: prof …` line
    reports achieved instructions/frame, instructions/second, **ARM cycles per guest
