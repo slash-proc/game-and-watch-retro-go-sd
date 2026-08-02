@@ -41,15 +41,51 @@ the "hard disk" section further down this file, and the short version is:
         --only CDCHESS --only DATA --entry 'CDCHESS\\CDCHESS.EXE' \\
         --size 66060288 games/BATTLECHESS
 
-Regenerating the whole of roms/dos from the masters (2026-08-01). The three
-hard disks are the commands above with --dst roms/dos; the rest need no options
-at all, because the entry-point heuristic picks correctly for every one of them
-(WOLF3D included -- it is listed above with --entry only for illustration):
+--entry names WHAT to run; --entry-args says HOW. The string is appended to the
+generated AUTOEXEC.BAT line verbatim and reaches the program as its DOS command
+tail, so switches, filenames and anything else the program parses itself all
+work:
 
-    for g in ALLEYCAT KEEN4 PRINCE_OF_PERSIA SIMCITY TANKWARS TOPBENCH; do
+    python3 tools/mkdosdisk.py --dst roms/dos --entry-args=-l \\
+        external/8086tiny/games/TOPBENCH        # TOPBENCH.EXE -l
+
+It is not tokenised on this side because DOS does not tokenise either -- COMMAND
+copies the tail to PSP:0x80 as one string and the program splits it however it
+likes. Quote it as a single shell word, and use the `--entry-args=...` form:
+argparse reads a space-separated value beginning with `-` as another option and
+rejects `--entry-args '-l'`. --entry-args composes with the entry heuristic, so
+a disk whose entry is picked correctly still only needs the args.
+
+This is the first piece of the per-game configuration in
+external/8086tiny/docs/improvement-brainstorming.md sec.A2, which eventually wants
+five things per entry: executable, working directory, start command, parameters
+and a canned key sequence. The mapping to what exists today is deliberate and
+nothing here blocks the rest:
+
+    executable       --entry            (exists)
+    working dir      --subdir / the CD emitted by make_autoexec (exists)
+    parameters       --entry-args       (this change)
+    start command    the AUTOEXEC line make_autoexec composes from the above
+    key sequence     not built -- belongs to the core, not the image
+
+make_autoexec() is the single place that turns those fields into the launch
+line, so when A2 arrives as a real per-game config file it populates the same
+parameters rather than replacing them, and "multiple entries per game" becomes
+a list of these tuples instead of a new mechanism.
+
+Regenerating the whole of roms/dos from the masters (2026-08-01). The three
+hard disks are the commands above with --dst roms/dos; the rest need no --entry
+at all, because the entry-point heuristic picks correctly for every one of them
+(WOLF3D included -- it is listed above with --entry only for illustration).
+TOPBENCH is the one image that needs an option: --entry-args=-l makes it
+profile continuously with no keypress, which is what it is on the card for.
+
+    for g in ALLEYCAT KEEN4 PRINCE_OF_PERSIA SIMCITY TANKWARS; do
         python3 tools/mkdosdisk.py --dst roms/dos --verify \\
             external/8086tiny/games/$g
     done
+    python3 tools/mkdosdisk.py --dst roms/dos --verify --entry-args=-l \\
+        external/8086tiny/games/TOPBENCH
     python3 tools/mkdosdisk.py --dst roms/dos --verify roms/dos/CAT.EXE
     python3 tools/mkdosdisk.py --dst roms/dos --verify \\
         --bare --system msdos --name msdos622
@@ -62,6 +98,7 @@ Usage:
     python3 tools/mkdosdisk.py                     # pack everything in roms/dos
     python3 tools/mkdosdisk.py --src roms/dos --dst roms/dos
     python3 tools/mkdosdisk.py --entry GAME.EXE PRINCE_OF_PERSIA
+    python3 tools/mkdosdisk.py --entry-args=-l games/TOPBENCH  # switches
     python3 tools/mkdosdisk.py --bare --name msdos622   # plain bootable disk
     python3 tools/mkdosdisk.py --list-template     # show what the DOS source has
     python3 tools/mkdosdisk.py --media external/8086tiny/dos_variants CAT.EXE
@@ -1396,7 +1433,7 @@ LASTFIT_COM = bytes([0xB8, 0x01, 0x58, 0xBB, 0x02, 0x00, 0xCD, 0x21,
 
 
 def make_autoexec(entry: str | None, chdir: str | None = None,
-                  last_fit: bool = False) -> str:
+                  last_fit: bool = False, entry_args: str | None = None) -> str:
     """AUTOEXEC.BAT: run the payload, then fall back to the DOS prompt.
 
     It deliberately does NOT call QUITEMU.COM afterwards. That was the original
@@ -1406,12 +1443,19 @@ def make_autoexec(entry: str | None, chdir: str | None = None,
     (PAUSE/SET) is the exit path, so the guest needs no self-quit at all.
     QUITEMU.COM is still copied onto the disk -- 5 bytes, and occasionally handy
     to type at the prompt -- it is just not run for you.
+
+    `entry_args` is appended verbatim after the entry name, so the generated
+    line is `TOPBENCH.EXE -l` rather than `TOPBENCH.EXE`. It is deliberately a
+    free-form string and not a parsed list: DOS hands the whole tail to the
+    program as an unsplit command tail (PSP:0x80), so anything tokenised here
+    would only have to be put back together again. See --entry-args.
     """
     lines = ["@echo off", "PROMPT $p$g"]
     if entry:
         lines += [
             "",
-            f"REM Generated by tools/mkdosdisk.py -- runs {entry} on boot.",
+            f"REM Generated by tools/mkdosdisk.py -- runs "
+            f"{entry}{(' ' + entry_args) if entry_args else ''} on boot.",
         ]
         # A hard-disk image keeps the payload in a subdirectory, and DOS
         # programs of this era routinely open their data files by relative
@@ -1431,7 +1475,7 @@ def make_autoexec(entry: str | None, chdir: str | None = None,
                 ("\\" + stem) if chdir else stem,
             ]
         lines += [
-            entry.upper(),
+            entry.upper() + ((" " + entry_args) if entry_args else ""),
             "",
             "REM Program exited; falling through to the DOS prompt. Use the",
             "REM retro-go overlay (PAUSE/SET) to leave the emulator.",
@@ -1561,7 +1605,7 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
              entry_override: str | None, verbose: bool = True,
              out_name: str | None = None, size_sectors: int | None = None,
              only: list[str] | None = None, subdir: str | None = None,
-             last_fit: bool = False) -> Path:
+             last_fit: bool = False, entry_args: str | None = None) -> Path:
     """Write one partitioned FAT16 .dsk image.
 
     The write order is the whole game and is the same one the floppy path uses:
@@ -1609,7 +1653,8 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
             full = next(n for n in names if n.rsplit("\\", 1)[-1] == picked)
             entry_dir, _, entry = full.rpartition("\\")
 
-    autoexec = make_autoexec(entry, entry_dir or None, last_fit).encode("latin1")
+    autoexec = make_autoexec(entry, entry_dir or None, last_fit,
+                             entry_args).encode("latin1")
 
     content = (sum(len(c) for _, c, _ in system) + len(autoexec)
                + (len(LASTFIT_COM) if last_fit else 0)
@@ -1688,7 +1733,8 @@ def _assert_hdd_boot_layout(img: Fat16Image) -> None:
 
 def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | None,
          verbose: bool = True, verify: bool = False,
-         out_name: str | None = None, last_fit: bool = False) -> Path:
+         out_name: str | None = None, last_fit: bool = False,
+         entry_args: str | None = None) -> Path:
     """Write one .dsk. `src is None` builds a bare bootable disk (see --bare)."""
     system = source.system_files()
     reserved = {n for n, _, _ in system}
@@ -1720,7 +1766,7 @@ def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | N
     for name, content, attr in system:
         img.add(name, content, attr)
 
-    autoexec = make_autoexec(entry, None, last_fit).encode("latin1")
+    autoexec = make_autoexec(entry, None, last_fit, entry_args).encode("latin1")
     img.add("AUTOEXEC.BAT", autoexec)
     if last_fit and entry:
         img.add(LASTFIT_NAME, LASTFIT_COM)
@@ -1870,6 +1916,14 @@ def main() -> int:
                              "(default: none -- every cluster goes to the payload)")
     parser.add_argument("--entry", type=str, default=None,
                         help="Executable AUTOEXEC.BAT should run (only valid with a single input)")
+    parser.add_argument("--entry-args", type=str, default=None, metavar="ARGS",
+                        help="Command-line tail to pass to the entry program, "
+                             "e.g. --entry-args=-l (use the = form: a value "
+                             "starting with '-' is otherwise read as an "
+                             "option). Appended verbatim, so "
+                             "quote it as one shell word. Works with the "
+                             "heuristic too -- --entry is not required. Only "
+                             "valid with a single input.")
     parser.add_argument("--last-fit", action="store_true",
                         help="Ship a 12-byte LASTFIT.COM and call it from "
                              "AUTOEXEC.BAT before the payload, so DOS allocates "
@@ -1967,9 +2021,9 @@ def main() -> int:
         if args.inputs:
             print("error: --bare takes no inputs", file=sys.stderr)
             return 1
-        if args.entry:
-            print("error: --bare has nothing to run, so --entry is meaningless",
-                  file=sys.stderr)
+        if args.entry or args.entry_args:
+            print("error: --bare has nothing to run, so --entry/--entry-args "
+                  "is meaningless", file=sys.stderr)
             return 1
         if args.hdd:
             # A bootable disk with nothing on it is for checking that a DOS
@@ -2008,8 +2062,9 @@ def main() -> int:
         print(f"Nothing to pack in {args.src} "
               f"(looking for directories or {', '.join(EXECUTABLE_SUFFIXES)} files)")
         return 0
-    if args.entry and len(inputs) > 1:
-        print("error: --entry only makes sense with a single input", file=sys.stderr)
+    if (args.entry or args.entry_args) and len(inputs) > 1:
+        print("error: --entry/--entry-args only makes sense with a single input",
+              file=sys.stderr)
         return 1
 
     if (args.only or args.subdir or args.size) and not args.hdd:
@@ -2043,10 +2098,11 @@ def main() -> int:
             if args.hdd or payload_bytes > floppy_free:
                 pack_hdd(src, dst, source, args.entry, out_name=None,
                          size_sectors=size_sectors, only=args.only,
-                         subdir=args.subdir, last_fit=args.last_fit)
+                         subdir=args.subdir, last_fit=args.last_fit,
+                         entry_args=args.entry_args)
             else:
                 pack(src, dst, source, args.entry, verify=args.verify,
-                     last_fit=args.last_fit)
+                     last_fit=args.last_fit, entry_args=args.entry_args)
         except DiskFullError as e:
             print(f"  {e}", file=sys.stderr)
             failures += 1
