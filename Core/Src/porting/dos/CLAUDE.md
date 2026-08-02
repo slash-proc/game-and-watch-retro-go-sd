@@ -1,5 +1,40 @@
 # MS-DOS core (8086tiny) — porting notes
 
+## RULE 0 — EVERY AGENT GETS ITS OWN WORKTREE. NO EXCEPTIONS.
+
+Spawn every subagent with `isolation: "worktree"`. An agent in the shared
+checkout edits the same files, the same submodule and the same `build/` as you
+and as every other agent, concurrently.
+
+Not tidiness. `build/` is shared and **`BUILD_DIR` does not isolate a link** —
+the linker scripts hardcode `build/<core>/*.o`, so an overridden `BUILD_DIR`
+links both trees and dies on multiple definitions. Two concurrent builds produce
+a mixed artifact whose symptom is *random emulator crashes*, not an obvious
+conflict.
+
+Measured cost of ignoring this, in one session, three separate failures:
+- Four `test286/` scripts broke because one agent's landed change (EMS) made
+  `host_main.c` reference `dos_ems_*` while their link lines still did not —
+  each branch green alone, broken together.
+- The core on the SD card drifted from the built core, so the user tested a
+  build that predated three landed fixes.
+- An agent left the shared checkout on **its own branch**, so a cherry-pick
+  onto "dos-integration" silently no-opped and work was reported as landed
+  when it was not.
+
+Corollaries:
+- **Verify content landed, do not trust the command not erroring.**
+  `git show <branch>:<file> | grep -c <marker>` takes five seconds.
+- **Verify what is actually on the SD image before asking anyone to test.**
+  `mdir -i build/sdcard.img@@1M ::/cores` versus the timestamp of
+  `sd_content/cores/dos.bin`. `flash_intflash` does not update the card and
+  neither does `make` on its own.
+- **Agents perform NO git history operations** — no rebase, merge, cherry-pick,
+  `reset --hard`, push or branch deletion, and they never move the parent's
+  submodule pointer. They commit to their own branch and stop. Integration is
+  the orchestrator's job alone.
+- **Serialise builds even across worktrees**, because `build/` is still shared.
+
 Status: **boots to a DOS prompt and can be typed at.** MS-DOS 6.22 and FreeDOS both
 reach `A:\>`. Text mode renders in authentic CP437 and the CGA blit now renders real
 games — Alley Cat is playable. PC-speaker audio is wired but unheard.
