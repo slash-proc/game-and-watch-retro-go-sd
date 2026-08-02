@@ -2316,6 +2316,28 @@ DOS_CFLAGS += -O3
 # dump of the guest's 0xB8000 text buffer, or "-DDOS_TRACE_INSNS=200" for an
 # instruction trace. See Core/Src/porting/dos/main_dos.c and 8086tiny.c.
 DOS_CFLAGS_EXTRA ?=
+# The COW pool's pages are carved from the hole a per-title INT 12h machine size
+# leaves above the guest's limit, not from BSS -- a pool page costs 6,212 B at the
+# link but only 4,104 B of memory DOS can never hand out. DOS_COW_RO_WINDOWS is the
+# declaration that this build calls dos_mem_map_ro() from code 8086tiny.c's
+# preprocessor cannot see (dos_xipsm.c), and 8086tiny.c #errors on a read-only
+# window with no pool.
+#
+# DEFAULT 0, AND IT IS NOT A PREFERENCE. At DOS_COW_ARENA=1 the link FAILS:
+#   ld: Error: DOS code + guest RAM would overflow the LCD bonus area + RAM_EMU
+# The overlay's alignment pad is 16 B (_OVERLAY_DOS_LOAD_END 0x2402fff0 ->
+# _OVERLAY_DOS_BSS_START 0x24030000) because .overlay_dos_bss starts at
+# ALIGN(load_end, 4096), so the arena's ~2,408 B of text crosses the 4 KB
+# quantum and costs 4,096 B of guest RAM in one step. Turn this on only after
+# the arena's cold startup path moves into .xip_dos (external flash); it runs
+# once, before the first guest instruction, and is exactly what that section is
+# for. docs/memory/21-cow-arena.md.
+DOS_COW_ARENA ?= 0
+DOS_CFLAGS += -DDOS_COW_ARENA=$(DOS_COW_ARENA)
+ifeq ($(DOS_COW_ARENA),1)
+DOS_CFLAGS += -DDOS_COW_RO_WINDOWS=1
+endif
+
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
 
 # ...but NOT for the XMS services. Every entry point in dos_xms.c is a cold hook
