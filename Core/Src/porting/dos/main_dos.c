@@ -144,7 +144,7 @@ unsigned int dos_host_millis(void)
  *      reference would rewrite the constant it is built on.
  *
  * This is MANDATORY, unlike the .dsk cache below: if it fails the OSK and the
- * font are still at 0xD05Cxxxx and the first text blit jumps into nothing. The
+ * font are still at 0xDED0xxxx and the first text blit jumps into nothing. The
  * caller returns to the launcher rather than starting the guest.
  *
  * One thing that does NOT need handling here: circular_flash_write() reads in
@@ -152,7 +152,7 @@ unsigned int dos_host_millis(void)
  * as a single call and no sentinel word can straddle a buffer boundary. If
  * the blob ever exceeds 16 KB, revisit -- the pass truncates to a word
  * multiple per buffer exactly as gba_relocate_xip() does. */
-#define DOS_CODE_BASE  0xD05C0000u
+#define DOS_CODE_BASE  0xDED00000u
 #define DOS_XIP_PATH   "/cores/dos.xip"
 
 static uint8_t *g_dos_xip_addr;
@@ -221,7 +221,7 @@ static int dos_cache_xip_to_flash(void)
      *
      * So: the unscanned region [__ram_emu_dos_start__, _DOS_MAIN_CODE_END)
      * must contain no sentinel word except the DOS_CODE_BASE constant itself
-     * (bare 0xD05C0000, two copies: the range compare above and the offset
+     * (bare 0xDED00000, two copies: the range compare above and the offset
      * computation in dos_relocate_xip). Anything else there is a reference the
      * pass could not reach, and would fault on first use with no clue why.
      * Costs one 1,168-byte scan, once. */
@@ -897,7 +897,7 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
     /* FIRST thing after system init, and before anything can reach the cold
      * half: until this returns, every reference to the font, the OSK and the
-     * XMS driver still holds a 0xD05Cxxxx sentinel. Also before the .dsk cache
+     * XMS driver still holds a 0xDED0xxxx sentinel. Also before the .dsk cache
      * below, so the blob is live_add()'ed first and find_write_slot() cannot
      * later erase it. */
     if (dos_cache_xip_to_flash() != 0) {

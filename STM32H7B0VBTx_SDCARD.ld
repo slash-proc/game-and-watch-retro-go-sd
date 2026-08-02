@@ -122,8 +122,29 @@ MEMORY
 
   /* MS-DOS: the cold half of the 8086tiny port (font glyphs, the on-screen
    * keyboard, the XMS driver). Same sentinel trick as PICO8_CODE/GBA_CODE —
-   * see .xip_dos below. */
-  DOS_CODE   (x) : ORIGIN = 0xD05C0000,   LENGTH = 512K
+   * see .xip_dos below.
+   *
+   * THE HIGH HALFWORD IS LOAD-BEARING, and it is the only thing that makes the
+   * sentinel scan safe. patch_dos_sentinels() (main_dos.c) is a blind word scan
+   * over the overlay's *code*, so it cannot tell a relocatable literal from two
+   * adjacent 16-bit Thumb instructions that happen to spell a sentinel. A word
+   * at an odd halfword boundary reads as (low_insn | high_insn << 16), so a
+   * collision needs the SECOND instruction to encode exactly the sentinel's
+   * high halfword.
+   *
+   * This was 0xD05C0000, and 0xD05C is `beq.n` — one of the commonest
+   * instructions gcc emits. It collided: `cmp r0,#0` (0x2800) + `beq.n`
+   * (0xD05C) inside dos_cpu_init()'s hard-disk branch formed 0xD05C2800, the
+   * pass "relocated" it, and every hard-disk .dsk (WOLF3D, DARKFORCES,
+   * BATTLECHESS) executed a patched-over guard and faulted. Floppy images take
+   * the other branch and never noticed.
+   *
+   * 0xDED0 is in the Thumb permanently-UNDEFINED space (0xDE00–0xDEFF, `udf`)
+   * which gcc never emits, so no instruction pair can spell this sentinel —
+   * the same property that has kept GBA_CODE (0xDEC0, `udf`) and PICO8_CODE
+   * (0xBEEF, `bkpt`) collision-free. scripts/check_xip_sentinels.py enforces
+   * it at link time. Do NOT pick a "nice looking" base here. */
+  DOS_CODE   (x) : ORIGIN = 0xDED00000,   LENGTH = 512K
 
   /* External flash (QSPI XIP) — for ITCM hot code LMA */
   EXTFLASH   (xr) : ORIGIN = __EXTFLASH_START__, LENGTH = 32M
