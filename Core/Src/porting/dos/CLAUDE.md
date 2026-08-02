@@ -35,6 +35,59 @@ Corollaries:
   the orchestrator's job alone.
 - **Serialise builds even across worktrees**, because `build/` is still shared.
 
+## RULE 1 — THE BRANCHES ARE `gw-port` (submodule) AND `dos-integration` (parent).
+
+Stop inferring this from branch tips; it cannot be read that way, and that is the
+whole point of writing it down.
+
+| repo | integration branch |
+|---|---|
+| parent `game-and-watch-retro-go-sd` | `dos-integration` |
+| submodule `external/8086tiny` | **`gw-port`** |
+
+The submodule has **no `main` and no `dos-integration`**. Its `master` is upstream
+8086tiny from 2014 and is not ours. Do not create a branch to make the two repos
+match by name — that was tried on 2026-08-02 and reverted.
+
+**`gw-port` can be arbitrarily stale and nothing will say so.** On 2026-08-02 it sat
+at `95f7f3d4` (2026-07-30) while the parent gitlink had advanced through **six**
+bumps; catching it up was a clean fast-forward of **142 files / +36,581 lines** —
+`dos_ems.c`, `dos_xipsm.c`, `dos_xipimg.c`, `dos_zram.c`, all of `docs/memory/` and
+the entire `test286/` harness. All of that was shipping while living only as commits
+the gitlink referenced. `git log gw-port` during that sprint showed none of it.
+
+**Read the pointer, do not deduce it:**
+
+```sh
+git ls-tree dos-integration external/8086tiny          # what is integrated
+git -C external/8086tiny rev-parse gw-port             # must equal it
+# history of the pointer:
+for c in $(git log --format=%h -6 -- external/8086tiny); do \
+  printf '%s -> ' "$c"; git ls-tree $c external/8086tiny | awk '{print substr($3,1,8)}'; done
+```
+
+After any integration these two must be equal. If they are not, the work is not
+integrated no matter what any commit message claims.
+
+### The orchestrator's loop
+
+You are the gate, the validator and the only integrator.
+
+1. **One agent returns → validate → integrate → bump the gitlink.** Do not batch
+   integration to the end of a run; that is how four branches were green alone and
+   broken together.
+2. **Parent and submodule land in ONE commit.** A submodule change with no gitlink
+   bump is not landed, it is invisible.
+3. **Verify the MERGED tree, then delete.** Never merge-and-delete: the merge is
+   itself a change that can be wrong, and the branch is the only cheap way back.
+4. **Deletion is batched.** Branches and worktrees come down only once the *last*
+   agent of the running batch is integrated and the merged tree verifies. Agent
+   worktrees pin their branches, so tear the worktrees down first or `git branch -d`
+   fails. Accounting beats tidiness mid-flight.
+5. **Check what branch the shared checkout is on before committing.** A commit or
+   cherry-pick onto the branch you are already standing on silently no-ops, and the
+   submodule checkout has been found parked on a stale feature branch.
+
 Status: **boots to a DOS prompt and can be typed at.** MS-DOS 6.22 and FreeDOS both
 reach `A:\>`. Text mode renders in authentic CP437 and the CGA blit now renders real
 games — Alley Cat is playable. PC-speaker audio is wired but unheard.
