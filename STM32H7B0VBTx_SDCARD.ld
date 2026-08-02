@@ -1049,10 +1049,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1075,6 +1075,24 @@ INCLUDE build/fceumm_mappers.ld
    *   dos_font_data.o  4,096 B  pure CP437 glyph rodata, read by the text blit
    *   dos_osk.o        3,889 B  runs only while the on-screen keyboard is open
    *   dos_xms.o        2,065 B  the XMS/HMA driver — one INT 2Fh/15h call deep
+   *   dos_arena.o      ~1.9 KB  the reclaim arena's startup path. It runs ONCE,
+   *                             from dos_cpu_init(), after dos_mach_apply() and
+   *                             before the first guest instruction. It exists as
+   *                             its own translation unit for exactly this line:
+   *                             it was inside 8086tiny.c, which can never come
+   *                             here, and its text is what made DOS_COW_ARENA=1
+   *                             fail to link. docs/memory/22-arena-xip.md.
+   *   dos_zram.o       2,504 B  the COW pool's backing store (DOS_COW_EVICT).
+   *                             Reached from dos_cow_fault(), which is itself
+   *                             out of line and taken tens of times a second at
+   *                             worst -- not per instruction and not per frame.
+   *                             Its 7,044 B of BSS stays in RAM: flash is not
+   *                             writable, and that BSS is the real cost of
+   *                             eviction, not this text.
+   *   dos_meta.o       1,611 B  the .dosmeta sidecar parser. Runs at load and
+   *                             at save, never in between. Moving it is what
+   *                             pays for eviction: it took .overlay_dos back
+   *                             DOWN one 4 KB page.
    *
    * NOT here, on purpose: 8086tiny.o (dos_cpu_frame, the ~21 KB dispatch loop —
    * never), dos_video.o and dos_cpu.o (both run every frame, and dos_cpu.o's
@@ -1093,6 +1111,9 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_ems.o (.rodata .rodata* .text .text*)
     build/dos/dos_xipsm.o (.rodata .rodata* .text .text*)
     build/dos/dos_xipimg.o (.rodata .rodata* .text .text*)
+    build/dos/dos_arena.o (.rodata .rodata* .text .text*)
+    build/dos/dos_zram.o (.rodata .rodata* .text .text*)
+    build/dos/dos_meta.o (.rodata .rodata* .text .text*)
     . = ALIGN(8);
     __xip_dos_end__ = .;
     ASSERT(ABSOLUTE(__xip_dos_end__) <= ORIGIN(DOS_CODE) + LENGTH(DOS_CODE),

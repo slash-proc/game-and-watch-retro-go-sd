@@ -2323,19 +2323,42 @@ DOS_CFLAGS_EXTRA ?=
 # preprocessor cannot see (dos_xipsm.c), and 8086tiny.c #errors on a read-only
 # window with no pool.
 #
-# DEFAULT 0, AND IT IS NOT A PREFERENCE. At DOS_COW_ARENA=1 the link FAILS:
+# ON BY DEFAULT SINCE docs/memory/22-arena-xip.md. It did not link before that:
 #   ld: Error: DOS code + guest RAM would overflow the LCD bonus area + RAM_EMU
-# The overlay's alignment pad is 16 B (_OVERLAY_DOS_LOAD_END 0x2402fff0 ->
-# _OVERLAY_DOS_BSS_START 0x24030000) because .overlay_dos_bss starts at
-# ALIGN(load_end, 4096), so the arena's ~2,408 B of text crosses the 4 KB
-# quantum and costs 4,096 B of guest RAM in one step. Turn this on only after
-# the arena's cold startup path moves into .xip_dos (external flash); it runs
-# once, before the first guest instruction, and is exactly what that section is
-# for. docs/memory/21-cow-arena.md.
-DOS_COW_ARENA ?= 0
+# .overlay_dos_bss starts at ALIGN(_OVERLAY_DOS_LOAD_END, 4096) and the pad was
+# ZERO, so the arena's text crossed the 4 KB quantum. Two changes bought it:
+# the arena's cold startup path became its own object (dos_arena.o) and moved
+# into .xip_dos, external flash, which is what that section is for; and the
+# static fallback array went to zero pages, immediately below.
+DOS_COW_ARENA ?= 1
 DOS_CFLAGS += -DDOS_COW_ARENA=$(DOS_COW_ARENA)
 ifeq ($(DOS_COW_ARENA),1)
 DOS_CFLAGS += -DDOS_COW_RO_WINDOWS=1
+# ...and the static array goes to ZERO PAGES, which is not a tuning choice: with
+# DOS_COW_RO_WINDOWS=1 the default derivation in 8086tiny.c (DOS_COW_POOL_MIN)
+# gives 4 static pages = 16,416 B of BSS, and in an arena build that array is
+# only the FALLBACK -- the live pages arrive at run time out of mem[]'s own
+# machine-size hole and cost the link nothing. Paying 16,416 B of RAM_EMU
+# headroom for a fallback is exactly the inertness the arena exists to remove
+# (docs/memory/21-cow-arena.md section 1: a BSS pool can never be big enough to
+# matter). When the arena refuses -- no per-title .dosmeta machine size, the
+# common case today -- capacity is 0 and the build behaves as it does with
+# DOS_COW_ARENA=0; the runtime dos_cow_capacity() check in dos_xipsm.c is what
+# makes a window decline rather than lose stores.
+DOS_CFLAGS += -DDOS_COW_POOL_PAGES=0
+# EVICTION, and it ships WITH the arena or not at all. dos_zram.c has been
+# finished, host-tested (test286/runevict.sh, docs/memory/17-eviction.md) and
+# completely dark since it landed, for want of these two lines. It is what
+# covers a pool smaller than a title's write set, which is now the binding
+# constraint rather than a hypothetical: KEEN4's write set is 146 granules and
+# SIMCITY's is 113 against an arena that funds 21 pages. Eviction on top of a
+# 0-page or 2-page pool would be meaningless, hence the coupling.
+#
+# DOS_ZRAM_AUTO is the firmware's wiring switch: dos_cpu_init() installs the
+# store itself, from the pool's spare, tier 1 (compressed SRAM) only. The host
+# harness must NOT define it -- test286/host_main.c does its own wiring from
+# DOS_COW_STORE and the two would claim the same arena.
+DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=1
 endif
 
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
