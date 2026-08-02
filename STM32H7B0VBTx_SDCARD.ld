@@ -1049,10 +1049,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1093,6 +1093,13 @@ INCLUDE build/fceumm_mappers.ld
    *                             at save, never in between. Moving it is what
    *                             pays for eviction: it took .overlay_dos back
    *                             DOWN one 4 KB page.
+   *   dos_fbs.o                 the FAST-BOOT SNAPSHOT container. Runs at most
+   *                             TWICE a session -- once to capture, once to
+   *                             restore -- and both times before the guest's
+   *                             first instruction or inside a loop already
+   *                             bounded by SD and flash I/O. Textbook cold.
+   *                             AXI headroom was 1,200 B when it was written,
+   *                             so there was never anywhere else for it to go.
    *
    * NOT here, on purpose: 8086tiny.o (dos_cpu_frame, the ~21 KB dispatch loop —
    * never), dos_video.o and dos_cpu.o (both run every frame, and dos_cpu.o's
@@ -1114,6 +1121,8 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_arena.o (.rodata .rodata* .text .text*)
     build/dos/dos_zram.o (.rodata .rodata* .text .text*)
     build/dos/dos_meta.o (.rodata .rodata* .text .text*)
+    build/dos/dos_fbs.o (.rodata .rodata* .text .text*)
+    build/dos/dos_fbs_glue.o (.rodata .rodata* .text .text*)
     . = ALIGN(8);
     __xip_dos_end__ = .;
     ASSERT(ABSOLUTE(__xip_dos_end__) <= ORIGIN(DOS_CODE) + LENGTH(DOS_CODE),

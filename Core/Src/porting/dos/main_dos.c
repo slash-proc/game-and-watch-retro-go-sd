@@ -21,6 +21,7 @@
 #include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
 #include "dos_xms.h"     /* dos_xms_grown_bytes -- the backing-store zero-fill */
 #include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
+#include "dos_fbs.h"     /* the FAST-BOOT SNAPSHOT container (external/8086tiny) */
 #include <string.h>
 #include <stdio.h>
 
@@ -465,6 +466,10 @@ static int dos_trim_arm(void)
 
 static void dos_cow_log(const char *when);   /* defined below; used at arm time */
 
+/* The .dsk identity, computed once by dos_image_key_crc() before
+ * dos_cpu_init() and consumed by dos_fbs_boot() after it. */
+static unsigned long dos_fbs_boot_key;
+
 #if DOS_XIPSM_ENABLE
 /* The observation range: the whole conventional demand region. Deliberately
  * NOT a program image -- this port has no INT 21h hook and should not grow one
@@ -672,6 +677,23 @@ static void dos_xipsm_report(void)
            dos_xipsm_state_name(dos_sm.st), dos_xipsm_reason_name(dos_sm.reason),
            dos_sm.win_len, dos_sm.win_base);
 }
+
+/* FAST-BOOT SNAPSHOT -- boot straight into the game.
+ *
+ * The driver lives in its own translation unit, dos_fbs_glue.c, and that is not
+ * organisation: main_dos.o is EXCLUDED from `.xip_dos` (ITCM->flash veneers fail
+ * on arm-none-eabi 15.x for objects that section takes), so every byte of this
+ * driver written here is a byte of AXI the guest cannot have -- and AXI headroom
+ * was 1,200 B. Written inline first, it overflowed the link. Same reason
+ * dos_arena.c exists as a file of its own (see the .xip_dos comment in
+ * STM32H7B0VBTx_SDCARD.ld).
+ *
+ * Design: external/8086tiny/dos_fbs.h. Read §1 there first -- the one thing this
+ * must not be mistaken for is a memory-reclaim mechanism. */
+void dos_fbs_boot(const char *dsk_path, unsigned long dsk_size,
+                  unsigned long key_crc, unsigned long mach_kb);
+void dos_fbs_frame(unsigned int frames);
+
 #else
 static int dos_xipsm_boot(const char *dsk_path, uint32_t dsk_size, unsigned long key_crc)
 { (void)dsk_path; (void)dsk_size; (void)key_crc; return 0; }
@@ -1053,6 +1075,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
          * .xipimg itself, and dos_cpu_init() then holds three handles out of
          * MAX_OPEN_FILES = 8 for the whole run. */
         int xip = dos_xipsm_boot(ACTIVE_FILE->path, (uint32_t)st.size, key);
+        /* The same key serves the .fbs, which is restored after
+         * dos_cpu_init() and so cannot recompute it there without a second
+         * 64 KB read of the image. */
+        dos_fbs_boot_key = key;
         dos_pool_reserve_from_meta(ACTIVE_FILE->path, (uint32_t)st.size, key, xip);
         printf("DOS: meta+xipsm path took %lu ms\n",
                (unsigned long)(HAL_GetTick() - t0_meta));
@@ -1071,6 +1097,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         printf("DOS: BIOS load failed (%d) - expected %s\n", init_rc, dos_bios_path);
         return;
     }
+
+    /* FAST-BOOT SNAPSHOT, and AFTER dos_cpu_init() is the whole design: init
+     * has opened the disks, loaded the BIOS blob and built the decode tables --
+     * all of which a restore needs and none of which a snapshot carries -- and
+     * has not run one guest instruction. See the block above dos_fbs_boot(). */
+    dos_fbs_boot(ACTIVE_FILE->path, (unsigned long)st.size, dos_fbs_boot_key,
+                 (unsigned long)dos_mach_kb);
     
     if (start_paused) {
         common_emu_state.pause_after_frames = 4;
@@ -1167,6 +1200,9 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
          * is the ~100 KB memcmp against memory-mapped OSPI that decides whether
          * the window is armed. Nothing here runs after the machine settles. */
         dos_xipsm_frame(dbg_frames);
+        /* The fast-boot snapshot's capture mark. One compare below it, and
+         * nothing at all once it has fired. */
+        dos_fbs_frame(dbg_frames);
 #if DOS_DEBUG_STATUS > 0
         if ((dbg_frames & 0x3F) == 0) {     /* every 64 frames: ~1.07s at 60Hz */
             /* BDA clk_dtimer (guest 0x40:0x6C = 0x46C) is the 32-bit BIOS
