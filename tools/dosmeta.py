@@ -28,7 +28,12 @@ import zlib
 from pathlib import Path
 
 MAGIC = 0x54454D44          # "DMET"
-VERSION = 1
+# Version 2 adds mach_kb in what version 1 wrote as reserved[0] -- i.e. as a
+# zero, which dos_meta_mach_kb() reads as "this title was never profiled". So a
+# v1 sidecar is still accepted by a v2 reader. The reverse is not true: a v2
+# sidecar handed to a v1 reader is rejected outright, so regenerate sidecars and
+# update firmware together.
+VERSION = 2
 # Must equal DOS_META_ABI in external/8086tiny/dos_meta.h. Bump BOTH whenever a
 # change can move a title's dirty high-water mark -- the granule, the demand
 # region, the write-bit site selection. A skew makes every sidecar ignored and
@@ -39,7 +44,7 @@ CRC_SPAN = 65536            # DOS_META_CRC_SPAN
 
 _FIELDS = ("magic", "version", "abi", "dsk_size", "dsk_crc", "gran",
            "demand_base", "demand_top", "pages_cold", "pages_xip",
-           "measured_at", "r0", "r1", "r2", "r3", "hdr_crc")
+           "measured_at", "mach_kb", "r1", "r2", "r3", "hdr_crc")
 
 
 def dsk_key(path: Path) -> tuple[int, int]:
@@ -57,10 +62,15 @@ def dsk_key(path: Path) -> tuple[int, int]:
 
 def build(dsk_size: int, dsk_crc: int, pages_cold: int, pages_xip: int = 0,
           gran: int = 4096, demand_base: int = 0x10000,
-          demand_top: int = 0xA0000, measured_at: int = 0) -> bytes:
+          demand_top: int = 0xA0000, measured_at: int = 0,
+          mach_kb: int = 0) -> bytes:
+    # mach_kb: conventional memory to give this title, in KB -- what INT 12h
+    # returns. 0 = not profiled, keep 640 KB. Measured by
+    # external/8086tiny/test286/machprofile.sh; the reader range-checks it to
+    # [64, 640] and a multiple of 4, so an out-of-range value reads as 0.
     words = [MAGIC, VERSION, ABI, dsk_size, dsk_crc, gran,
              demand_base, demand_top, pages_cold, pages_xip, measured_at,
-             0, 0, 0, 0]
+             mach_kb, 0, 0, 0]
     body = struct.pack("<15I", *words)
     return body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
 
@@ -83,11 +93,12 @@ def sidecar_path(dsk: Path) -> Path:
 
 def write_for(dsk: Path, pages_cold: int, pages_xip: int = 0,
               demand_base: int = 0x10000, demand_top: int = 0xA0000,
-              measured_at: int = 0, gran: int = 4096) -> Path:
+              measured_at: int = 0, gran: int = 4096,
+              mach_kb: int = 0) -> Path:
     size, crc = dsk_key(dsk)
     out = sidecar_path(dsk)
     out.write_bytes(build(size, crc, pages_cold, pages_xip, gran,
-                          demand_base, demand_top, measured_at))
+                          demand_base, demand_top, measured_at, mach_kb))
     return out
 
 

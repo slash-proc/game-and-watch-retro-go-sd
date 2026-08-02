@@ -90,6 +90,22 @@ extern void dos_cow_stats(unsigned *faults, unsigned *pages_used,
  * mechanism can cost correctness, and dos_cow_pool_stats()'s `grows` plus
  * dos_cow_stats()'s `lost` are how that shows up in the log. */
 extern unsigned int dos_cow_reserve(unsigned int pages);
+
+/* ---- Per-title machine size (INT 12h) -------------------------------------
+ *
+ * The .dosmeta sidecar's v2 field. Tell a title it has an N KB machine and
+ * DOS's own allocator will never build an MCB above N KB, so guest memory
+ * above N KB is unreachable by allocation -- no pool, no fault, no copy, no
+ * bet. It must be set BEFORE dos_cpu_init(), which is where the BIOS blob is
+ * loaded and the word poked; that is why the call sits here, in the function
+ * the ordering comment at dos_cpu_init() already covers.
+ *
+ * A wrong number is never fatal: DOS simply cannot allocate above it, and a
+ * store that lands there anyway is served and COUNTED (dos_mach_over), exactly
+ * as DOS_COW_GROW handles an under-reserved pool. See the DOS_MACH_KB_WORD
+ * block in external/8086tiny/8086tiny.c and test286/runmach.sh arm 6. */
+extern int dos_mach_set_kb(unsigned int kb);
+extern unsigned int dos_mach_kb, dos_mach_applied, dos_mach_over;
 extern void dos_cow_pool_stats(unsigned *arena, unsigned *reserved,
                                unsigned *live, unsigned *grows);
 #if DOS_INT13_OBS
@@ -798,6 +814,17 @@ static void dos_pool_reserve_from_meta(const char *dsk_path, uint32_t dsk_size,
      *     argument currently selects nothing at all.
      *     (external/8086tiny/docs/memory/17-xipimg-state-machine.md §5.)
      */
+    /* The machine size, before the pool: it is what dos_cpu_init() reads, and
+     * it is the only number here that cannot be applied late. 0 means the
+     * title was never profiled (and every v1 sidecar says 0 by construction),
+     * in which case the guest keeps the 640 KB it has always had. */
+    {
+        unsigned long kb = dos_meta_mach_kb(&m);
+
+        if (kb && dos_mach_set_kb((unsigned)kb))
+            printf("DOS: machine size %lu KB from %s\n", kb, path);
+    }
+
     if (dos_cow_reserve((unsigned)dos_meta_pages(&m, xip_armed)) == 0) {
         printf("DOS: meta pool reservation refused\n");
         return;
