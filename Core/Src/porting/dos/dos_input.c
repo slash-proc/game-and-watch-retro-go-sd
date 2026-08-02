@@ -51,6 +51,23 @@ extern void dos_key_event(unsigned short key_word);
 #define SDLK_y         121
 #define SDLK_n         110
 
+/* The bare modifier keys. These are NOT the DOS_KMOD_* flag bits below -- those
+ * decorate some *other* key with "and Shift was down". These are Shift and Ctrl
+ * pressed and released as keys in their own right, which is what a DOS action
+ * game reads: INT 7h special-cases keysyms 0x12F-0x134 before any other decode
+ * (bios.asm:496-537, `and bh,7` then `cmp bx,0x52f`..`0x534`, i.e. the SDL bit
+ * 0x400 plus the keysym) and emits the bare make/break scancodes 0x36/0xB6
+ * (Shift), 0x1D/0x9D (Ctrl), 0x38/0xB8 (Alt) to port 0x60 via io_key_available.
+ * INT 9h then deliberately does NOT buffer them (bios.asm:912-918), exactly as a
+ * real BIOS does not -- a modifier is a state, not a character.
+ *
+ * So these are the ONLY way to express a held Ctrl or Shift, and the flag bits
+ * are not a substitute: a flag bit rides on another key's word and vanishes with
+ * it. test286/runbuttons.sh asserts both scancodes and the absence of the
+ * buffer entry. SDL 1.2 numbering: RSHIFT=303 .. LALT=308. */
+#define SDLK_LSHIFT    304      /* 0x130 -> scancode 0x36 make / 0xB6 break */
+#define SDLK_LCTRL     306      /* 0x132 -> scancode 0x1D make / 0x9D break */
+
 /* Word-format flag bits, from the INT 7h handler:
  *   0x0400  "from SDL" -- selects the word format at all (bios.asm:387)
  *   0x0800  Alt        (bios.asm:441)
@@ -82,31 +99,49 @@ typedef struct {
  * ODROID_INPUT_VOLUME as a macro prefix (Core/Src/porting/common.c:236) and
  * main_dos.c calls it every frame, so binding it would fight the launcher.
  *
- * Enter and Escape are on A and B rather than on the physical START/GAME
- * buttons, deliberately: START and SELECT are wired only on GNW_TARGET=zelda
- * ("not connected on mario", Core/Inc/main.h:228), so the keys that make a DOS
- * prompt usable are kept on inputs that exist on every unit.
+ * THE GAME-FIRST LAYOUT (2026-08-03, user's call). A/B carry the two keys DOS
+ * action games actually bind -- Space and Ctrl -- and the zelda-only START and
+ * SELECT carry Enter and Shift:
+ *
+ *   START  (ODROID_INPUT_X, zelda only) -> Return
+ *   SELECT (ODROID_INPUT_Y, zelda only) -> Left Shift
+ *   A      (ODROID_INPUT_A)             -> Space
+ *   B      (ODROID_INPUT_B)             -> Left Ctrl
+ *
+ * This deliberately reverses the earlier rule that "the keys that make a DOS
+ * prompt usable are kept on inputs that exist on every unit". Two things pay
+ * for it: the mario unit is deprioritised (docs/input/02-button-mapping.md,
+ * "Zelda extras"), and the on-screen keyboard reaches Enter, Escape, y and n on
+ * every unit, so nothing has become UNreachable -- only less immediate.
+ *
+ * What moved off a button, and where it went:
+ *   Escape  was B      -> OSK only. Nothing in the four requested bindings can
+ *                         hold it; say so rather than quietly picking a victim.
+ *   Enter   was A      -> START (zelda). Still one press on a zelda unit.
+ *   'n'     was SELECT -> OSK only. It was already a duplicate of nothing since
+ *                         GAME stopped sending it.
+ *   'y'     stays on TIME, untouched, and is the only prompt answer left on a
+ *                         mario unit's buttons.
  *
  * GAME (ODROID_INPUT_START) is NOT in this table any more: it is the on-screen
  * keyboard toggle. See dos_input_update() for why it, and not the zelda-only
- * START button, got the job. It used to send 'n'; 'n' is still on SELECT for
- * zelda units and is reachable from the OSK on every unit.
+ * START button, got the job. It used to send 'n'; since the 2026-08-03 remap
+ * below took SELECT for Left Shift, 'n' is reachable from the OSK only.
  *
- * Unassigned: the physical START button (ODROID_INPUT_X, zelda only).
+ * Nothing is unassigned any more. 'k' -- which answers Alley Cat's "(K)itten"
+ * skill prompt and which START was the recorded candidate for -- is now reachable
+ * only from the on-screen keyboard. See entries/ALLEYCAT.game.tl.
  */
 static const dos_key_binding_t dos_key_map[] = {
     { ODROID_INPUT_UP,     SDLK_UP,     0 },
     { ODROID_INPUT_DOWN,   SDLK_DOWN,   0 },
     { ODROID_INPUT_LEFT,   SDLK_LEFT,   0 },
     { ODROID_INPUT_RIGHT,  SDLK_RIGHT,  0 },
-    { ODROID_INPUT_A,      SDLK_RETURN, 0 },   /* A button                   */
-    { ODROID_INPUT_B,      SDLK_ESCAPE, 0 },   /* B button                   */
+    { ODROID_INPUT_A,      SDLK_SPACE,  0 },   /* A button                   */
+    { ODROID_INPUT_B,      SDLK_LCTRL,  0 },   /* B button                   */
     { ODROID_INPUT_SELECT, SDLK_y,      0 },   /* TIME button                */
-    { ODROID_INPUT_Y,      SDLK_n,      0 },   /* SELECT button (zelda only) */
-    /* Unassigned: ODROID_INPUT_X, the physical START button (zelda only).
-     * SDLK_SPACE and DOS_KMOD_CTRL are the usual DOS-game wants if it is ever
-     * given a job. Verified as a working slot: binding it to 'k' (0x6B) is what
-     * answered Alley Cat's "(K)itten" skill prompt during testing. */
+    { ODROID_INPUT_Y,      SDLK_LSHIFT, 0 },   /* SELECT button (zelda only) */
+    { ODROID_INPUT_X,      SDLK_RETURN, 0 },   /* START button (zelda only)  */
 };
 
 #define DOS_KEY_MAP_LEN ((int)(sizeof dos_key_map / sizeof dos_key_map[0]))
@@ -117,9 +152,47 @@ static uint8_t dos_prev_down[DOS_KEY_MAP_LEN];
  * table row -- it produces no keystroke at all. */
 static uint8_t dos_toggle_prev;
 
+/* A held bare modifier has to ALSO ride on every other key's word.
+ *
+ * The two halves are different BIOS code and only one of them is reached by a
+ * bare modifier keysym. sdl_just_press_shift/ctrl emits the make/break scancode
+ * and returns immediately (bios.asm:509-537), which serves games reading port
+ * 0x60 -- but INT 7h's `real_key` ZEROES keyflags1/keyflags2 for every SDL event
+ * (bios.asm:484) and only re-adds a modifier bit if THAT word carried
+ * 0x0800/0x1000/0x2000 (bios.asm:539-557). So with Ctrl physically held, the very
+ * next Space would clear the BDA's Ctrl bit, and a guest asking INT 16h AH=02 for
+ * the shift status -- or reading 0040:0017 itself -- would be told Ctrl is up.
+ *
+ * test286/host_sdl.c already does exactly this for a real PC keyboard
+ * (mods_now(), folding SDL_GetModState() into every word), so without this the
+ * device and the host front end would disagree about a held modifier and the
+ * harness would lie. Both paths are real and both are used.
+ *
+ * DOWN WORDS ONLY. A key-up carrying a modifier bit latches that modifier in the
+ * BDA with nothing left to clear it, and every later keystroke arrives shifted
+ * (docs/traps.md, "A key-UP must NOT carry the modifier bits"). */
+static unsigned dos_mods_held;
+
+static unsigned dos_keysym_mod(uint16_t keysym)
+{
+    switch (keysym) {
+    case SDLK_LSHIFT: return DOS_KMOD_SHIFT;
+    case SDLK_LCTRL:  return DOS_KMOD_CTRL;
+    default:          return 0;
+    }
+}
+
 static unsigned short dos_input_key_word(const dos_key_binding_t *b, bool down)
 {
-    return (unsigned short)(DOS_KEY_SDL | b->mods | b->keysym |
+    unsigned mods = b->mods;
+
+    /* Do not decorate a modifier with itself: the bare-modifier arm masks the
+     * flag bits off before it compares (`and bh,7`, bios.asm:497), so it would
+     * be inert -- but it would also be a lie in the log. */
+    if (down && !dos_keysym_mod(b->keysym))
+        mods |= dos_mods_held;
+
+    return (unsigned short)(DOS_KEY_SDL | mods | b->keysym |
                             (down ? 0u : DOS_KEY_UP));
 }
 
@@ -128,6 +201,7 @@ void dos_input_reset(void)
     for (int i = 0; i < DOS_KEY_MAP_LEN; i++)
         dos_prev_down[i] = 0;
     dos_toggle_prev = 0;
+    dos_mods_held = 0;
     dos_osk_reset();
 }
 
@@ -145,6 +219,7 @@ static void dos_input_release_all(void)
         if (dos_key_map[i].keysym)
             dos_key_event(dos_input_key_word(&dos_key_map[i], false));
     }
+    dos_mods_held = 0;
 }
 
 void dos_input_update(const odroid_gamepad_state_t *js)
@@ -204,7 +279,19 @@ void dos_input_update(const odroid_gamepad_state_t *js)
      * pc_interrupt(7) can only carry one event at a time -- so every edge is
      * pushed to a queue that the emulator drains one event per eligible
      * instruction boundary. Table order therefore decides the order simultaneous
-     * presses reach the guest; nothing is dropped unless the queue overflows. */
+     * presses reach the guest; nothing is dropped unless the queue overflows.
+     *
+     * The modifier state is recomputed from LIVE button state first, in its own
+     * pass, rather than accumulated as the edges are walked. Otherwise table
+     * order would decide whether a Ctrl and a Space pressed on the same frame
+     * produce Ctrl+Space or a bare Space -- and Space is row 4 while Ctrl is
+     * row 5, so it would silently be the wrong one. This mirrors host_sdl.c
+     * asking SDL_GetModState() rather than tracking edges. */
+    dos_mods_held = 0;
+    for (int i = 0; i < DOS_KEY_MAP_LEN; i++)
+        if (js->values[dos_key_map[i].button])
+            dos_mods_held |= dos_keysym_mod(dos_key_map[i].keysym);
+
     for (int i = 0; i < DOS_KEY_MAP_LEN; i++) {
         const dos_key_binding_t *b = &dos_key_map[i];
         uint8_t now = js->values[b->button] ? 1 : 0;
