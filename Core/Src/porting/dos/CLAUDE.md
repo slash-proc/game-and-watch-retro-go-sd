@@ -142,6 +142,76 @@ authority on current state** — it is maintained per-change and this one is not
 `external/8086tiny/GNW_PORT.md` is the original plan document and is **stale**; several
 things it proposes were tried and abandoned.
 
+## RULE 3 — A SUBSYSTEM IS NOT LIVE UNTIL A GUEST REACHES IT.
+
+Three times this project has shipped a subsystem, passed its unit test, and
+reported it "live" while **no guest could reach it**:
+
+- the **COW arena** sat dark for a session behind one missing CLI argument in
+  `tools/dosmeta.py`;
+- the **fast-boot snapshot** was "live" with **zero `.xipimg` files** in existence;
+- **EMS** passed `runems.sh` for weeks while **`emshook.sys` was never `git
+  add`ed**, so no disk image loaded a driver and every EMS-using title failed
+  identically. The run prints `EMS: present 1` in both arms — the emulator was
+  always ready; the image was the entire gap.
+
+So: **a test that exercises the emulator side proves nothing about whether a
+game can use the feature.** Write the guest-side test — code running inside a
+*packaged image* — and make its negative control fail in the exact state the
+shipped images were in. `test286/runemsdisk.sh` is the model.
+
+## AFTER ANY `.dsk` REGENERATION, RUN `tools_machkb.sh`.
+
+`tools/mkdosdisk.py` writes a fresh `.dosmeta` beside every image it packs. It
+computes `pages_cold` itself but **cannot know `mach_kb`** — that comes from a
+behavioural sweep, not from anything inspectable in the image. **So every
+repackage silently zeroes `mach_kb` and switches the arena back off**, with no
+error and no failing test (`runsidecar.sh` checks that a sidecar *funds pages*,
+and `pages_cold` survives a repack).
+
+This happened on 2026-08-03: ver=2 sidecars landed in the morning, the EMS
+repackage wiped ten of eleven at 11:15:42, and only `freedos` survived because
+its image was not rebuilt.
+
+    sh external/8086tiny/tools_machkb.sh
+
+The values are the `safe` column of `docs/memory/26-machine-size-behavioural.md`.
+**That doc is the derivation and the script is the application — edit together.**
+
+## RUNNING GWEMU: TWO TRAPS THAT LOOK LIKE FIRMWARE BUGS
+
+- **Black screen.** `scripts/run_gwemu.sh` always starts QEMU with `-S` (halted at
+  reset) because the gdb log-forwarder is meant to attach first. If that attach
+  fails — wrong port, slow SDL start — nothing ever issues `continue` and the
+  machine sits stopped. **A halted CPU paints nothing.** Use the no-`-S`,
+  no-gdb runner in the session scratchpad (`gwemu.sh`) when you just want to see
+  the screen.
+- **Stale media.** `make gwemu_release` prints *"QEMU images already exist
+  (skipping prep)"* and **silently keeps yesterday's images** — old firmware, old
+  core, deleted games. **Run `refresh.sh` after every rebuild.** It rebuilds
+  bank1 from `build/gw_retro_go_intflash.bin`, re-`mcopy`s `sd_content` and
+  `roms/dos`, and **preserves `::/CONFIG`** (the saved system selection) by
+  copying over the card instead of reformatting. Never `--reset`.
+
+Take screenshots yourself: timelines support `screenshot x.png`, with `GNW_OUT`
+choosing the directory. Do not ask the owner to look.
+
+## THE HOST HARNESS MUST NOT WRITE THROUGH TO A REAL IMAGE.
+
+`8086tiny.c`'s argv loop opens disks `fopen(path, "r+b")`. On the **device** that
+is correct — it is how a guest saves. In the **host harness** the path is
+whatever the script passed, and scripts passed `roms/dos/*.dsk` and `fd.img`
+directly, so a guest `INT 13h` write landed in the repository's own image. Keen 4
+rewrites its config on exit, so the symptom is *a measurement that stops
+reproducing with no visible cause*.
+
+Fixed centrally in `dos_host_shadow_images()` (`test286/host_main.c`), which
+copies every argv file to a temp before `dos_cpu_init()` sees it — not per
+script, because there are 40+ scripts with three different spellings and the next
+one written would not know the rule. `DOS_IMG_WRITABLE=1` opts out.
+**gwemu and the device are NOT affected**: they reach disks through FatFS on the
+SD image, which is a copy.
+
 ## Where the documentation lives — read this first
 
 **All design documentation is in the submodule**, and it is more current and more
