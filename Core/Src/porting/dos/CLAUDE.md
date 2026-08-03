@@ -88,6 +88,38 @@ You are the gate, the validator and the only integrator.
    cherry-pick onto the branch you are already standing on silently no-ops, and the
    submodule checkout has been found parked on a stale feature branch.
 
+## RULE 2 — A FEATURE IS PER-TITLE AND NON-FATAL. ONE TITLE NEVER GATES IT.
+
+If a capability cannot serve one title, it serves the other twelve and logs why
+it skipped that one. It does not switch itself off, and it NEVER refuses to
+start a title that is not even using it.
+
+Measured cost of getting this wrong, one causal chain:
+
+- `roms/dos/BATTLECHESS.dsk` was 99,090,432 B and could not fit a 64 MB part.
+- So `DOS_XIP_CACHE` was left off — for every title.
+- So `DOS_MEM_TRIM` was off, because `dos_trim_arm()` needs flash to map.
+- So `main_dos.c:1064` would **refuse to start a title** when the trim could not
+  arm — a title that does not use the trim, failing because the trim could not
+  initialise.
+- So load elision could not be built at all: it needs the disk resident in flash.
+
+Four subsystems dark for weeks. The 99 MB turned out to be a CD-ROM's worth of
+promo videos for *other games* plus a 33 MB data file the minimal install does
+not need. Repackaged: **1,474,560 B**, and all ten images together are
+27,463,680 B of a 67,108,864 B part.
+
+**The shape that is correct is already in the tree.** `dos_arena_open()` returns
+0 and sets `dos_arena_refused` for PRINCE and SIMCITY, whose 640 KB profiles
+leave no hole; both boot normally and every other title gets its 14-103 pool
+pages. Copy that, not `main_dos.c:1064`.
+
+Checklist for anything new:
+- Can it be decided per title from `.dosmeta`? Then decide per title.
+- What happens when it cannot serve a title? The answer must be "log, skip,
+  behave as before" — not "return -1" and never "refuse to start".
+- Is the default gated on the WORST title? That is this rule being broken.
+
 Status: **boots to a DOS prompt and can be typed at.** MS-DOS 6.22 and FreeDOS both
 reach `A:\>`. Text mode renders in authentic CP437 and the CGA blit now renders real
 games — Alley Cat is playable. PC-speaker audio is wired but unheard.
