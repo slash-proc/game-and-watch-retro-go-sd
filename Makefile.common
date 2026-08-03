@@ -2475,6 +2475,22 @@ DOS_CFLAGS += -DDOS_FOLD_DOMAIN=$(DOS_FOLD_DOMAIN)u
 # 4096-aligned; 8086tiny.c #errors otherwise. The 0x10000 floor is empirical --
 # demand-paging any granule below it breaks a FreeDOS boot
 # (docs/memory/06-straddle-and-demand.md, LOW=1 in test286/rundemand.sh).
+# DOS_XIP_CACHE=1 caches the whole .dsk into external flash at core entry
+# (main_dos.c). It used to be reachable only as DOS_CFLAGS_EXTRA="-DDOS_XIP_CACHE=1",
+# the same channel ad-hoc debug flags use, so every use of it silently competed
+# with whatever else that variable was carrying. PM5 (load elision) needs it as a
+# first-class knob.
+#
+# THE DEFAULT DOES NOT CHANGE: main_dos.c already defaults it to 0, so defining
+# it to 0 here links a byte-identical firmware.
+#
+# DO NOT TURN IT ON CASUALLY -- caching the image costs a multi-second "first
+# boot of this image" stall, and nothing in the shipping build dereferences the
+# result. The trim that used to depend on it no longer does
+# (external/8086tiny/docs/memory/24-trim-self-arm.md).
+DOS_XIP_CACHE ?= 0
+DOS_CFLAGS += -DDOS_XIP_CACHE=$(DOS_XIP_CACHE)
+
 DOS_DEMAND_BASE ?= 0
 DOS_DEMAND_TOP  ?= 0
 DOS_CFLAGS += -DDOS_DEMAND_BASE=$(DOS_DEMAND_BASE) -DDOS_DEMAND_TOP=$(DOS_DEMAND_TOP)

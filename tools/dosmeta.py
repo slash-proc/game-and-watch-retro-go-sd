@@ -11,13 +11,37 @@ The format is 16 little-endian 32-bit words, 64 bytes, CRC32 of the first 60 in
 the last. Byte-wise on purpose: the reader is freestanding C and the writer is
 Python, and a C struct layout is not a wire format.
 
-    dosmeta.py write roms/dos/KEEN4.dsk --pages-cold 83
+    dosmeta.py write roms/dos/KEEN4.dsk --pages-cold 149 --mach-kb 640
     dosmeta.py show  roms/dos/KEEN4.dosmeta
 
-Where the numbers come from: external/8086tiny/test286/poolmeasure.sh, which
-runs each image in the host harness (the same emulator the device runs) and
-reports the pool pages it actually needed. Run it with --emit to write every
-sidecar in one pass.
+Where the numbers come from:
+
+  --pages-cold  external/8086tiny/test286/poolmeasure.sh, which runs each image
+                in the host harness (the same emulator the device runs) and
+                reports the pool pages it actually needed. Run it with --emit to
+                write every sidecar in one pass. NOTE that it injects no input,
+                so its figure is a title-screen LOWER BOUND; the in-play figures
+                are in external/8086tiny/docs/memory/25-demand-does-not-pay.md.
+
+  --mach-kb     external/8086tiny/test286/machfloor.sh -- the BEHAVIOURAL floor,
+                bisected by shrinking the machine until the title stops doing the
+                work its timeline makes it do.
+
+                Do NOT take it from the MCB chain. Every executable in roms/dos
+                has e_maxalloc = 0xFFFF, so DOS hands each program all remaining
+                conventional memory at load regardless of use, and the chain
+                reports what DOS OFFERED rather than what the title needs.
+
+                Do not take it from test286/machplay.sh either: its subject is
+                built at the derived COW pool (146 pages) and KEEN 4 in play needs
+                149, so KEEN 4's own reference run is exhausted and its page-count
+                term compares two caps. machfloor.sh builds a pool that cannot
+                saturate and refuses a title whose reference run lost a store.
+
+Writing --mach-kb is what makes a sidecar version 2, and version 2 is what stops
+external/8086tiny/dos_arena.c's dos_arena_open() refusing: with no machine size
+there is no hole above the guest's conventional memory to carve a COW pool from,
+so the pool gets 0 pages from the arena and per-title pool sizing stays inert.
 """
 from __future__ import annotations
 
@@ -117,6 +141,14 @@ def _main() -> int:
     w.add_argument("--demand-top", type=lambda s: int(s, 0), default=0xA0000)
     w.add_argument("--measured-at", type=lambda s: int(s, 0), default=0,
                    help="guest instructions retired at measurement (diagnostic)")
+    w.add_argument("--gran", type=lambda s: int(s, 0), default=4096,
+                   help="fold granule the measurement was taken at (DOS_FOLD_GRAN)")
+    w.add_argument("--mach-kb", type=int, default=0,
+                   help="conventional memory to give this title, in KB -- what "
+                        "INT 12h returns. 0 = not profiled, keep 640 KB. This is "
+                        "the field that makes the sidecar version 2 and funds the "
+                        "COW arena; see the module docstring for where it comes "
+                        "from. Must be 0, or in [64, 640] and a multiple of 4.")
 
     s = sub.add_parser("show", help="decode a .dosmeta")
     s.add_argument("meta", type=Path)
@@ -126,10 +158,24 @@ def _main() -> int:
         if not args.image.is_file():
             print(f"error: {args.image} does not exist", file=sys.stderr)
             return 1
+        # RANGE-CHECK mach_kb HERE, LOUDLY. dos_meta_mach_kb() applies exactly
+        # this check and returns 0 when it fails, which the arena reads as "not
+        # profiled" and degrades to today's behaviour -- correct, but silent. A
+        # typo would then cost the title its pool with nothing to show for it,
+        # and the only symptom would be an arena that still refuses. Fail at
+        # write time instead, where there is someone to tell.
+        if args.mach_kb and not (64 <= args.mach_kb <= 640
+                                 and args.mach_kb % 4 == 0):
+            print(f"error: --mach-kb {args.mach_kb} is out of range: must be 0, "
+                  f"or in [64, 640] and a multiple of 4 (dos_meta.c reads any "
+                  f"other value as 0, i.e. silently ignores it)", file=sys.stderr)
+            return 1
         out = write_for(args.image, args.pages_cold, args.pages_xip,
-                        args.demand_base, args.demand_top, args.measured_at)
+                        args.demand_base, args.demand_top, args.measured_at,
+                        gran=args.gran, mach_kb=args.mach_kb)
         print(f"  {out.name}: pages_cold={args.pages_cold} "
-              f"pages_xip={args.pages_xip}")
+              f"pages_xip={args.pages_xip} mach_kb={args.mach_kb}"
+              f"{'' if args.mach_kb else ' (v1 behaviour: arena will refuse)'}")
         return 0
 
     m = parse(args.meta.read_bytes())
