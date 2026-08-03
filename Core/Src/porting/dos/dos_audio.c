@@ -14,6 +14,11 @@
  * not visible in a screenshot.
  */
 
+/* Provided by 8086tiny.c -- see
+ * external/8086tiny/docs/audio/03-sound-blaster.md section 4. */
+extern unsigned int dos_sb_mix(short *buf, unsigned int len,
+                              unsigned int out_rate, int amp);
+
 #include "gw_audio.h"
 #include "common.h"
 #include "dos_audio.h"
@@ -77,8 +82,19 @@ void dos_audio_submit(void)
     dos_spkr_was_on = inc ? 1 : 0;
 
     /* Muted still had to take the latch above; now just leave silence. */
-    if (common_emu_sound_loop_is_muted())   /* clears the active buffer itself */
+    if (common_emu_sound_loop_is_muted()) { /* clears the active buffer itself */
+        /* THE MUTED PATH MUST STILL PUMP THE SOUND BLASTER. A single-cycle DMA
+         * transfer is a CURSOR advanced by dos_sb_mix(); if it is not advanced
+         * the transfer never completes, the end-of-transfer IRQ never fires, and
+         * a guest waiting on it HANGS -- silently, and ONLY when muted. Same
+         * rule as the speaker latch above, found the same way: mutate.sh ran
+         * with no audio sink and the guest sat at IRQ=00 CNT=00FF forever.
+         * amp 0 renders silence while still advancing the cursor.
+         * See external/8086tiny/docs/audio/03-sound-blaster.md section 4. */
+        dos_sb_mix(audio_get_active_buffer(), audio_get_buffer_length(),
+                   AUDIO_SAMPLE_RATE, 0);
         return;
+    }
 
     int16_t *buf = audio_get_active_buffer();
     uint16_t len = audio_get_buffer_length();
@@ -104,6 +120,11 @@ void dos_audio_submit(void)
         /* Silence. Cheaper than running the loop, and matches the tree's habit
          * of clearing the whole half in one go rather than storing zeroes. */
         audio_clear_active_buffer();
+        /* Speaker silent does not mean the card is: pump the cursor. */
+        dos_sb_mix(audio_get_active_buffer(), audio_get_buffer_length(),
+                   AUDIO_SAMPLE_RATE,
+                   (int16_t)((common_emu_sound_get_volume() * (int32_t)INT16_MAX)
+                             >> DOS_SPKR_VOL_SHIFT));
         return;
     }
 
@@ -111,4 +132,7 @@ void dos_audio_submit(void)
                             >> DOS_SPKR_VOL_SHIFT);
 
     dos_spkr_render(buf, len, inc, amp, &dos_spkr_phase);
+    /* The Sound Blaster mixes into the SAME buffer: the two are independent
+     * sources and a DMA-audio title usually leaves the speaker gated off. */
+    dos_sb_mix(buf, len, AUDIO_SAMPLE_RATE, amp);
 }

@@ -550,6 +550,43 @@ static void vga13_sync_palette(void)
     vga13_clut_valid = true;
 }
 
+/* ---------------------------------------------------------------------------
+ * ...and UNCHAINED mode 13h -- "Mode Y"
+ *
+ * Software clears the Sequencer's chain-4 bit (index 4 bit 3) and mode 13h stops
+ * being linear: pixel x of row y lives in plane x&3 at plane offset
+ * y*stride + (x>>2), where stride is 80 bytes for a 320-wide screen. Reading
+ * that as if it were still linear is what produced Wolfenstein 3-D's four
+ * squashed copies side by side -- four adjacent scanlines of plane data painted
+ * across the width of one.
+ *
+ * THE DE-INTERLEAVE IS FREE, and that is not a coincidence. The core stores the
+ * planes interleaved -- plane p at plane offset a is aperture[4*a + p] -- so
+ *
+ *     4*(y*80 + (x>>2)) + (x&3)  ==  320*y + x
+ *
+ * i.e. the byte a chained blit already wanted. All this arm adds over the
+ * chained one is the SOURCE ADDRESS OF EACH ROW, which is where the CRTC
+ * display start (0x0C/0x0D) and Offset (0x13) enter. At start 0 and Offset 40
+ * it reduces exactly to the chained loop.
+ *
+ * Pages are aliased into one 16 KB plane page by the core (see the Mode Y block
+ * in 8086tiny.c): there is no room for a second real page, so a page flip shows
+ * the same buffer and the picture is one complete current frame with tearing
+ * rather than a correct flip. The mask comes from the core so the two cannot
+ * disagree about where a plane offset lands.
+ * ------------------------------------------------------------------------- */
+extern int          dos_vga_is_unchained(void);
+extern unsigned int dos_vga_modey_mask(void);
+/* Shared with the 0Dh arm below, which declares them again next to its own use;
+ * both are plane-BYTE quantities in either mode. */
+extern unsigned int dos_ega_row_bytes(void);
+extern unsigned int dos_ega_start_byte(void);
+
+/* 320 pixels is 80 plane offsets, and one plane offset is 4 interleaved bytes,
+ * so a displayed row is 80 plane offsets wide however far apart rows are. */
+#define VGA13_ROW_OFFSETS  (VGA13_WIDTH / 4)
+
 static void blit_vga13(uint8_t *fb)
 {
     /* The aperture folds contiguously, so one dos_mem_ptr() covers all 64000
@@ -558,9 +595,32 @@ static void blit_vga13(uint8_t *fb)
     const uint8_t *src = (const uint8_t *)dos_mem_ptr(VGA13_BASE);
     uint8_t *dst = fb + DOS_LETTERBOX * DOS_LCD_WIDTH;
 
+    if (!dos_vga_is_unchained()) {
+        for (unsigned y = 0; y < VGA13_ROWS; y++) {
+            memcpy(dst, src, VGA13_WIDTH);
+            src += VGA13_WIDTH;
+            dst += DOS_LCD_WIDTH;
+        }
+        return;
+    }
+
+    const unsigned mask   = dos_vga_modey_mask();   /* plane offsets, 0x3FFF */
+    const unsigned stride = dos_ega_row_bytes();    /* plane bytes per row   */
+    const unsigned start  = dos_ega_start_byte();   /* first plane offset    */
+
     for (unsigned y = 0; y < VGA13_ROWS; y++) {
-        memcpy(dst, src, VGA13_WIDTH);
-        src += VGA13_WIDTH;
+        const unsigned a = (start + y * stride) & mask;
+
+        /* A row is contiguous in the interleaved store unless it runs off the
+         * end of the aliased page, which only a non-zero start can do. Split
+         * rather than read past the aperture. */
+        if (a + VGA13_ROW_OFFSETS <= mask + 1) {
+            memcpy(dst, src + 4 * a, VGA13_WIDTH);
+        } else {
+            const unsigned head = (mask + 1 - a) * 4;
+            memcpy(dst, src + 4 * a, head);
+            memcpy(dst + head, src, VGA13_WIDTH - head);
+        }
         dst += DOS_LCD_WIDTH;
     }
 }
@@ -1218,11 +1278,13 @@ void dos_video_blit(void)
      * 2 and 7 to 3 (bios.asm:1080-1083), so mode 7 never appears. 4/5 are CGA
      * 320x200 and 6 is CGA 640x200.
      *
-     * Mode 0x13 is VGA 320x200x256 linear. Mode 0x0D is EGA 320x200x16 planar;
-     * the core only reinterprets the aperture as bitplanes while its BIOS armed
-     * that mode, so blit_ega16() and this arm are always consistent.
+     * Mode 0x13 is VGA 320x200x256, linear or UNCHAINED ("Mode Y") -- both are
+     * mode 13h as far as the BDA is concerned, and blit_vga13() asks the core
+     * which one is live. Mode 0x0D is EGA 320x200x16 planar; the core only
+     * reinterprets the aperture as bitplanes while its BIOS armed that mode, so
+     * blit_ega16() and this arm are always consistent.
      *
-     * Anything else -- Hercules, EGA 0Eh/10h, Mode X/Y -- is unsupported: leave
+     * Anything else -- Hercules, EGA 0Eh/10h -- is unsupported: leave
      * the screen alone rather than render one mode's memory through another
      * mode's decoder, which produces confident-looking garbage. 0Eh and 10h are
      * refused by the BIOS for a concrete reason: they need 16,000 and 28,000
