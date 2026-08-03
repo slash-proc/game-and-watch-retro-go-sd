@@ -578,6 +578,7 @@ static void vga13_sync_palette(void)
  * ------------------------------------------------------------------------- */
 extern int          dos_vga_is_unchained(void);
 extern unsigned int dos_vga_modey_mask(void);
+extern unsigned int dos_vga_modey_row(unsigned int a);
 /* Shared with the 0Dh arm below, which declares them again next to its own use;
  * both are plane-BYTE quantities in either mode. */
 extern unsigned int dos_ega_row_bytes(void);
@@ -609,7 +610,20 @@ static void blit_vga13(uint8_t *fb)
     const unsigned start  = dos_ega_start_byte();   /* first plane offset    */
 
     for (unsigned y = 0; y < VGA13_ROWS; y++) {
-        const unsigned a = (start + y * stride) & mask;
+        /* The core owns the page fold -- it is NOT a mask, because the page
+         * stride is whatever the guest programmed and WOLF3D's is 16,640, not
+         * 16,384. dos_vga_modey_row() is the same lookup the store path uses,
+         * so the blit and the writes cannot disagree about where a row is. */
+        const unsigned a = dos_vga_modey_row(start + y * stride);
+
+        if (a == ~0u) {
+            /* No aperture storage for this row: off-screen or page tail. Black
+             * rather than whatever the previous frame left, so a mis-learned
+             * layout is visible instead of plausible. */
+            memset(dst, 0, VGA13_WIDTH);
+            dst += DOS_LCD_WIDTH;
+            continue;
+        }
 
         /* A row is contiguous in the interleaved store unless it runs off the
          * end of the aliased page, which only a non-zero start can do. Split
@@ -1213,6 +1227,45 @@ static bool dos_video_selftest(uint8_t *fb)
 /* ---------------------------------------------------------------------------
  * Entry point
  * ------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * PRESENT ON THE GUEST'S PAGE FLIP (Mode Y only)
+ *
+ * The core aliases every Mode Y page into one 64 KB aperture, so at the
+ * emulator's frame boundary that storage holds whatever the guest is drawing at
+ * that instant -- measured on WOLF3D against a full 256 KB reference card, a
+ * finished frame with the NEXT frame's ceiling and floor bars already painted
+ * across it. Painting then composites two frames.
+ *
+ * A CRTC display-start change is the guest saying "the page I was displaying is
+ * complete". That is the only instant at which the aliased page is known good,
+ * so it is when the screen is painted. The core calls this from its 0x3D5
+ * handler (dos_video_page_flip() is weak there, so nothing else has to know).
+ *
+ * BOTH BUFFERS, and that is load-bearing rather than defensive: the frame loop
+ * swaps every frame, so painting one buffer per guest flip makes the screen
+ * alternate between the new frame and the previous one at the swap rate. Same
+ * failure dos_osk.c documents for the letterbox bars.
+ * ------------------------------------------------------------------------- */
+static bool modey_presented;
+static uint8_t modey_idle = 8;
+/* Frames with no page flip after which the hold is abandoned. ~130 ms at 60 Hz:
+ * long enough that a title pausing between frames does not flicker, short enough
+ * that a title which stopped flipping altogether is not a frozen screen. */
+#define DOS_MODEY_IDLE_FRAMES 8
+
+void dos_video_page_flip(void)
+{
+    if (!initialised || lcd_get_mode() != LCD_MODE_LUT8)
+        return;
+    if (bda8(BDA_VIDMODE) != 0x13 || !dos_vga_is_unchained())
+        return;
+
+    vga13_sync_palette();
+    blit_vga13((uint8_t *)lcd_get_active_buffer());
+    blit_vga13((uint8_t *)lcd_get_inactive_buffer());
+    modey_presented = true;
+}
+
 void dos_video_blit(void)
 {
     if (!initialised)
@@ -1270,6 +1323,29 @@ void dos_video_blit(void)
         }
         last_mode = mode;
         last_cols = cols;
+    }
+
+    /* Mode Y: while the guest is flipping, the screen is painted by
+     * dos_video_page_flip() and repainting here would composite the frame it
+     * presented with the one now being drawn over the top of it -- the whole
+     * point of presenting on the flip. Hold the presented frame instead.
+     *
+     * The idle count is the escape hatch, not decoration: a Mode Y title that
+     * stops flipping (a static menu drawn straight to the visible page) must not
+     * freeze. After DOS_MODEY_IDLE_FRAMES with no flip this falls through and
+     * paints every frame, exactly as every other mode does. */
+    if (mode == 0x13 && dos_vga_is_unchained()) {
+        if (modey_presented) {
+            modey_presented = false;
+            modey_idle = 0;
+            return;
+        }
+        if (modey_idle < DOS_MODEY_IDLE_FRAMES) {
+            modey_idle++;
+            return;
+        }
+    } else {
+        modey_idle = DOS_MODEY_IDLE_FRAMES;
     }
 
     uint8_t *fb = (uint8_t *)lcd_get_active_buffer();
