@@ -64,17 +64,17 @@
 #define DOS_FBS_AT_FRAMES 1800u
 #endif
 
-static char     dos_fbs_path[128];
+static char     dos_fbs_path[96];
 static uint8_t *dos_fbs_flash;
 static uint32_t dos_fbs_flash_size;
 static int      dos_fbs_restored;
 static int      dos_fbs_captured;
 static dos_fbs_key_t dos_fbs_key;
 
-/* The XMS pool. dos_fbs.h §7: the snapshot carries the driver's handle table,
- * the CALLER carries the pool file. MS-DOS 6.22's own CONFIG.SYS takes 102 KB
- * of XMS during boot on every shipped image, so this is the common path. */
-static char dos_fbs_xms_path[136];
+/* The XMS pool's sidecar path is built on the STACK when it is needed, not kept
+ * in a static: this file's .bss is `.overlay_dos_bss`, i.e. AXI, i.e. guest RAM,
+ * and AXI headroom is 1,192 B. Only its .text escapes to `.xip_dos`. */
+#define DOS_FBS_XMS_SUFFIX ".xms"
 
 /* store_file_in_flash()'s progress callback. Its own copy rather than
  * main_dos.c's: that one lives in .overlay_dos and this file exists to keep
@@ -148,12 +148,11 @@ static int dos_fbs_make_path(const char *dsk_path)
         if (*p == '.')
             dot = p;
     n = dot ? (size_t)(dot - base) : strlen(base);
-    if (n == 0 || n + sizeof("/saves/dos/.fbs.xms") >= sizeof dos_fbs_path)
+    if (n == 0 || n + sizeof("/saves/dos/.fbs") >= sizeof dos_fbs_path)
         return -1;
     strcpy(dos_fbs_path, "/saves/dos/");
     memcpy(dos_fbs_path + 11, base, n);
     strcpy(dos_fbs_path + 11 + n, ".fbs");
-    snprintf(dos_fbs_xms_path, sizeof dos_fbs_xms_path, "%s.xms", dos_fbs_path);
     return 0;
 }
 
@@ -161,8 +160,12 @@ static int dos_fbs_make_path(const char *dsk_path)
  * before dos_cpu_init() takes its three -- see the fopen-budget note above. */
 static int dos_fbs_copy(const char *from, const char *to)
 {
-    static uint8_t buf[512];            /* .bss of main_dos.o, which is NOT in
-                                         * .xip_dos; 512 B, sized to a sector */
+    uint8_t buf[128];                   /* AN AUTOMATIC, not a static: a static
+                                         * would be 512 B of `.overlay_dos_bss`
+                                         * (AXI, guest RAM) against 1,192 B of
+                                         * headroom, for a function that runs at
+                                         * most twice a session. 128 B of a
+                                         * 20 KB stack is the cheaper side. */
     FILE *a, *b;
     size_t n;
     int ok = 1;
@@ -216,7 +219,11 @@ void dos_fbs_boot(const char *dsk_path, unsigned long dsk_size,
     /* THE POOL BEFORE THE SNAPSHOT. Restoring the scalar block closes the XMS
      * driver's FILE* and drops its cached seek position precisely so the next
      * access reopens the file we have just put in place. */
-    dos_fbs_copy(dos_fbs_xms_path, dos_xms_store_path);
+    {
+        char xp[112];
+        snprintf(xp, sizeof xp, "%s" DOS_FBS_XMS_SUFFIX, dos_fbs_path);
+        dos_fbs_copy(xp, dos_xms_store_path);
+    }
 
     rs = dos_fbs_restore(dos_fbs_flash, (unsigned long)dos_fbs_flash_size,
                          &dos_fbs_key, &h);
@@ -278,8 +285,12 @@ void dos_fbs_frame(unsigned int frames)
     }
     /* The XMS pool, beside the snapshot, and AFTER the .fbs is closed so a
      * failure here cannot also truncate the snapshot. */
-    if (!dos_fbs_copy(dos_xms_store_path, dos_fbs_xms_path))
-        remove(dos_fbs_xms_path);
+    {
+        char xp[112];
+        snprintf(xp, sizeof xp, "%s" DOS_FBS_XMS_SUFFIX, dos_fbs_path);
+        if (!dos_fbs_copy(dos_xms_store_path, xp))
+            remove(xp);
+    }
 
     printf("DOS: fbs CAPTURED %lu B to %s at frame %u in %lu ms "
            "(uncompressed; run test286/fbspack.py to LZMA it)\n",

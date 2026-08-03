@@ -282,6 +282,28 @@ external flash. Design and evidence:
 `.xipimg` glue; the 4,952 B is reclaimable via `.xip_dos` and has not been.
 The 49,352 / 49,368 figures in older docs are stale.
 
+**The FAST-BOOT SNAPSHOT is wired** (`dos_fbs_boot()` / `dos_fbs_frame()` in
+`Core/Src/porting/dos/dos_fbs_glue.c`, `DOS_FBS_ENABLE=1` by default). First run of
+a title writes `/saves/dos/<title>.fbs` (plus `.fbs.xms`, the XMS pool); later runs
+cache it with `store_file_in_flash()` and RESTORE it right after `dos_cpu_init()`,
+so DOS never boots and the executable is never loaded. Design and evidence:
+`external/8086tiny/docs/memory/23-fastboot-snapshot.md`. Four things to know:
+
+- **It is NOT a memory-reclaim mechanism and must not be scored as one.** It
+  COPIES into writable guest RAM rather than mapping read-only, which is exactly
+  why it works where `.xipimg` did not — and it costs **200 B of AXI**, it does
+  not save any.
+- **Byte-exact on the host, never run on silicon.** `test286/runfbs.sh`: MS-DOS
+  6.22 and KEEN4 both continue byte-identically 8 M instructions past the capture
+  point, against a `-DDOS_FBS_NO_PORTS=1` control that is required to diverge.
+- **The caller carries the XMS pool file.** MS-DOS 6.22's own CONFIG.SYS takes
+  102 KB of XMS during boot on every shipped image, so this is the common path,
+  not an exotic one. `dos_fbs.h` §7 states the obligation; the order on restore
+  (pool file first, then `dos_fbs_restore()`) is load-bearing.
+- **Compression is a HOST step.** There is no LZMA encoder in this tree. A device
+  capture writes uncompressed; `test286/fbspack.py` recompresses. The decoder is
+  already in internal flash and costs the overlay nothing.
+
 **Guest conventional memory is not a constraint.** An MCB walk shows DOS hands Keen 4
 621 KB with 18,304 B of total overhead; Keen's "372 KB free" panel is its own heap after
 its 253 KB image is resident. Wolfenstein 3D (528 KB) and SimCity (512 KB+) already have
