@@ -2403,6 +2403,44 @@ endif
 DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=1
 endif
 
+# THE EXTENT OF THE GUEST'S PHYSICAL ADDRESS SPACE, in bytes. 8 MB.
+#
+# dos_fold()'s map covers this much; everything above the 8086 wrap (0x110000)
+# is extended memory and is demand-paged -- one shared zero page until written,
+# a COW pool page once written, compressed or spilled to SD once evicted. See
+# external/8086tiny/docs/memory/20-extended-memory-tier.md.
+#
+# IT COSTS THE HOT PATH NOTHING, and that is a disassembly rather than a claim:
+# `sh test286/extmap_ab.sh` builds the interpreter for the Cortex-M7 at these
+# very flags across 2/4/8/16 MB and dos_cpu_frame's instruction sequence is
+# identical at every one, with a -DDOS_POOL_SIM=1 negative control that catches
+# a hook added to the fold. What it costs is .bss, in 8086tiny.o (the map, and
+# two granule bitmaps) and in dos_zram.o (the store's per-granule arrays).
+#
+# WHY 4 MB AND NOT THE 8 MB THE DESIGN RECOMMENDS. Both were linked, and the
+# choice is about what the headroom is FOR, not about the extent:
+#
+#     4 MB   -> 18,304 B of AXI headroom
+#     8 MB   ->  5,632 B
+#    16 MB   -> does not link
+#
+# Nothing can USE extended memory until protected mode exists (PM8), and neither
+# PM8 nor 386 phase 2 (PM14) can be BUILT inside 5,632 B -- 386 phase 1 alone
+# cost 8,296 B of overlay text. Shipping 8 MB now would spend the entire budget
+# on an address space no guest can reach yet, and block the work that would make
+# it reachable. So: 4 MB while the CPU work lands, then raise it.
+#
+# RAISE IT TO 0x800000 the moment PM2 (the arena) or PM3 (DOS_DEMAND_SIZE) frees
+# the ~14 KB back, and re-link. It is one word and costs no redesign, which is
+# the whole point of it being a variable. 16 MB needs the arena first.
+#
+# NOTE: DOS_CFLAGS IS NOT A MAKE DEPENDENCY. Changing this recompiles nothing --
+# `touch external/8086tiny/8086tiny.c external/8086tiny/dos_zram.c` first or you
+# will link the previous extent and read the previous headroom. (Root CLAUDE.md
+# says this about <CORE>_CFLAGS_EXTRA; it cost a wrong measurement here too.)
+DOS_FOLD_DOMAIN ?= 0x400000
+DOS_CFLAGS += -DDOS_FOLD_DOMAIN=$(DOS_FOLD_DOMAIN)u
+
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
 
 # ...but NOT for the XMS services. Every entry point in dos_xms.c is a cold hook
