@@ -2330,6 +2330,27 @@ DOS_CFLAGS_EXTRA ?=
 # the arena's cold startup path became its own object (dos_arena.o) and moved
 # into .xip_dos, external flash, which is what that section is for; and the
 # static fallback array went to zero pages, immediately below.
+# DOS_MEM_TRIM -- AXI SRAM handed back at the LINK, by making mem[] shorter.
+#
+# RAM_SIZE = DOS_MAPPED_SIZE + 4 - DOS_MEM_TRIM - DOS_DEMAND_SIZE, so this comes
+# straight off the guest RAM array. Guest [0x100000-N, 0x100000) then has no
+# SRAM behind it and is served by ONE zero page in the AHB block, armed by
+# dos_cpu_init() itself (dos_trim_arm_self()). No flash, no cached .dsk, no
+# zero-run scan, and -- unlike the DOS_XIP_CACHE path this replaces -- nothing
+# that can refuse to start a title.
+#
+# 0xD000 = 53,248 B IS THE HARD MAXIMUM and 8086tiny.c #errors above it: the
+# emulator's register file lives at guest 0xF0000-0xF2FFF and is the hottest
+# read/write data in the machine, so the trim can never reach below 0xF3000.
+#
+# THE BET, AND IT IS MEASURED. The region is not immutable -- every boot writes
+# 38 bytes of BIOS scratch into it. It is safe because COW catches those stores,
+# which is why the pool pairing below is not optional. test286/runtrimzero.sh
+# sweeps all fourteen shipped images at 0xD000: each boots, is byte-identical to
+# an untrimmed run, copies out exactly 2 granules and loses 0 stores.
+DOS_MEM_TRIM ?= 0xD000
+DOS_CFLAGS += -DDOS_MEM_TRIM=$(DOS_MEM_TRIM)
+
 DOS_COW_ARENA ?= 1
 DOS_CFLAGS += -DDOS_COW_ARENA=$(DOS_COW_ARENA)
 ifeq ($(DOS_COW_ARENA),1)
@@ -2345,7 +2366,28 @@ DOS_CFLAGS += -DDOS_COW_RO_WINDOWS=1
 # common case today -- capacity is 0 and the build behaves as it does with
 # DOS_COW_ARENA=0; the runtime dos_cow_capacity() check in dos_xipsm.c is what
 # makes a window decline rather than lose stores.
+ifeq ($(DOS_MEM_TRIM),0)
 DOS_CFLAGS += -DDOS_COW_POOL_PAGES=0
+else
+# ...UNLESS THE TRIM IS ON, and this pairing is load-bearing rather than
+# cautious. The arena funds the pool AT RUN TIME out of the hole a per-title
+# INT 12h machine size leaves in mem[]; a title with no .dosmeta mach_kb leaves
+# no hole, dos_arena_open() refuses with reason 1, and dos_cow_capacity() is 0.
+# That is survivable for dos_xipsm.c because it ASKS before it arms and then
+# declines (docs/memory/19-the-window-with-no-pool.md). A TRIM CANNOT DECLINE:
+# mem[] is physically shorter, the window is the only backing store the tail
+# has, and it is armed on every run of every title.
+#
+# MEASURED, NOT REASONED: test286/runtrimzero.sh arm 4 builds exactly the
+# POOL_PAGES=0 arena flags with no machine size and loses 38 guest stores per
+# boot; arm 5 is the same build with these four static pages and is
+# byte-identical to an untrimmed run. Four is DOS_COW_POOL_MIN, a two-page
+# margin on a floor of two granules measured across all fourteen shipped images
+# (docs/memory/18-why-trim-is-not-on.md section 3).
+#
+# It costs 4 x 4,114 = 16,456 B of BSS back out of the 53,248 the trim reclaims.
+DOS_CFLAGS += -DDOS_COW_POOL_PAGES=4
+endif
 # EVICTION, and it ships WITH the arena or not at all. dos_zram.c has been
 # finished, host-tested (test286/runevict.sh, docs/memory/17-eviction.md) and
 # completely dark since it landed, for want of these two lines. It is what

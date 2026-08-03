@@ -337,75 +337,35 @@ static void dos_xip_cache(const char *path, uint32_t known_size)
 }
 #endif
 
-/* Arm the read-only window over the trimmed BIOS tail. Returns 0 on success,
- * -1 if there is nothing to map it from -- in which case the caller must NOT
- * start the guest, because dos_cpu_init() would be reading its instruction
- * decode tables out of the scratch page.
+/* THE TRIM ARMS ITSELF NOW, INSIDE dos_cpu_init().
  *
- * WHERE THE BYTES COME FROM, and why this is not store_file_in_flash() on the
- * BIOS. The BIOS image is 8,096 bytes and loads at guest 0xF0100, so it ends at
- * 0xF203F; the trim starts at 0xF3000 at the earliest. EVERY BYTE OF THE
- * TRIMMED TAIL IS A ZERO that a real machine's power-on left there, and stays
- * zero for the whole session (docs/memory/05-copy-on-write.md section 7).
- * So what is needed is not the BIOS file -- it is any dos_mem_trim bytes of
- * memory-mapped, readable, permanently-zero storage.
+ * What used to be here: dos_trim_arm(), which looked for the trimmed tail's
+ * bytes inside the CACHED .dsk in external flash. It needed DOS_XIP_CACHE=1
+ * (off by default), then linearly SCANNED that image for a contiguous
+ * dos_mem_trim-byte run of zeros, and when it could not find one the caller
+ * REFUSED TO START THE TITLE. external/8086tiny/docs/memory/18-why-trim-is-
+ * not-on.md section 4 is the post-mortem: BATTLECHESS.dsk is 66,060,288 B
+ * against a 64 MB part and can never be cached, so turning the trim on would
+ * have traded +32 KB of AXI headroom for a title that will not boot. The trim
+ * was therefore never enabled and the headroom was never collected.
  *
- * The cached .dsk is that, and it is already in flash and already held live by
- * gw_flash_alloc's live-range set (invariant I2 in dos_xipimg.h). A FAT floppy
- * image is mostly unallocated clusters, which are zeros. So: scan the cached
- * image for a run of dos_mem_trim zero bytes and map that. If there is no such
- * run -- or no cache at all -- say so and refuse, rather than mapping something
- * that merely looks blank.
+ * dos_trim_arm_self() (external/8086tiny/8086tiny.c) needs none of it. Every
+ * granule of the window points at ONE zero page carried in the AHB block --
+ * 4 KB of AHB SRAM, a region AXI headroom does not pay for -- so 53,248 bytes
+ * of guest address space cost 4,104 bytes of a different memory. No flash, no
+ * cache, no scan, and nothing to refuse. It is called from dos_cpu_init()
+ * itself, which is also the only place that can guarantee it happens before
+ * the BIOS decode tables are read through the fold.
  *
- * THE SCAN IS THE PROOF, not a heuristic: it reads every byte it is about to
- * promise is zero. It costs one linear pass over flash once per session. */
-#if DOS_XIP_CACHE
-static int dos_trim_arm(void)
-{
-    uint32_t run = 0, i;
-
-    if (dos_mem_trim == 0)
-        return 0;                       /* nothing trimmed, nothing to serve */
-    if (dos_xip_base == NULL || dos_xip_size < dos_mem_trim) {
-        printf("DOS: TRIM %u B but no flash image to serve it from\n",
-               (unsigned)dos_mem_trim);
-        return -1;
-    }
-    for (i = 0; i < dos_xip_size; i++) {
-        if (dos_xip_base[i] != 0) { run = 0; continue; }
-        if (++run < dos_mem_trim)
-            continue;
-        {
-            uint8_t *p = dos_xip_base + (i + 1 - dos_mem_trim);
-            /* dos_mem_map() rejects an unaligned host pointer -- the fold's
-             * DOS_COW_TRAP sentinel is 1 and relies on every real entry being
-             * 0 mod 4. Walk the run forward to the first 4-aligned start. */
-            uint8_t *a = (uint8_t *)(((uintptr_t)p + 3u) & ~(uintptr_t)3);
-            if ((uint32_t)(a - p) + dos_mem_trim > run)
-                continue;               /* alignment ate the run; keep looking */
-            if (dos_mem_map_ro(dos_mem_trim_base, dos_mem_trim, a) != 0) {
-                printf("DOS: TRIM window did not take\n");
-                return -1;
-            }
-            printf("DOS: TRIM mem[] is %u B shorter; guest %05X+%X from flash %p\n",
-                   (unsigned)dos_mem_trim, (unsigned)dos_mem_trim_base,
-                   (unsigned)dos_mem_trim, (void *)a);
-            return 0;
-        }
-    }
-    printf("DOS: TRIM no %u B zero run in the cached image\n",
-           (unsigned)dos_mem_trim);
-    return -1;
-}
-#else
-static int dos_trim_arm(void)
-{
-    if (dos_mem_trim == 0)
-        return 0;
-    printf("DOS: TRIM needs DOS_XIP_CACHE=1 to have flash to map\n");
-    return -1;
-}
-#endif
+ * The bytes are provably zero rather than assumed so: DOS_MEM_TRIM is capped
+ * at 0xD000, so the trim starts at guest 0xF3000 at the lowest, and the BIOS
+ * image is 8,096 bytes at 0xF0100 ending at 0xF203F. No legal trim can overlap
+ * a byte the BIOS supplies.
+ *
+ * Evidence: external/8086tiny/test286/runtrimzero.sh -- all fourteen shipped
+ * images at the 0xD000 maximum, each byte-identical to an untrimmed run with
+ * two granules copied out and zero stores lost, against a pool-less negative
+ * control that loses 38 stores per boot at default parameters. */
 
 /* ---- The .xipimg state machine -------------------------------------------
  *
@@ -1084,14 +1044,11 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
                (unsigned long)(HAL_GetTick() - t0_meta));
     }
 
-    /* BEFORE dos_cpu_init(), and after the .dsk cache: init reads the BIOS
-     * decode tables through the fold, so the window over the trimmed tail has
-     * to already be there. */
-    if (dos_trim_arm() != 0) {
-        printf("DOS: refusing to start with a trimmed mem[] and no window\n");
-        return;
-    }
-
+    /* NO TRIM ARMING HERE ANY MORE, AND NO REFUSAL. dos_cpu_init() arms the
+     * trimmed tail itself, from a zero page in the AHB block, before it reads
+     * the BIOS decode tables through the fold -- see the note further up this
+     * file. A title can no longer fail to start because its .dsk was too large
+     * to cache, which is what BATTLECHESS.dsk would have done. */
     int init_rc = dos_cpu_init(argc, argv);
     if (init_rc != 0) {
         printf("DOS: BIOS load failed (%d) - expected %s\n", init_rc, dos_bios_path);
