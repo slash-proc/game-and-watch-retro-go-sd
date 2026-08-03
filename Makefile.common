@@ -2386,7 +2386,12 @@ else
 # (docs/memory/18-why-trim-is-not-on.md section 3).
 #
 # It costs 4 x 4,114 = 16,456 B of BSS back out of the 53,248 the trim reclaims.
-DOS_CFLAGS += -DDOS_COW_POOL_PAGES=4
+#
+# A VARIABLE RATHER THAN A LITERAL since PM3: the pool is the term that decides
+# whether demand paging (below) frees anything at all, so it has to be settable
+# on the make command line beside it. The value is unchanged.
+DOS_COW_POOL_PAGES ?= 4
+DOS_CFLAGS += -DDOS_COW_POOL_PAGES=$(DOS_COW_POOL_PAGES)
 endif
 # EVICTION, and it ships WITH the arena or not at all. dos_zram.c has been
 # finished, host-tested (test286/runevict.sh, docs/memory/17-eviction.md) and
@@ -2440,6 +2445,39 @@ endif
 # says this about <CORE>_CFLAGS_EXTRA; it cost a wrong measurement here too.)
 DOS_FOLD_DOMAIN ?= 0x400000
 DOS_CFLAGS += -DDOS_FOLD_DOMAIN=$(DOS_FOLD_DOMAIN)u
+
+# PM3 -- DEMAND-PAGED CONVENTIONAL MEMORY. Guest [BASE, TOP) keeps its address
+# space and gets its SRAM 4 KB at a time on the first store: mem[] shrinks by
+# TOP-BASE (RAM_SIZE, 8086tiny.c) and the COW pool grows by the granules the
+# guest actually writes. Both default to 0, i.e. OFF, and that is a MEASURED
+# default rather than caution -- see
+# external/8086tiny/docs/memory/25-demand-does-not-pay.md.
+#
+# A pool page costs 4,114 B to hold a 4,096 B granule, so the whole saving is
+# the granules a title never writes. KEEN 4 in play needs 149 pool pages against
+# a 144-granule region, and one static array has to satisfy every title, so at a
+# pool where nothing loses a store the net is -14,564 B: it COSTS AXI. It turns
+# positive only by dropping guest stores (59,993 of them on KEEN 4 at 133), and
+# that is not a trade worth making for a title that runs today.
+#
+# TEN OF TWELVE IMAGES WOULD FREE 150-450 KB EACH. Unlocking that needs a
+# PER-TITLE pool, i.e. PM2's arena -- at which point this is one make flag:
+#
+#   make ... DOS_DEMAND_BASE=0x10000 DOS_DEMAND_TOP=0xA0000 DOS_COW_POOL_PAGES=149
+#
+# NEVER SET THESE WITHOUT SETTING DOS_COW_POOL_PAGES. 8086tiny.c's default
+# derivation is SIZE/GRAN + 2, which gives back exactly what it took -- and is
+# still short of KEEN 4, because dos_seam_sync() takes pool pages BELOW the
+# region and cascades downward. Measure with test286/demandmap.sh --entries and
+# price with test286/demandsize.sh; do not guess.
+#
+# The region must lie inside [0x10000, 0xA0000) and both ends must be
+# 4096-aligned; 8086tiny.c #errors otherwise. The 0x10000 floor is empirical --
+# demand-paging any granule below it breaks a FreeDOS boot
+# (docs/memory/06-straddle-and-demand.md, LOW=1 in test286/rundemand.sh).
+DOS_DEMAND_BASE ?= 0
+DOS_DEMAND_TOP  ?= 0
+DOS_CFLAGS += -DDOS_DEMAND_BASE=$(DOS_DEMAND_BASE) -DDOS_DEMAND_TOP=$(DOS_DEMAND_TOP)
 
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
 
