@@ -184,6 +184,55 @@ XMSHOOK_NAME = "XMSHOOK.SYS"
 # the boot drive, which is A: for a floppy image and C: for --hdd.
 XMSHOOK_LINE = "DEVICE=\\" + XMSHOOK_NAME
 
+# The EMS shim. See external/8086tiny/bios_source/emshook.asm, which explains at
+# length why an expanded memory manager CANNOT be a BIOS handler: a program finds
+# an EMM by fetching the INT 67h vector and comparing the eight bytes at ES:000A
+# with 'EMMXXXX0', and those eight bytes are the name field of a DOS
+# DEVICE-DRIVER HEADER. Only a driver loaded from CONFIG.SYS puts its header at
+# offset 0 of its own segment, so only a DEVICE= line can publish EMS at all.
+#
+# This blob went uncommitted for the whole of the EMS work -- `make bios`
+# produced it, nothing added it to git, and so no image ever carried it and not
+# one guest could reach expanded memory even though dos_ems.c was finished and
+# its host-side test passed. BATTLECHESS ("No expanded memory manager found"),
+# KEEN 4 (asks for 64 KB expanded) and WOLF3D all paid for that.
+EMSHOOK = Path("external/8086tiny/emshook.sys")
+EMSHOOK_NAME = "EMSHOOK.SYS"
+EMSHOOK_LINE = "DEVICE=\\" + EMSHOOK_NAME
+
+# ---------------------------------------------------------------------------
+# Why EMS is ON by default
+# ---------------------------------------------------------------------------
+#
+# The obvious objection is that a driver costs conventional memory and
+# conventional memory is the resource these images are short of. Measured, that
+# cost is 101 bytes of resident code (emshook.sys is the whole driver; its
+# `resident_end` is the end of the file), which DOS rounds up to 112 -- 0.017% of
+# 640 KB. It buys a 2 MB expanded pool that lives entirely outside the guest's
+# 1 MB, so the trade is strongly one way: every byte a title moves into EMS is a
+# byte of conventional memory it stops needing.
+#
+# Nothing else is spent. The 64 KB page frame at 0xE0000 is sixteen rows of
+# dos_cow_pool[]'s already-linked spare (dos_ems.c, "WHERE THE BYTES PHYSICALLY
+# LIVE"), so it costs zero bytes of AXI headroom, and the backing store is a
+# sparse file opened lazily on the first page that misses the arena.
+#
+# It is also non-fatal by construction, which is what makes a blanket default
+# defensible: if no arena can be taken -- a title with no .dosmeta reserves the
+# whole pool and leaves no spare -- dos_ems_init() refuses, and every INT 67h
+# function answers 81h. The guest sees an EMM that reports no free pages, which
+# is a state every EMS-aware program already has to handle, and which is exactly
+# what a real machine with a failed EMM board looks like.
+#
+# EMS_EXCLUDE is the per-title escape hatch, and it is empty: no title has been
+# measured to be worse off. The one hazard worth measuring before adding a name
+# here is thrash -- an EMS page miss is a 16 KB read (and possibly a 16 KB
+# write) against the SD card, so a title that page-switches hard could be slower
+# with EMS than without. Put a name here when a measurement says so, not on
+# suspicion, and `--no-ems` disables it for a one-off build.
+EMS_EXCLUDE: set[str] = set()
+EMS_DEFAULT = True
+
 # Files copied out of the template to make the image bootable. KERNEL.SYS and
 # COMMAND.COM are mandatory; CONFIG.SYS sets SHELL= and is what makes
 # COMMAND.COM load. QUITEMU.COM is 5 bytes and exits the emulator; it is kept on
@@ -1028,6 +1077,57 @@ def xmshook_bytes() -> bytes:
     return XMSHOOK.read_bytes()
 
 
+def emshook_bytes() -> bytes:
+    """The EMSHOOK.SYS blob, or raise if it has not been assembled.
+
+    Same deal as xmshook_bytes(): committed next to `bios`, rebuilt by the same
+    `make -C external/8086tiny bios`.
+    """
+    if not EMSHOOK.is_file():
+        raise DiskFullError(
+            f"{EMSHOOK} is missing -- run `make -C external/8086tiny bios` to "
+            f"assemble it, or pass --no-ems to build an image without an EMS "
+            f"driver (and without expanded memory, which BATTLECHESS requires)")
+    return EMSHOOK.read_bytes()
+
+
+def wants_ems(stem: str | None) -> bool:
+    """Should this title's image carry EMSHOOK.SYS? See EMS_EXCLUDE."""
+    if not EMS_DEFAULT:
+        return False
+    return stem is None or stem not in EMS_EXCLUDE
+
+
+def add_ems_line(text: str, sep: str) -> str:
+    """Put DEVICE=\\EMSHOOK.SYS in a CONFIG.SYS, immediately after the XMS line.
+
+    Order is not load-bearing to DOS -- it processes DEVICE= lines in file order
+    and neither driver depends on the other -- but keeping the pair adjacent
+    makes a generated CONFIG.SYS readable, and putting EMS second keeps the
+    existing XMS-only images diffable against the new ones.
+    """
+    if EMSHOOK_LINE in text:
+        return text
+    if XMSHOOK_LINE in text:
+        return text.replace(XMSHOOK_LINE, XMSHOOK_LINE + sep + EMSHOOK_LINE, 1)
+    return EMSHOOK_LINE + sep + text
+
+
+def patch_config(config: bytes, dos_high: bool, ems: bool) -> bytes:
+    """Apply every DEVICE= line this image wants to a template CONFIG.SYS.
+
+    Split out from enable_dos_high() so that --no-dos-high and EMS are
+    independent: an image built without the XMS shim still gets the EMS one.
+    """
+    if dos_high:
+        config = enable_dos_high(config)
+    if ems:
+        text = config.decode("latin1")
+        sep = "\r\n" if "\r\n" in text else "\n"
+        config = add_ems_line(text, sep).encode("latin1")
+    return config
+
+
 def enable_dos_high(config: bytes) -> bytes:
     """Uncomment DOS=HIGH in a CONFIG.SYS lifted from the FreeDOS template.
 
@@ -1071,9 +1171,10 @@ def enable_dos_high(config: bytes) -> bytes:
 class FreeDosSource(DosSource):
     """external/8086tiny/fd.img -- the shipped, redistributable default."""
 
-    def __init__(self, path: Path, dos_high: bool = True):
+    def __init__(self, path: Path, dos_high: bool = True, ems: bool = True):
         self.path = path
         self.dos_high = dos_high
+        self.ems = ems
         self.reader = Fat12Reader(path)
         self.label = describe_dos(self.reader, path)
 
@@ -1091,11 +1192,13 @@ class FreeDosSource(DosSource):
                 if name in REQUIRED_SYSTEM_FILES:
                     raise DiskFullError(f"{self.path}: missing required {name}")
                 continue
-            if name == "CONFIG.SYS" and self.dos_high:
-                content = enable_dos_high(content)
+            if name == "CONFIG.SYS":
+                content = patch_config(content, self.dos_high, self.ems)
             out.append((name, content, ATTR_ARCHIVE))
         if self.dos_high:
             out.append((XMSHOOK_NAME, xmshook_bytes(), ATTR_ARCHIVE))
+        if self.ems:
+            out.append((EMSHOOK_NAME, emshook_bytes(), ATTR_ARCHIVE))
         return out
 
     def listing(self):
@@ -1113,7 +1216,8 @@ class MsDosSource(DosSource):
     """
 
     def __init__(self, media: list[Path], utils: list[str] = (),
-                 quitemu: bytes | None = None, dos_high: bool = True):
+                 quitemu: bytes | None = None, dos_high: bool = True,
+                 ems: bool = True):
         if not media:
             raise DiskFullError("no MS-DOS media given (--media)")
         self.readers = {}
@@ -1140,6 +1244,7 @@ class MsDosSource(DosSource):
         self.utils = [u.upper() for u in utils]
         self.quitemu = quitemu
         self.dos_high = dos_high
+        self.ems = ems
         self.label = describe_dos(self.readers[self.boot_disk], self.boot_disk)
 
     @property
@@ -1167,11 +1272,14 @@ class MsDosSource(DosSource):
             ("IO.SYS", boot.read("IO.SYS"), ATTR_SYSTEM_FILE),
             ("MSDOS.SYS", boot.read("MSDOS.SYS"), ATTR_SYSTEM_FILE),
             ("COMMAND.COM", boot.read("COMMAND.COM"), ATTR_ARCHIVE),
-            ("CONFIG.SYS", msdos_config_sys(self.dos_high).encode("latin1"),
+            ("CONFIG.SYS",
+             msdos_config_sys(self.dos_high, self.ems).encode("latin1"),
              ATTR_ARCHIVE),
         ]
         if self.dos_high:
             out.append((XMSHOOK_NAME, xmshook_bytes(), ATTR_ARCHIVE))
+        if self.ems:
+            out.append((EMSHOOK_NAME, emshook_bytes(), ATTR_ARCHIVE))
         if self.quitemu is not None:
             out.append(("QUITEMU.COM", self.quitemu, ATTR_ARCHIVE))
         for name in self.utils:
@@ -1190,7 +1298,7 @@ class MsDosSource(DosSource):
         )
 
 
-def msdos_config_sys(dos_high: bool = True) -> str:
+def msdos_config_sys(dos_high: bool = True, ems: bool = True) -> str:
     """CONFIG.SYS for the MS-DOS path.
 
     Deliberately almost empty. There is no SHELL= line: MS-DOS defaults to
@@ -1212,6 +1320,8 @@ def msdos_config_sys(dos_high: bool = True) -> str:
     lines = ["REM Generated by tools/mkdosdisk.py -- 286 core with an HMA (no HIMEM needed)."]
     if dos_high:
         lines += [XMSHOOK_LINE, "DOS=HIGH"]
+    if ems:
+        lines += [EMSHOOK_LINE]
     lines += ["FILES=20", "BUFFERS=15"]
     return "\r\n".join(lines) + "\r\n"
 
@@ -1956,6 +2066,12 @@ def main() -> int:
                              "stays in conventional memory, costing a game ~45 KB "
                              "-- an escape hatch for a guest that dislikes the HMA, "
                              "not a default worth choosing.")
+    parser.add_argument("--no-ems", dest="ems", action="store_false",
+                        help="Do not put DEVICE=\\EMSHOOK.SYS in CONFIG.SYS. The "
+                             "guest then finds no expanded memory manager, which "
+                             "is what every image built before this flag existed "
+                             "did -- and is why BATTLECHESS refused to start. "
+                             "Saves 112 bytes of conventional memory.")
     parser.add_argument("--cow-pages", type=int, default=None, metavar="N",
                         help="COW pool reservation for the .dosmeta sidecar, "
                              "overriding the measured COW_PAGES table. Measure "
@@ -1992,12 +2108,14 @@ def main() -> int:
             # comparable against the hand-built ones it replaces.
             quitemu = None if args.hdd else load_quitemu(args.template)
             source: DosSource = MsDosSource(media, utils, quitemu,
-                                            dos_high=not args.no_dos_high)
+                                            dos_high=not args.no_dos_high,
+                                            ems=args.ems)
         else:
             if not args.template.is_file():
                 print(f"error: template not found: {args.template}", file=sys.stderr)
                 return 1
-            source = FreeDosSource(args.template, dos_high=not args.no_dos_high)
+            source = FreeDosSource(args.template, dos_high=not args.no_dos_high,
+                                   ems=args.ems)
     except DiskFullError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -2085,6 +2203,12 @@ def main() -> int:
             print(f"  {src}: does not exist", file=sys.stderr)
             failures += 1
             continue
+        # Per title, and set here rather than at construction because one
+        # invocation packs many inputs from one DosSource. RULE 2: a title on
+        # EMS_EXCLUDE loses EMS and nothing else, and no title can take it away
+        # from any other.
+        source.ems = args.ems and wants_ems(
+            args.name if args.bare else (src.stem if src.is_file() else src.name))
         try:
             # A payload that cannot fit a floppy is not a failure to report, it
             # is a hard disk: the alternative is telling the user their game is
