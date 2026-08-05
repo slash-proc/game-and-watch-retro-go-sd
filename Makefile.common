@@ -2422,29 +2422,120 @@ endif
 # a hook added to the fold. What it costs is .bss, in 8086tiny.o (the map, and
 # two granule bitmaps) and in dos_zram.o (the store's per-granule arrays).
 #
-# WHY 4 MB AND NOT THE 8 MB THE DESIGN RECOMMENDS. Both were linked, and the
-# choice is about what the headroom is FOR, not about the extent:
+# IT IS NOW 8 MB, WHICH IS WHAT THE DESIGN ALWAYS RECOMMENDED. The history is
+# kept because the reasoning that held it at 4 MB was correct at the time and
+# the numbers are still the numbers. Measured then:
 #
 #     4 MB   -> 18,304 B of AXI headroom
 #     8 MB   ->  5,632 B
 #    16 MB   -> does not link
 #
-# Nothing can USE extended memory until protected mode exists (PM8), and neither
-# PM8 nor 386 phase 2 (PM14) can be BUILT inside 5,632 B -- 386 phase 1 alone
-# cost 8,296 B of overlay text. Shipping 8 MB now would spend the entire budget
-# on an address space no guest can reach yet, and block the work that would make
-# it reachable. So: 4 MB while the CPU work lands, then raise it.
+# The argument for 4 MB was that nothing could USE extended memory until
+# protected mode existed, that neither PM8 nor 386 phase 2 could be BUILT inside
+# 5,632 B, and that shipping 8 MB would therefore spend the whole budget on an
+# address space no guest could reach and block the work that would make it
+# reachable. That was true, and the CPU work it protected has since landed.
 #
-# RAISE IT TO 0x800000 the moment PM2 (the arena) or PM3 (DOS_DEMAND_SIZE) frees
-# the ~14 KB back, and re-link. It is one word and costs no redesign, which is
-# the whole point of it being a variable. 16 MB needs the arena first.
+# WHAT SUPERSEDES IT is not that the headroom came back -- it is that headroom
+# stopped being the right thing to decide this on. The guest RAM array is being
+# replaced by a pool, so the static figure above is measuring a term that is on
+# its way out, and the decision recorded here is that the extent of the guest's
+# physical address space is a correctness property and must not be gated on a
+# number that a concurrent change is about to invalidate.
+#
+# 16 MB still needs the arena first, and is still unmeasured at these flags.
+#
+# ---------------------------------------------------------------------------
+# IT LINKS, WITH 244 B TO SPARE, AND IT DID NOT ON THE FIRST ATTEMPT. The whole
+# sequence is recorded because the number that matters is uncomfortable and
+# somebody will want to know exactly how it was arrived at.
+#
+# First attempt, 0x800000 on top of this session's other two changes:
+#
+#   ld: Error: DOS code + guest RAM would overflow the LCD bonus area + RAM_EMU
+#   (the ASSERT at STM32H7B0VBTx_SDCARD.ld:1188)
+#
+# AXI headroom (__RAM_EMU_END__ - _OVERLAY_DOS_BSS_END), all at 4 MB:
+#
+#   dos-integration as it stood                            9,816 B
+#   + the .dosset per-title settings module                 4,716 B   (-5,100)
+#   + DOS_SS_BIG_STACK=1 (see below)                          628 B   (-4,088)
+#   + settings text moved to .xip_dos                       4,724 B   (+4,096)
+#
+# and raising the domain to 8 MB then costs:
+#
+#   8086tiny.o  .bss   827,462 -> 827,718                     +256 B
+#   dos_zram.o  .bss     9,912 ->  14,136                   +4,224 B
+#                                                           +4,480 B
+#
+#   4,724 - 4,480 = 244 B, which is what the 8 MB link actually reports.
+#
+# NOTE THE 4 KB CLIFFS (line 2323 above). Neither of the two costs in the first
+# table is the size of what was added: each is text growth of well under 4 KB
+# that pushed .overlay_dos_bss by a whole granule. The move that paid for this
+# was likewise not a saving of 4,096 B of code -- it was 2,548 B of cold text
+# (dos_settings.o + dos_settings_rg.o) leaving .overlay_dos for the XIP blob,
+# which happened to take the section back down one page. dos_meta.o is in
+# .xip_dos for exactly the same reason and the header there says so.
+#
+# 244 B IS NOT A MARGIN, AND THIS IS THE HONEST WARNING. Any object in
+# .overlay_dos growing by a byte re-links at a 4 KB cliff and this fails. If it
+# does, the answer is NOT to drop back to 4 MB by reflex -- read the paragraph
+# above about what headroom is and is not the right input to -- but the next
+# person to add a kilobyte of DOS code will meet this, and should expect to.
+# ---------------------------------------------------------------------------
 #
 # NOTE: DOS_CFLAGS IS NOT A MAKE DEPENDENCY. Changing this recompiles nothing --
 # `touch external/8086tiny/8086tiny.c external/8086tiny/dos_zram.c` first or you
 # will link the previous extent and read the previous headroom. (Root CLAUDE.md
 # says this about <CORE>_CFLAGS_EXTRA; it cost a wrong measurement here too.)
-DOS_FOLD_DOMAIN ?= 0x400000
+DOS_FOLD_DOMAIN ?= 0x800000
 DOS_CFLAGS += -DDOS_FOLD_DOMAIN=$(DOS_FOLD_DOMAIN)u
+
+# HONOUR SS.B ON THE HOT-PATH STACK MACROS -- i.e. use ESP rather than SP when
+# the stack segment's descriptor says 32-bit. DEFAULTS ON.
+#
+# IT DEFAULTED OFF UNTIL NOW, and that decision was not caution: it was measured
+# (test286/sscost.sh) and it was right. R_M_PUSH/R_M_POP are PUSH/POP/CALL/RET
+# traffic, ~19.5% of interpreted instructions by the opcode histogram, and
+# honouring SS.B there is a byte load and a branch on every one of them. At the
+# time the flag was written that bought exactly nothing, because no guest this
+# core could run ever set SS.B, and buying a hot-path cost for an unreachable
+# feature is the shape of experiment that has lost six times in this tree.
+#
+# WHAT CHANGED IS THE OTHER SIDE OF THE TRADE, not the cost. DOS/4GW titles are
+# now in scope, an extender sets SS.B as a matter of course, and a 32-bit code
+# segment with a 16-bit stack is a machine nobody builds. With the flag off the
+# hot-path macros SILENTLY use 16-bit SP whatever the descriptor says -- the
+# guest does not fault, it just runs on the wrong stack -- so the failure mode of
+# leaving it off is a title that misbehaves for no visible reason.
+#
+# WHAT IT COSTS, re-measured on today's sources rather than quoted from the
+# original note (`sh test286/sscost.sh`, arm-none-eabi-gcc -O3, shipping flags):
+#
+#     dos_cpu_frame   8,933 -> 9,119 instructions   (+186, 2.0% of the function)
+#     8086tiny.o text   64,648 -> 65,408 bytes      (+760)
+#
+# The 6.0%/+1,384 B in 8086tiny.c's comment block is the ORIGINAL measurement and
+# is left there as the record of it; the interpreter has moved underneath it
+# since. Re-run the script rather than trusting either number.
+#
+# AND THE 2.0% IS NOW REFUNDABLE PER TITLE. This is a build-time floor, not the
+# final say: a real-mode-only title can turn SS.B handling back off for itself
+# through the .dosset settings file (DOS_SET_SS_BIG_STACK, external/8086tiny's
+# dos_settings.h), which clears the descriptor bit on the cold segment-load path
+# and costs the hot path nothing to offer -- dos_cpu_frame's disassembly is
+# byte-for-byte identical with and without that switch.
+#
+# SETTING THIS TO 0 DISABLES THE PER-TITLE SETTING TOO, because it compiles the
+# 32-bit arm out of the macros entirely. It is kept as a flag only so that
+# test286/sscost.sh has two arms to compare; there is no reason to ship it off.
+#
+# NOTE: DOS_CFLAGS IS NOT A MAKE DEPENDENCY -- see the block above. `touch
+# external/8086tiny/8086tiny.c` before re-linking or you will measure the
+# previous setting.
+DOS_SS_BIG_STACK ?= 1
+DOS_CFLAGS += -DDOS_SS_BIG_STACK=$(DOS_SS_BIG_STACK)
 
 # PM3 -- DEMAND-PAGED CONVENTIONAL MEMORY. Guest [BASE, TOP) keeps its address
 # space and gets its SRAM 4 KB at a time on the first store: mem[] shrinks by

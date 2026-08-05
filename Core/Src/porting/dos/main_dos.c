@@ -22,6 +22,12 @@
 #include "dos_xms.h"     /* dos_xms_grown_bytes -- the backing-store zero-fill */
 #include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
 #include "dos_fbs.h"     /* the FAST-BOOT SNAPSHOT container (external/8086tiny) */
+/* PER-TITLE USER SETTINGS, and note that this is NOT dos_meta.h above it. That
+ * one is packaging-time CONTENT about a title, keyed on the .dsk's bytes and
+ * correctly invalidated when the image is rebuilt; this one is what the USER
+ * chose, keyed on the title's path so that rebuilding the image does not throw
+ * it away. dos_settings.h has the full argument. */
+#include "dos_settings_rg.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -1067,6 +1073,19 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
                (unsigned long)(HAL_GetTick() - t0_meta));
     }
 
+    /* PER-TITLE USER SETTINGS, and BEFORE dos_cpu_init() for a concrete reason:
+     * dos_ss_big_cfg is read on the segment-load path, and dos_cpu_init() runs
+     * guest-visible BIOS setup. A setting applied afterwards would take effect
+     * at whatever moment the guest next reloaded SS, which is exactly the kind
+     * of half-applied state that makes a working feature look intermittent.
+     *
+     * There is no failure path. A missing card, a missing file and a corrupt
+     * file all mean "defaults" and all say which; none of them stops a title.
+     * The fopen is transient -- it is closed before dos_cpu_init() takes its
+     * three long-lived handles out of MAX_OPEN_FILES = 8. */
+    dos_settings_rg_load(ACTIVE_FILE->path);
+    dos_settings_rg_apply();
+
     /* NO TRIM ARMING HERE ANY MORE, AND NO REFUSAL. dos_cpu_init() arms the
      * trimmed tail itself, from a zero page in the AHB block, before it reads
      * the BIOS decode tables through the fold -- see the note further up this
@@ -1112,14 +1131,21 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * dos_cpu.c; this file only owns the menu row. */
     char dos_cpu_speed_value[DOS_CPU_VALUE_LEN];
     char dos_screen_freq_value[DOS_SCREEN_FREQ_VALUE_LEN];
+    /* The first PER-TITLE setting, and the only one so far: the rest of the ids
+     * in dos_settings.h are persisted but have no row and nothing reading them.
+     * Unlike the two rows above it, this one is stored per title in a .dosset
+     * beside the title's saves, and it takes effect at the next launch. */
+    char dos_settings_ssbig_value[DOS_SETTINGS_VALUE_LEN];
     odroid_dialog_choice_t options[] = {
         ODROID_DIALOG_CHOICE_SEPARATOR,
-        {200, "CPU speed",      dos_cpu_speed_value,    1, &dos_cpu_speed_update_cb},
-        {201, "Screen Freq Hz", dos_screen_freq_value,  1, &dos_screen_freq_update_cb},
+        {200, "CPU speed",      dos_cpu_speed_value,       1, &dos_cpu_speed_update_cb},
+        {201, "Screen Freq Hz", dos_screen_freq_value,     1, &dos_screen_freq_update_cb},
+        {202, "32-bit stack",   dos_settings_ssbig_value,  1, &dos_settings_ssbig_update_cb},
         ODROID_DIALOG_CHOICE_LAST};
     /* Populate the value strings before the menu can be opened. */
     dos_cpu_speed_update_cb(&options[1], ODROID_DIALOG_INIT, 0);
     dos_screen_freq_update_cb(&options[2], ODROID_DIALOG_INIT, 0);
+    dos_settings_ssbig_update_cb(&options[3], ODROID_DIALOG_INIT, 0);
 
     dos_cpu_speed_init();
 
