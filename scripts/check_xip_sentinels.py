@@ -47,11 +47,20 @@ NM = "arm-none-eabi-nm"
 
 # name -> (base, section, start_symbol, end_symbol)
 #
-# start/end bound the region the firmware actually scans. For DOS that is
-# [_DOS_MAIN_CODE_END, _OVERLAY_DOS_LOAD_END) -- main_dos.o is deliberately
-# outside it because it *defines* the sentinel constant.
+# start/end bound the region the firmware actually scans. For DOS that is the
+# WHOLE of .overlay_dos, main_dos.o included.
+#
+# It used to start at _DOS_MAIN_CODE_END, mirroring a firmware pass that skipped
+# main_dos.o because that object defines the sentinel constant and a blind scan
+# could not tell the definition from a reference. That split was removed (see
+# dos_cache_xip_to_flash()): main_dos.c takes the ADDRESS of three menu
+# callbacks that live in the blob, those land in its literal pool where no
+# veneer placement can reach them, and the core refused to start because of it.
+# The firmware now patches this object too and skips only the exact bare value,
+# so the "no instruction may spell a sentinel" guarantee has to cover it as
+# well -- which is what widening the window here buys.
 TARGETS = [
-    ("dos", 0xDED00000, ".overlay_dos", "_DOS_MAIN_CODE_END", "_OVERLAY_DOS_LOAD_END"),
+    ("dos", 0xDED00000, ".overlay_dos", "__ram_emu_dos_start__", "_OVERLAY_DOS_LOAD_END"),
 ]
 
 # The blob size the firmware compares against is the .xip blob's size. Using the

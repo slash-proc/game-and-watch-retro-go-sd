@@ -138,19 +138,28 @@ unsigned int dos_host_millis(void)
 }
 
 /* ------------------------------------------------------- emulator XIP ---
- * The cold half of the port does not live in RAM. dos_font_data.o (the CP437
- * glyphs), dos_osk.o (the on-screen keyboard) and dos_xms.o (the XMS/HMA
- * driver) are linked at a sentinel address instead, shipped as one file --
- * /cores/dos.xip -- cached into QSPI NOR, and executed and read straight out
- * of it.
+ * The cold half of the port does not live in RAM. It is linked at a sentinel
+ * address instead, shipped as one file -- /cores/dos.xip -- cached into QSPI
+ * NOR, and executed and read straight out of it. It started as three objects
+ * (the CP437 glyphs, the OSK, the XMS driver) and is now eighteen; the
+ * membership list and, more importantly, the POLICY that decides it live in the
+ * .xip_dos comment in STM32H7B0VBTx_SDCARD.ld. Read that before adding a
+ * build/dos/*.o anywhere.
  *
  * WHY, in bytes. .overlay_dos_bss holds mem[], 778 KB of guest RAM, and it
  * starts at the first 4 KB boundary after .overlay_dos's code and rodata. So
  * code removed from the overlay becomes guest memory -- but only in 4,096-byte
- * quanta, which is why three objects move and not one. Measured:
- * _OVERLAY_DOS_BSS_END 0x240fe010 -> 0x240fb018 against __RAM_EMU_END__
- * 0x24100000, i.e. 8,176 B of headroom -> 20,456 B. That is what unblocks EGA
- * 0Eh/0Fh/10h and the 4K decode cache (external/8086tiny/docs/handover.md).
+ * quanta, which is why objects move in GROUPS and not one at a time. First
+ * measurement, when this landed: _OVERLAY_DOS_BSS_END 0x240fe010 -> 0x240fb018
+ * against __RAM_EMU_END__ 0x24100000, i.e. 8,176 B of headroom -> 20,456 B.
+ * That is what unblocked EGA 0Eh/0Fh/10h and the 4K decode cache
+ * (external/8086tiny/docs/handover.md).
+ *
+ * Every byte of that has since been spent -- the INT 33h mouse driver, .dosset
+ * per-title settings, DOS_SS_BIG_STACK and DOS_FOLD_DOMAIN at 8 MB. Current
+ * link: _OVERLAY_DOS_BSS_END 0x240ff004, headroom 4,092 B, blob 40,672 B in a
+ * 512 KB sentinel window. Do not quote the numbers above as if they were
+ * today's; read them out of build/gw_retro_go.elf.
  *
  * NO POSITION-INDEPENDENT CODE, and that is the whole trick -- the GBA
  * precedent (main_gba.c:224-243). The blob is linked at DOS_CODE_BASE and
@@ -173,22 +182,34 @@ unsigned int dos_host_millis(void)
  * font are still at 0xDED0xxxx and the first text blit jumps into nothing. The
  * caller returns to the launcher rather than starting the guest.
  *
- * One thing that does NOT need handling here: circular_flash_write() reads in
- * 16 KB buffers (gw_flash_alloc.c:302) and the blob is ~10 KB, so it arrives
- * as a single call and no sentinel word can straddle a buffer boundary. If
- * the blob ever exceeds 16 KB, revisit -- the pass truncates to a word
- * multiple per buffer exactly as gba_relocate_xip() does. */
+ * One thing that does NOT need handling here -- and the REASON changed once the
+ * blob outgrew a single buffer. circular_flash_write() reads in 16 KB chunks
+ * (gw_flash_alloc.c:302). The note here used to say the blob was ~10 KB so it
+ * arrived in one call and no sentinel word could straddle a chunk boundary;
+ * that stopped being true at 40,672 B, which is three chunks. It is still safe
+ * for a different reason, the one that loop states about itself: `want` is
+ * sizeof(buffer), a multiple of 4, except at end of file -- and the blob's own
+ * size is 8-aligned by the ALIGN(8) in .xip_dos -- so no 32-bit word ever spans
+ * two chunks. The `length & ~3u` truncation below is the belt for the odd tail
+ * case, exactly as gba_relocate_xip() does it. */
 #define DOS_CODE_BASE  0xDED00000u
 #define DOS_XIP_PATH   "/cores/dos.xip"
 
 static uint8_t *g_dos_xip_addr;
 static uint32_t g_dos_xip_size;
 
-static int patch_dos_sentinels(uint32_t *start, uint32_t *end, int32_t offset, uint32_t size)
+/* skip_base: leave a word that is EXACTLY DOS_CODE_BASE alone. Set only for
+ * main_dos.o's own region, which is where the defining constant lives. It must
+ * stay 0 for the rest of the overlay: dos_video_blit legitimately references
+ * __xip_dos_start__, i.e. base + 0, and that one has to be relocated. */
+static int patch_dos_sentinels(uint32_t *start, uint32_t *end, int32_t offset, uint32_t size,
+                               int skip_base)
 {
     int patched = 0;
     for (uint32_t *p = start; p < end; p++) {
         uint32_t v = *p;
+        if (skip_base && v == DOS_CODE_BASE)
+            continue;
         /* & ~1 so a Thumb function pointer matches; the bit is preserved by
          * adding the offset to the original value. */
         if ((v & ~1u) >= DOS_CODE_BASE && (v & ~1u) < DOS_CODE_BASE + size) {
@@ -205,7 +226,7 @@ static void dos_relocate_xip(uint8_t *buffer, uint32_t length, uint32_t offset_i
     (void)offset_in_file;
     int32_t offset = (int32_t)((uint32_t)file_address - DOS_CODE_BASE);
     patch_dos_sentinels((uint32_t *)buffer, (uint32_t *)(buffer + (length & ~3u)),
-                        offset, file_size);
+                        offset, file_size, 0);
 }
 
 static void dos_xip_code_progress(uint32_t total, uint32_t done, uint8_t pct)
@@ -233,24 +254,52 @@ static int dos_cache_xip_to_flash(void)
     offset = (int32_t)((uint32_t)g_dos_xip_addr - DOS_CODE_BASE);
     n = patch_dos_sentinels((uint32_t *)_DOS_MAIN_CODE_END,
                             (uint32_t *)_OVERLAY_DOS_LOAD_END,
-                            offset, g_dos_xip_size);
+                            offset, g_dos_xip_size, 0);
+
+    /* ...and now main_dos.o's OWN region, which used to be scanned only to be
+     * *rejected*. That was wrong, and it was already broken before anyone
+     * noticed, because the link never got as far as running.
+     *
+     * The original reasoning was: main_dos.o defines DOS_CODE_BASE, a blind
+     * scan cannot tell the defining constant from a reference to the blob, so
+     * exclude the whole object and assert that ld happened to place the call
+     * veneers just after it. Two things make that both unnecessary and unsafe:
+     *
+     *   - the constant IS distinguishable. DOS_CODE_BASE is the bare value
+     *     0xDED00000; every genuine reference is base + a non-zero offset (or
+     *     +1 for a Thumb pointer). The guard below has always relied on exactly
+     *     that test -- it just used it to reject rather than to skip.
+     *   - main_dos.c does not only *call* into the blob, it TAKES ADDRESSES
+     *     into it: the odroid_dialog_choice_t option table is built here and
+     *     holds &dos_settings_ssbig_update_cb, &dos_cpu_speed_update_cb and
+     *     &dos_screen_freq_update_cb. Those land in main_dos.o's literal pool,
+     *     not in a veneer, so no placement luck can bring them inside the old
+     *     window. Verified on the merged tree at 18165bfa, before this branch
+     *     moved anything: one stranded ref (0xded08439, the ssbig callback the
+     *     per-title settings feature added). The core would have printed
+     *     "FATAL 1 unrelocated xip refs" and returned to the launcher on every
+     *     single launch.
+     *
+     * So patch this region too, skipping only the exact bare constant. The
+     * blob is at 0x90xxxxxx once relocated, so a patched word can never fall
+     * back inside the sentinel range and no word is visited twice.
+     *
+     * The one thing this DOES give up is the "a code word can never spell a
+     * sentinel" argument, since main_dos.o's instructions are now scanned as
+     * well. That argument is upheld statically instead: the sentinel's high
+     * halfword lives in Thumb's permanently-undefined 0xDE00-0xDEFF space,
+     * which gcc never emits, and scripts/check_xip_sentinels.py now scans the
+     * whole of .overlay_dos rather than stopping at _DOS_MAIN_CODE_END. */
+    n += patch_dos_sentinels((uint32_t *)__ram_emu_dos_start__,
+                             (uint32_t *)_DOS_MAIN_CODE_END,
+                             offset, g_dos_xip_size, 1);
     __DSB();
     __ISB();
 
-    /* The one fragile assumption, made loud rather than left implicit.
-     *
-     * main_dos.c CALLS into the blob (dos_osk_*, dos_xms_*), so ld synthesises
-     * long-branch veneers for those calls, and each veneer carries a sentinel
-     * literal. Measured on this link, ld places them immediately AFTER
-     * main_dos.o -- i.e. inside the scanned window, at 0x24025c94 -- which is
-     * why the pass works. Nothing in the ELF spec pins that down.
-     *
-     * So: the unscanned region [__ram_emu_dos_start__, _DOS_MAIN_CODE_END)
-     * must contain no sentinel word except the DOS_CODE_BASE constant itself
-     * (bare 0xDED00000, two copies: the range compare above and the offset
-     * computation in dos_relocate_xip). Anything else there is a reference the
-     * pass could not reach, and would fault on first use with no clue why.
-     * Costs one 1,168-byte scan, once. */
+    /* Belt and braces, and cheap: nothing but the bare constant may be left in
+     * main_dos.o's region. If this ever fires again the pass has a hole in it,
+     * and the alternative is a fault on first use with no clue why. Costs one
+     * ~2.8 KB scan, once. */
     {
         const uint32_t *q = (const uint32_t *)__ram_emu_dos_start__;
         const uint32_t *qe = (const uint32_t *)_DOS_MAIN_CODE_END;

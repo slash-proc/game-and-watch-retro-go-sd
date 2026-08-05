@@ -1049,10 +1049,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1066,11 +1066,49 @@ INCLUDE build/fceumm_mappers.ld
    * way IN rather than rewriting programmed flash is written out at
    * main_gba.c:224-243.
    *
-   * WHY THESE THREE, and the rule that decides it. .overlay_dos is not just
-   * code: .overlay_dos_bss (mem[], 778 KB of guest RAM) starts at the next 4 KB
-   * boundary after it, so every byte of code removed here is a byte of AXI the
-   * guest can have — but only in 4,096-byte quanta. These three are the largest
-   * set that is provably off the interpreter's per-instruction path:
+   * ======================= THE POLICY, NOT A LIST =========================
+   *
+   * DEFAULT: A NEW build/dos/*.o BELONGS HERE. AXI is for the guest and for
+   * genuinely hot code; NOR is cached (measured on silicon: 223.82 cycles for a
+   * cold line fill, 2.02 warm -- 111x, and the warm case is what steady-state
+   * code sees). Putting a new object in .overlay_dos instead is the claim that
+   * needs justifying, not putting it here.
+   *
+   * MUST NOT come here:
+   *   - 8086tiny.o. The per-instruction dispatch loop. Never, no argument.
+   *   - main_dos.o. It is the entry point and it defines DOS_CODE_BASE; it runs
+   *     before the blob is cached, so it cannot live in the blob.
+   *   - anything with .data. Flash is not writable. The `build/dos/*.o
+   *     (.data .data*)` line above deliberately keeps .data for EVERY object in
+   *     RAM, including the ones listed below (dos_xms.o has 4 bytes of it), so
+   *     that is already handled -- but never add a `.data` glob to .xip_dos.
+   *   - anything reached from an ISR, or from the window where OSPI is out of
+   *     memory-mapped mode (i.e. mid flash erase/program). Nothing here is
+   *     today: the flash-writing objects call OUT, they are not called back.
+   *
+   * HOW TO COST A CANDIDATE -- the rule people get wrong, twice so far.
+   * .overlay_dos is not just code: .overlay_dos_bss (mem[], 778 KB of guest
+   * RAM) starts at the next 4 KB boundary after it, so the AXI a move buys is
+   *
+   *     bytes_freed = old_ALIGN4K(overlay_end) - new_ALIGN4K(overlay_end)
+   *
+   * which is ZERO OR A MULTIPLE OF 4,096 and has nothing to do with the size of
+   * the object moved. Moving 2 KB usually buys nothing; moving 300 B can buy
+   * 4,096. PRICE THE BOUNDARY, NOT THE OBJECT: link once, read
+   * _OVERLAY_DOS_LOAD_END and _OVERLAY_DOS_BSS_END out of the ELF, work out how
+   * far the overlay still is from the next page down, and only then argue about
+   * which candidate is coldest. This is why moves land in GROUPS -- three
+   * objects at once when no single one crosses the boundary.
+   *
+   * AFTER ANY CHANGE HERE, `make` runs scripts/check_xip_sentinels.py and it
+   * must print `0 bad`. The relocation is a blind word scan over code and that
+   * script is the only thing between a bad sentinel and a core that loads and
+   * then faults somewhere unrelated. Its scan window is the whole of
+   * .overlay_dos, main_dos.o included -- see dos_cache_xip_to_flash().
+   *
+   * ========================================================================
+   *
+   * The membership, and why each one is safe:
    *
    *   dos_font_data.o  4,096 B  pure CP437 glyph rodata, read by the text blit
    *   dos_osk.o        3,889 B  runs only while the on-screen keyboard is open
@@ -1110,11 +1148,51 @@ INCLUDE build/fceumm_mappers.ld
    *                             AXI headroom was 1,200 B when it was written,
    *                             so there was never anywhere else for it to go.
    *
-   * NOT here, on purpose: 8086tiny.o (dos_cpu_frame, the ~21 KB dispatch loop —
-   * never), dos_video.o and dos_cpu.o (both run every frame, and dos_cpu.o's
-   * MAX-mode chunk loop is inside the frame), dos_input.o and dos_audio.o (per
-   * frame and too small to change the quantum), and main_dos.o (excluded from
-   * the scan, see above).
+   *   dos_cpu.o        2,207 B  and
+   *   dos_input.o        626 B  and
+   *   dos_audio.o        328 B  -- moved together, and they HAD to be together.
+   *                             The merged tree (INT 33h mouse + .dosset +
+   *                             DOS_FOLD_DOMAIN 4 MB -> 8 MB) missed the assert
+   *                             below BY FOUR BYTES, and getting the BSS one
+   *                             page lower needed 2,744 B gone. dos_cpu.o alone
+   *                             is 2,207 and buys NOTHING. All three is 3,161
+   *                             and buys the page: headroom -4 B -> 4,092 B.
+   *                             Textbook "price the boundary, not the object".
+   *
+   *                             This overrides the older note here that said
+   *                             dos_cpu.o "runs every frame" and left it in AXI.
+   *                             It does run every frame, but look at what is in
+   *                             the object: dos_cpu_run_frame() is 200 B and its
+   *                             MAX-mode chunk loop calls straight back out into
+   *                             8086tiny.o; the bulk of the 2,207 B is
+   *                             dos_prof_take_sample() (648 B, once a second),
+   *                             dos_cpu_speed_init(), dos_screen_freq_init() and
+   *                             the two menu callbacks -- all cold. Per frame is
+   *                             ~50 cache lines at 60 Hz against a cache that
+   *                             keeps them; it is not per instruction.
+   *                             dos_input.o and dos_audio.o are one call each
+   *                             per frame, 536 B and 304 B.
+   *                             PERF RISK, FLAGGED AND UNMEASURED ON SILICON:
+   *                             compare the `DOS: prof ... cpi=` series before
+   *                             and after on hardware. If it moved, dos_cpu.o is
+   *                             the one to bring back -- and dos_video.o must
+   *                             come here in the same commit, or the page goes
+   *                             with it and the build stops linking again.
+   *
+   * NOT here, on purpose:
+   *   8086tiny.o  67,608 B  dos_cpu_frame, the dispatch loop. Forbidden.
+   *   main_dos.o   4,571 B  entry point, defines DOS_CODE_BASE, and runs before
+   *                         the blob is cached.
+   *   dos_video.o  4,436 B  dos_video_blit() is 2,936 B of tight pixel loop run
+   *                         over the whole screen every frame -- the second
+   *                         largest per-frame cost in the core and the only
+   *                         object left outside the interpreter that is honestly
+   *                         hot. It is ALSO the next 4 KB page on its own,
+   *                         whenever one is needed. Taking it is a hot-path
+   *                         claim: disassemble the blit and measure cpi on
+   *                         hardware first.
+   *   dos_ospi_bench.o      benchmarks OSPI; running it FROM OSPI would measure
+   *                         the wrong thing. Empty unless enabled anyway.
    *
    * Everything in the blob is reached only through references the load-time
    * sentinel pass patches; nothing in it runs before that pass. */
@@ -1136,6 +1214,9 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_settings_rg.o (.rodata .rodata* .text .text*)
     build/dos/dos_fbs.o (.rodata .rodata* .text .text*)
     build/dos/dos_fbs_glue.o (.rodata .rodata* .text .text*)
+    build/dos/dos_cpu.o (.rodata .rodata* .text .text*)
+    build/dos/dos_input.o (.rodata .rodata* .text .text*)
+    build/dos/dos_audio.o (.rodata .rodata* .text .text*)
     . = ALIGN(8);
     __xip_dos_end__ = .;
     ASSERT(ABSOLUTE(__xip_dos_end__) <= ORIGIN(DOS_CODE) + LENGTH(DOS_CODE),
