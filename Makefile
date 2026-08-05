@@ -544,6 +544,7 @@ $(CORE_DOS)/dos_xms.c \
 $(CORE_DOS)/dos_ems.c \
 $(CORE_DOS)/dos_mouse.c \
 $(CORE_DOS)/dos_meta.c \
+$(CORE_DOS)/dos_settings.c \
 $(CORE_DOS)/dos_xipimg.c \
 $(CORE_DOS)/dos_xipsm.c \
 $(CORE_DOS)/dos_fbs.c \
@@ -556,6 +557,7 @@ Core/Src/porting/dos/dos_cpu.c \
 Core/Src/porting/dos/dos_audio.c \
 Core/Src/porting/dos/dos_ospi_bench.c \
 Core/Src/porting/dos/dos_fbs_glue.c \
+Core/Src/porting/dos/dos_settings_rg.c \
 Core/Src/porting/dos/dos_font_data.c
 
 WSV_C_SOURCES = 
