@@ -65,6 +65,32 @@ extern int dos_regs_set_storage(void *p, unsigned int bytes);
  * the fence knows where that AXI is. A page costs 4,114 B and buys 4,096 B of
  * guest address space. Returns the number of pages it took, 0 if it refused. */
 extern unsigned int dos_cow_pool_add(unsigned char *base, unsigned int bytes);
+/* THE EGA RESERVE, WHICH IS ALSO THE POOL'S COLDEST TIER. One block, two jobs:
+ * until a title sets a planar mode it is registered as pages the evictor can
+ * demote into instead of writing to SD, and the moment a write to 0x3C2 says
+ * "EGA" the emulator purges it and hands the WHOLE block -- page tables
+ * included -- to the planes (dos_ega_cold_claim/dos_ega_cold_vram, from
+ * dos_ega_set_active, which clears the planes anyway, so the metadata costs
+ * nothing in the state this memory was reserved for).
+ *
+ * MUST BE CALLED AFTER EVERY dos_cow_pool_add() AND BEFORE dos_cpu_init():
+ * dos_cow_cap is deliberately NOT advanced over the cold pages, which is what
+ * keeps the hot allocator out of them, so a hot region registered afterwards
+ * would be handed indices that overlap the tier. The emulator refuses that
+ * outright rather than trusting the caller.
+ *
+ * Returns the pages it lends -- 0 under DOS_COW_EVICT=0, where there is no
+ * victim hand to demote with, and where the block is still REMEMBERED so EGA
+ * still gets its full 256 KB. The card lands either way; only the tier is
+ * conditional. This build is DOS_COW_EVICT=1 (Makefile.common). */
+extern unsigned int dos_cow_cold_add(unsigned char *base, unsigned int bytes);
+/* 256 KB = four 64 KB planes, which is the whole EGA/VGA planar address space a
+ * guest can reach through the A000 aperture -- not a budget, a completeness
+ * figure, so it is a constant and not an option. As a cold tier the same block
+ * yields 63 pages (262,144 / 4,114) with 2,962 B unused; that waste is the
+ * price of the tier reusing the pool's carve instead of growing a second,
+ * differently-shaped allocator. */
+#define DOS_EGA_RESERVE_BYTES 262144u
 extern unsigned short *regs16;
 extern unsigned char *regs8;
 extern unsigned char io_ports[];
@@ -1064,10 +1090,31 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * and then memset the owner table over the middle of it. The only correct
      * base is the linker symbol, which is why it is now in gw_linker.h.
      *
-     * 96 PAGES is the request, not a limit found by experiment: the demand
-     * region is 144 granules, and 96 x 4,114 = 394,944 B leaves the rest of the
-     * headroom for the eviction ladder's own allocations and for growth. If the
-     * headroom ever shrinks below that the request is CLAMPED rather than
+     * 96 PAGES WAS THE REQUEST AND NO LONGER FITS. The EGA reserve below takes
+     * 262,144 B out of the same interval, and the two do not both fit:
+     *
+     *     headroom   __RAM_EMU_END__ 0x24100000
+     *              - _OVERLAY_DOS_BSS_END 0x2407c4b4   = 539,468 B
+     *     EGA                                          - 262,144 B
+     *                                                  = 277,324 B for the pool
+     *     277,324 / 4,114                              = 67 pages (275,638 B)
+     *
+     * (96 x 4,114 = 394,944, and 394,944 + 262,144 = 657,088 > 539,468. The
+     * clamp below would have silently cut the pool to 277,324 B anyway; making
+     * it 67 explicit is the difference between a decision and an accident.)
+     *
+     * WHY THE POOL IS THE ONE THAT GIVES. A plane size is not negotiable -- the
+     * card is 256 KB or it is the shipped 32 KB, there is nothing in between
+     * that a title asks for -- whereas the pool degrades smoothly, and it
+     * degrades into the very block being taken from it. The measured ladder is
+     * 96 pages = 0 evictions, 48 = 24, 40 = 228, 32 = 12,472 (39,889 stores
+     * lost, memory diverged); 67 sits above 48, so the expected cost is under
+     * two dozen evictions, and 63 of them land in the cold tier rather than on
+     * SD -- at 22 of 44 hot pages the measurement was 22 demotions and ZERO
+     * evictions to the backing store, i.e. the tier replaced SD traffic rather
+     * than deferring it. Net capacity is 67 hot + 63 cold, not 67.
+     *
+     * If the headroom ever shrinks further the request is CLAMPED rather than
      * overrunning -- an assert here would trade a real title for a tidy
      * invariant, and dos_cow_stats()'s `lost` is what makes a short pool
      * visible in the log.
@@ -1076,11 +1123,31 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * table itself, precisely because a registered block carries no promise. */
     {
         unsigned char *pool_base = (unsigned char *)_OVERLAY_DOS_BSS_END;
-        unsigned char *pool_lim  = (unsigned char *)&__RAM_EMU_END__;
+        /* THROUGH uintptr_t, NOT POINTER ARITHMETIC ON &__RAM_EMU_END__. The
+         * linker symbol has a one-element array type, so `&__RAM_EMU_END__ -
+         * 262144` made gcc 15.2 emit "array subscript -65536 is outside array
+         * bounds of 'uint32_t[1]'" -- and a -Warray-bounds hit here is not
+         * cosmetic: the same object-size reasoning that produced the diagnostic
+         * is entitled to fold the `ega_base < pool_base` sanity check below to
+         * a constant, deleting the one thing standing between a bad base and
+         * the launcher's memory. Laundering the address through an integer is
+         * what stops the compiler reasoning about an "object" that is really
+         * just an address. */
+        uintptr_t      ram_top   = (uintptr_t)&__RAM_EMU_END__;
+        unsigned char *ram_lim   = (unsigned char *)ram_top;
+        /* THE EGA RESERVE IS PINNED TO THE TOP OF RAM_EMU, and the pool grows up
+         * underneath it. Derived from the linker symbol, exactly as pool_base
+         * is, and for the same reason -- see the mem[] note above; a base
+         * computed from an object inside .overlay_dos_bss is not a base, it is
+         * a coincidence. Anchoring the fixed-size block to the fixed end of the
+         * region and letting the elastic one clamp also means a future BSS
+         * growth costs pool pages, never a corrupted 256 KB card. */
+        unsigned char *ega_base  = (unsigned char *)(ram_top - DOS_EGA_RESERVE_BYTES);
+        unsigned char *pool_lim  = ega_base;
         unsigned int   avail     = (pool_lim > pool_base)
                                  ? (unsigned int)(pool_lim - pool_base) : 0u;
-        unsigned int   want      = 96u * 4114u;
-        unsigned int   pages;
+        unsigned int   want      = 67u * 4114u;
+        unsigned int   pages, cold;
 
         if (want > avail)
             want = avail;
@@ -1092,6 +1159,36 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         if (pool_base + want > pool_lim)
             printf("DOS: FATAL cow pool ends %p past RAM_EMU end %p\n",
                    (void *)(pool_base + want), (void *)pool_lim);
+
+        /* ---- THE EGA 256 KB RESERVE, HANDED OVER LAST ----------------------
+         *
+         * LAST on purpose: after every dos_cow_pool_add() and before
+         * dos_cpu_init(). See the declaration -- the emulator refuses a hot
+         * region registered after the cold one, because the cold pages sit
+         * above dos_cow_cap and a later hot region would be given overlapping
+         * indices. Do not move this above the pool registration "for
+         * symmetry".
+         *
+         * The same not-silently rule as the pool: if this block ever ends past
+         * the top of RAM_EMU the planes would be handed launcher memory, and
+         * an EGA title would corrupt it a plane clear at a time with nothing
+         * in the log. It cannot happen while the base is derived by
+         * subtraction from ram_lim, which is exactly why it is -- but the
+         * pool's own base was also "obviously" right once (mem + required) and
+         * was ~25 KB wrong, so the check is cheap insurance, not decoration. */
+        if (ega_base < pool_base || ega_base + DOS_EGA_RESERVE_BYTES > ram_lim) {
+            printf("DOS: FATAL EGA reserve %p..%p outside %p..%p - NOT registered\n",
+                   (void *)ega_base, (void *)(ega_base + DOS_EGA_RESERVE_BYTES),
+                   (void *)pool_base, (void *)ram_lim);
+        } else {
+            cold = dos_cow_cold_add(ega_base, DOS_EGA_RESERVE_BYTES);
+            /* cold == 0 is NORMAL, not an error: it is what a DOS_COW_EVICT=0
+             * build reports, and the 256 KB is remembered for EGA either way.
+             * Logged as a number rather than a verdict for that reason. */
+            printf("DOS: EGA reserve %u B at %p..%p, cold tier %u pages\n",
+                   (unsigned)DOS_EGA_RESERVE_BYTES, (void *)ega_base,
+                   (void *)(ega_base + DOS_EGA_RESERVE_BYTES), cold);
+        }
     }
 
     {
