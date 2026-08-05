@@ -317,6 +317,9 @@ COW_PAGES = {
 COW_PAGES_OVERRIDE: int | None = None
 EMIT_META = True
 
+# Extra CONFIG.SYS lines from --config-line, appended after the generated ones.
+CONFIG_EXTRA: list[str] = []
+
 
 def write_dosmeta(dsk: Path, pages: int | None = None, verbose: bool = True) -> None:
     """Emit the .dosmeta sidecar for a freshly built image.
@@ -1323,6 +1326,11 @@ def msdos_config_sys(dos_high: bool = True, ems: bool = True) -> str:
     if ems:
         lines += [EMSHOOK_LINE]
     lines += ["FILES=20", "BUFFERS=15"]
+    # --config-line, appended last so a caller can override FILES/BUFFERS (MS-DOS
+    # takes the LAST occurrence) and add DEVICE= lines the payload needs. The
+    # payload's own CONFIG.SYS is discarded by collect_payload*, so without this
+    # there is no way to give a guest a driver -- Windows 3.11 needs IFSHLP.SYS.
+    lines += CONFIG_EXTRA
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -2082,14 +2090,21 @@ def main() -> int:
                              "pre-sidecar behaviour)")
     parser.add_argument("--verify", action="store_true",
                         help="Re-open each written image and check it structurally")
+    parser.add_argument("--config-line", action="append", metavar="LINE",
+                        help="Extra CONFIG.SYS line, appended after the generated "
+                             "ones (repeatable), e.g. --config-line "
+                             "'DEVICE=C:\\WINDOWS\\IFSHLP.SYS'. The payload's own "
+                             "CONFIG.SYS is never used -- the generated one wins -- "
+                             "so this is the only way to give a guest a driver line.")
     parser.add_argument("--list-template", "--list-source", dest="list_template",
                         action="store_true",
                         help="List what the selected DOS source contains, and exit")
     args = parser.parse_args()
 
-    global COW_PAGES_OVERRIDE, EMIT_META
+    global COW_PAGES_OVERRIDE, EMIT_META, CONFIG_EXTRA
     COW_PAGES_OVERRIDE = args.cow_pages
     EMIT_META = not args.no_meta
+    CONFIG_EXTRA = list(args.config_line or [])
 
     system = args.system or ("msdos" if args.media is not None else "freedos")
 
