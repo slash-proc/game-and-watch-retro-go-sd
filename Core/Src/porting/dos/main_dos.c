@@ -49,6 +49,22 @@ extern const unsigned int dos_mem_hma_required;
 extern void dos_mem_set_hma(unsigned char *p);
 extern const unsigned int dos_fold_table_required;
 extern void dos_fold_set_table(void *p);
+/* The register file: regs8/regs16, read and written several times per emulated
+ * instruction and the hottest data in the machine. Same hand-over shape as the
+ * fold table and the AHB block -- 8086tiny.c exports the size so the porting
+ * layer cannot drift from it, and falls back to calloc() (the retro-go heap) if
+ * nobody hands a block over. That fallback exists for the ~40 host harnesses in
+ * test286/; on the target taking it would silently move the hottest data in the
+ * emulator out of zero-wait-state DTCM, which is why the call site checks. */
+extern const unsigned int dos_regs_required;
+extern int dos_regs_set_storage(void *p, unsigned int bytes);
+/* THE COW POOL IS REGISTERED, NOT LINKED. Demand paging took guest
+ * [0x10000,0xA0000) out of mem[] at the link (8086tiny.o BSS 790,934 ->
+ * 238,824 B), so the backing store for a first store into that range has to
+ * come back from the AXI those 589,824 bytes became -- and only this side of
+ * the fence knows where that AXI is. A page costs 4,114 B and buys 4,096 B of
+ * guest address space. Returns the number of pages it took, 0 if it refused. */
+extern unsigned int dos_cow_pool_add(unsigned char *base, unsigned int bytes);
 extern unsigned short *regs16;
 extern unsigned char *regs8;
 extern unsigned char io_ports[];
@@ -58,36 +74,37 @@ extern int dos_cpu_frame(int cycles);
 
 /* ---- The AXI SRAM the mapping fold actually gives back ---------------------
  *
- * DOS_MEM_TRIM shortens mem[] by removing guest [dos_mem_trim_base, 0x100000).
- * Those bytes then have NO SRAM behind them and must be served from somewhere
- * read-only, or dos_cpu_init() refuses to run rather than execute a BIOS that
- * is half scratch page. Copy-on-write is what makes serving them from
- * read-only storage safe: a store into the region costs a 4 KB pool page and a
- * memcpy instead of being silently lost.
+ * NO MORE dos_mem_trim / dos_mem_trim_base. The trim shortened mem[] by
+ * removing guest [base, 0x100000); demand paging removed guest
+ * [0x10000, 0xA0000) instead, which is an order of magnitude more, so the trim
+ * and the arena that funded its pool were deleted together. Those two constants
+ * no longer exist in 8086tiny.c, and a stale reference here is a LINK ERROR by
+ * design -- silently keeping a dead knob is the failure this project keeps
+ * paying for (external/8086tiny/docs/traps.md).
  *
- * Both constants come from 8086tiny.c so the porting layer cannot drift from
- * the fold. When the core is built without a trim they are 0 and every branch
- * below folds away.
- *
- * dos_mem_map_ro() is the read-only form of dos_mem_map(): the granules it
- * covers get the real pointer in the READ map and DOS_COW_TRAP in the WRITE
- * map. dos_cow_stats() is what makes an undersized pool visible -- `lost` is
- * the count of stores that had nowhere to go, and it must be 0. */
-extern const unsigned int dos_mem_trim_base;
-extern const unsigned int dos_mem_trim;
+ * dos_mem_map_ro() survives, and is still the read-only form of dos_mem_map():
+ * the granules it covers get the real pointer in the READ map and DOS_COW_TRAP
+ * in the WRITE map. dos_xipsm.c is its only caller now. dos_cow_stats() is what
+ * makes an undersized pool visible -- `lost` is the count of stores that had
+ * nowhere to go, and it must be 0. */
 extern int dos_mem_map_ro(unsigned int gbase, unsigned int len, unsigned char *host);
 extern void dos_cow_stats(unsigned *faults, unsigned *pages_used,
                           unsigned *pool_pages, unsigned *lost);
 
 /* ---- Per-title COW pool sizing --------------------------------------------
  *
- * The pool array is linked for the WORST title, so the AXI it guarantees back
- * is the worst case and the per-title figure (110-458 KB) is thrown away.
- * external/8086tiny/dos_meta.h carries a measured per-title page count from
- * package time in a 64-byte `.dosmeta` sidecar beside the `.dsk`;
- * dos_cow_reserve() applies it, and everything the reservation does not claim
- * becomes the SPARE that dos_cow_arena_spare() offers to EGA planes, page
+ * The pool is one size for every title -- it is the AXI headroom, registered
+ * below, and it cannot be per-title because it is handed over before anything
+ * knows which title is about to run. external/8086tiny/dos_meta.h carries a
+ * measured per-title page count from package time in a 64-byte `.dosmeta`
+ * sidecar beside the `.dsk`; dos_cow_reserve() applies it, and everything the
+ * reservation does not claim becomes the SPARE offered to EGA planes, page
  * flipping and the 4K decode cache.
+ *
+ * (The reclaim ARENA that used to fund the pool per-title out of a mach_kb hole
+ * is gone. Its premise -- that a title's .dosmeta leaves a hole above the INT
+ * 12h machine size -- was the part that kept failing, and a mach_kb swept on a
+ * title that never launches measures the failure, not the title.)
  *
  * READ dos_meta.h BEFORE CHANGING ANY OF THIS. The one thing that matters here:
  * the number is a reservation, not a cap. A title that exceeds it grows back
@@ -395,36 +412,6 @@ static void dos_xip_cache(const char *path, uint32_t known_size)
 }
 #endif
 
-/* THE TRIM ARMS ITSELF NOW, INSIDE dos_cpu_init().
- *
- * What used to be here: dos_trim_arm(), which looked for the trimmed tail's
- * bytes inside the CACHED .dsk in external flash. It needed DOS_XIP_CACHE=1
- * (off by default), then linearly SCANNED that image for a contiguous
- * dos_mem_trim-byte run of zeros, and when it could not find one the caller
- * REFUSED TO START THE TITLE. external/8086tiny/docs/memory/18-why-trim-is-
- * not-on.md section 4 is the post-mortem: BATTLECHESS.dsk is 66,060,288 B
- * against a 64 MB part and can never be cached, so turning the trim on would
- * have traded +32 KB of AXI headroom for a title that will not boot. The trim
- * was therefore never enabled and the headroom was never collected.
- *
- * dos_trim_arm_self() (external/8086tiny/8086tiny.c) needs none of it. Every
- * granule of the window points at ONE zero page carried in the AHB block --
- * 4 KB of AHB SRAM, a region AXI headroom does not pay for -- so 53,248 bytes
- * of guest address space cost 4,104 bytes of a different memory. No flash, no
- * cache, no scan, and nothing to refuse. It is called from dos_cpu_init()
- * itself, which is also the only place that can guarantee it happens before
- * the BIOS decode tables are read through the fold.
- *
- * The bytes are provably zero rather than assumed so: DOS_MEM_TRIM is capped
- * at 0xD000, so the trim starts at guest 0xF3000 at the lowest, and the BIOS
- * image is 8,096 bytes at 0xF0100 ending at 0xF203F. No legal trim can overlap
- * a byte the BIOS supplies.
- *
- * Evidence: external/8086tiny/test286/runtrimzero.sh -- all fourteen shipped
- * images at the 0xD000 maximum, each byte-identical to an untrimmed run with
- * two granules copied out and zero stores lost, against a pool-less negative
- * control that loses 38 stores per boot at default parameters. */
-
 /* ---- The .xipimg state machine -------------------------------------------
  *
  * external/8086tiny/docs/improvement-brainstorming.md §H, and the answer to
@@ -492,8 +479,8 @@ static unsigned long dos_fbs_boot_key;
 /* The observation range: the whole conventional demand region. Deliberately
  * NOT a program image -- this port has no INT 21h hook and should not grow one
  * (02-guest-xip.md §10), and the longest-clean-run rule needs no idea where the
- * program is. Must match 8086tiny.c's DOS_DEMAND_BASE/TOP when demand paging is
- * built in; when it is not, this is still a legal range to observe. */
+ * program is. It matches 8086tiny.c's demand region, which is now fixed at
+ * [0x10000, 0xA0000) rather than a pair of make flags. */
 #define DOS_XIPSM_OBS_BASE 0x10000u
 #define DOS_XIPSM_OBS_LEN  0x90000u
 
@@ -703,7 +690,7 @@ static void dos_xipsm_report(void)
  * on arm-none-eabi 15.x for objects that section takes), so every byte of this
  * driver written here is a byte of AXI the guest cannot have -- and AXI headroom
  * was 1,200 B. Written inline first, it overflowed the link. Same reason
- * dos_arena.c exists as a file of its own (see the .xip_dos comment in
+ * dos_paging.c is in `.xip_dos` rather than the overlay (see the comment in
  * STM32H7B0VBTx_SDCARD.ld).
  *
  * Design: external/8086tiny/dos_fbs.h. Read §1 there first -- the one thing this
@@ -722,8 +709,9 @@ static void dos_xipsm_report(void) { }
 /* One line per session. `lost` is the only number that can be wrong silently:
  * it counts stores that reached a granule with no writable page behind it and
  * were routed to the scratch page. A nonzero value means the pool is too small
- * for what is mapped, and the fix is DOS_COW_POOL_PAGES -- subtracting 4,104
- * bytes per page from whatever the trim reclaimed. */
+ * for what is mapped. The fix is no longer a make flag: raise the page count
+ * dos_cow_pool_add() is called with in app_main_dos(), at 4,114 B a page out of
+ * the AXI headroom that call already prints. */
 static void dos_cow_log(const char *when)
 {
     unsigned faults = 0, pages = 0, pool = 0, lost = 0;
@@ -1028,6 +1016,84 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         dos_fold_set_table(ft);
     }
 
+    /* The register file, same hand-over as the fold table above and for the same
+     * reason: regs8/regs16 are touched several times per emulated instruction,
+     * and in AXI SRAM every one of those is a multi-cycle access. It is only
+     * dos_regs_required bytes (tens, not kilobytes -- the file is 8086 registers
+     * plus flags, not a cache), so the DTCM budget question the fold table has
+     * does not arise here.
+     *
+     * dtcm_calloc, not dtcm_malloc: the block must arrive ZEROED. 8086tiny.c
+     * resets exactly two bytes of it on every boot (REG_ZERO and the always-zero
+     * flag slot) and takes the rest on trust, which is the same contract the
+     * fold table has and the same one a stale DTCM block would break.
+     *
+     * CHECKED, NOT ASSUMED: dos_regs_set_storage() returns 0 and changes nothing
+     * if the block is short or not 8-aligned -- refusing beats a misaligned
+     * `unsigned short *`, which faults on this target. A silent refusal would
+     * leave the emulator on its calloc() fallback, i.e. the hottest data in the
+     * core sitting in the retro-go heap with nothing in the log to say so. */
+    if (dos_regs_required) {
+        void *rf = dtcm_calloc(1, dos_regs_required);
+        if (!rf || !dos_regs_set_storage(rf, dos_regs_required)) {
+            printf("DOS: WARNING regs %u bytes NOT in DTCM (%p) - falling back to heap\n",
+                   (unsigned)dos_regs_required, rf);
+        } else {
+            printf("DOS: regs %u bytes from DTCM at %p\n",
+                   (unsigned)dos_regs_required, rf);
+        }
+    }
+
+    /* ---- THE COW POOL, AND ITS POSITION IS LOAD-BEARING ---------------------
+     *
+     * BEFORE dos_cpu_init() (which binds the pool and would otherwise refuse
+     * with DOS_INIT_ENOPOOL) and BEFORE dos_cow_reserve() further down (which
+     * applies the .dosmeta per-title reservation and needs a capacity to apply
+     * it to). Getting this order wrong cost a debug cycle already.
+     *
+     * WHERE THE MEMORY COMES FROM. Demand paging removed guest
+     * [0x10000,0xA0000) from mem[] at the link, and those 589,824 bytes surfaced
+     * as AXI headroom between the top of the DOS overlay's BSS and the top of
+     * RAM_EMU. That interval is the pool.
+     *
+     * NOT `mem + dos_mem_required`, WHICH IS WHAT THIS WAS FIRST WRITTEN AS.
+     * mem[] is NOT the last object in .overlay_dos_bss -- verified against
+     * build/gw_retro_go.map on this very build: mem is 0x240451c4 + 0x30004 and
+     * ends at 0x240751c8, while _OVERLAY_DOS_BSS_END is 0x2407b47c, so that
+     * expression would have handed the pool ~25 KB of somebody else's live BSS
+     * and then memset the owner table over the middle of it. The only correct
+     * base is the linker symbol, which is why it is now in gw_linker.h.
+     *
+     * 96 PAGES is the request, not a limit found by experiment: the demand
+     * region is 144 granules, and 96 x 4,114 = 394,944 B leaves the rest of the
+     * headroom for the eviction ladder's own allocations and for growth. If the
+     * headroom ever shrinks below that the request is CLAMPED rather than
+     * overrunning -- an assert here would trade a real title for a tidy
+     * invariant, and dos_cow_stats()'s `lost` is what makes a short pool
+     * visible in the log.
+     *
+     * The block is NOT zeroed by hand: dos_cow_pool_add() memsets the owner
+     * table itself, precisely because a registered block carries no promise. */
+    {
+        unsigned char *pool_base = (unsigned char *)_OVERLAY_DOS_BSS_END;
+        unsigned char *pool_lim  = (unsigned char *)&__RAM_EMU_END__;
+        unsigned int   avail     = (pool_lim > pool_base)
+                                 ? (unsigned int)(pool_lim - pool_base) : 0u;
+        unsigned int   want      = 96u * 4114u;
+        unsigned int   pages;
+
+        if (want > avail)
+            want = avail;
+        pages = dos_cow_pool_add(pool_base, want);
+        printf("DOS: cow pool %u pages, %u of %u B at %p (limit %p)\n",
+               pages, want, avail, (void *)pool_base, (void *)pool_lim);
+        /* The one thing that must not happen silently: the block running past
+         * the top of RAM_EMU into whatever the launcher keeps there. */
+        if (pool_base + want > pool_lim)
+            printf("DOS: FATAL cow pool ends %p past RAM_EMU end %p\n",
+                   (void *)(pool_base + want), (void *)pool_lim);
+    }
+
     {
         unsigned char *ahb = (unsigned char *)ahb_only_malloc(dos_mem_ahb_required);
         memset(ahb, 0, dos_mem_ahb_required);
@@ -1136,14 +1202,27 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     dos_settings_rg_load(ACTIVE_FILE->path);
     dos_settings_rg_apply();
 
-    /* NO TRIM ARMING HERE ANY MORE, AND NO REFUSAL. dos_cpu_init() arms the
-     * trimmed tail itself, from a zero page in the AHB block, before it reads
-     * the BIOS decode tables through the fold -- see the note further up this
-     * file. A title can no longer fail to start because its .dsk was too large
-     * to cache, which is what BATTLECHESS.dsk would have done. */
+    /* NO TRIM ARMING HERE ANY MORE, AND NO REFUSAL FOR IT. The trim is gone
+     * entirely -- demand paging reclaims an order of magnitude more without
+     * needing a cached .dsk to serve the tail from, so a title can no longer
+     * fail to start because its image was too large to cache, which is what
+     * BATTLECHESS.dsk would have done. */
     int init_rc = dos_cpu_init(argc, argv);
     if (init_rc != 0) {
-        printf("DOS: BIOS load failed (%d) - expected %s\n", init_rc, dos_bios_path);
+        /* -4 is DOS_INIT_ENOPOOL, and it gets its own line because it is a
+         * WIRING error with an exact remedy, not a missing user file. It means
+         * the dos_cow_pool_add() above returned no pages, so guest
+         * [0x10000,0xA0000) has no backing store at all -- every first store
+         * would be served from the scratch page and lost, counted in
+         * dos_cow_lost and visible nowhere else. That silence is exactly the
+         * failure mode 8086tiny.c added this return code to kill; do not fold
+         * it back into the generic message. */
+        if (init_rc == -4)
+            printf("DOS: no COW pool registered (%d) - AXI headroom above "
+                   "_OVERLAY_DOS_BSS_END is gone; see dos_cow_pool_add() above\n",
+                   init_rc);
+        else
+            printf("DOS: BIOS load failed (%d) - expected %s\n", init_rc, dos_bios_path);
         return;
     }
 

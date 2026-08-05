@@ -1049,10 +1049,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1113,13 +1113,32 @@ INCLUDE build/fceumm_mappers.ld
    *   dos_font_data.o  4,096 B  pure CP437 glyph rodata, read by the text blit
    *   dos_osk.o        3,889 B  runs only while the on-screen keyboard is open
    *   dos_xms.o        2,065 B  the XMS/HMA driver — one INT 2Fh/15h call deep
-   *   dos_arena.o      ~1.9 KB  the reclaim arena's startup path. It runs ONCE,
-   *                             from dos_cpu_init(), after dos_mach_apply() and
-   *                             before the first guest instruction. It exists as
-   *                             its own translation unit for exactly this line:
-   *                             it was inside 8086tiny.c, which can never come
-   *                             here, and its text is what made DOS_COW_ARENA=1
-   *                             fail to link. docs/memory/22-arena-xip.md.
+   *   dos_paging.o     6,074 B  386 paging: CR0.PG, the two-level page-table
+   *                             walk, the 64-entry TLB and #PF. It took this
+   *                             line from dos_arena.o when the reclaim arena was
+   *                             deleted -- the pool is registered from AXI at run
+   *                             time now (main_dos.c, dos_cow_pool_add()).
+   *
+   *                             IT IS HERE BY THE DEFAULT AT THE TOP, AND THAT
+   *                             IS THE HONEST ANSWER TODAY: no shipped DOS title
+   *                             sets CR0.PG, so every byte of this object is
+   *                             unreached and 6 KB of AXI for it would buy
+   *                             nothing. Its 1,138 B of BSS stays in RAM either
+   *                             way (flash is not writable), so the TLB array
+   *                             itself is untouched by this line.
+   *
+   *                             FLAGGED, NOT MEASURED: when a guest DOES enable
+   *                             paging the walk is genuinely hot -- it sits on
+   *                             the memory path rather than being a
+   *                             once-per-launch hook, and it is the only member
+   *                             of this section that could ever be. The first
+   *                             title that sets CR0.PG turns this into a
+   *                             hot-path claim, at which point the rule at the
+   *                             top applies: disassemble, measure cpi on
+   *                             hardware, and only then bring dos_paging.o back
+   *                             into .overlay_dos -- which costs a 4 KB page and
+   *                             so needs something else to come here in the same
+   *                             commit.
    *   dos_zram.o       2,504 B  the COW pool's backing store (DOS_COW_EVICT).
    *                             Reached from dos_cow_fault(), which is itself
    *                             out of line and taken tens of times a second at
@@ -1207,7 +1226,7 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_mouse_ui.o (.rodata .rodata* .text .text*)
     build/dos/dos_xipsm.o (.rodata .rodata* .text .text*)
     build/dos/dos_xipimg.o (.rodata .rodata* .text .text*)
-    build/dos/dos_arena.o (.rodata .rodata* .text .text*)
+    build/dos/dos_paging.o (.rodata .rodata* .text .text*)
     build/dos/dos_zram.o (.rodata .rodata* .text .text*)
     build/dos/dos_meta.o (.rodata .rodata* .text .text*)
     build/dos/dos_settings.o (.rodata .rodata* .text .text*)
