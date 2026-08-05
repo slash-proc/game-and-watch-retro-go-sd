@@ -40,6 +40,8 @@ extern const unsigned int dos_mem_ahb_required;
 extern void dos_mem_set_ahb(unsigned char *p);
 extern const unsigned int dos_mem_hma_required;
 extern void dos_mem_set_hma(unsigned char *p);
+extern const unsigned int dos_fold_table_required;
+extern void dos_fold_set_table(void *p);
 extern unsigned short *regs16;
 extern unsigned char *regs8;
 extern unsigned char io_ports[];
@@ -949,6 +951,27 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * Must be handed over BEFORE dos_cpu_init(), which runs BIOS setup that
      * already touches the shadows. No failure path: ahb_only_malloc() asserts
      * if the pool is short, the same contract every other AHB user here has. */
+
+    /* The fold map: the read/write offset table that dos_fold() indexes on
+     * EVERY guest memory access. It was in .overlay_dos_bss (AXI SRAM,
+     * multi-cycle); putting it in DTCM (zero-wait-state) removes the wait
+     * states from the hottest load in the interpreter.
+     *
+     * BEFORE THE AHB BLOCK, AND THAT IS LOAD-BEARING: dos_mem_set_ahb() calls
+     * dos_fold_map_build(), which writes to this table. If the table pointer is
+     * NULL that is a wild store into address zero.
+     *
+     * dtcm_calloc rather than dtcm_malloc: the table must be zeroed before
+     * dos_fold_map_build() is called, the same contract as the AHB block. The
+     * size is domain-dependent (currently 8 KB at 4 MB domain, interleaved),
+     * exported by 8086tiny.c so the two cannot drift apart. */
+    if (dos_fold_table_required) {
+        void *ft = dtcm_calloc(1, dos_fold_table_required);
+        printf("DOS: fold table %u bytes from DTCM at %p\n",
+               (unsigned)dos_fold_table_required, ft);
+        dos_fold_set_table(ft);
+    }
+
     {
         unsigned char *ahb = (unsigned char *)ahb_only_malloc(dos_mem_ahb_required);
         memset(ahb, 0, dos_mem_ahb_required);
