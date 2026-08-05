@@ -2371,6 +2371,27 @@ DOS_CFLAGS_EXTRA ?=
 # express.
 DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=1
 
+# LOAD ELISION. A guest granule filled whole by an INT 13h read is mapped
+# straight at the .dsk in NOR instead of being copied into a COW pool page, so
+# it costs no pool page at all until the guest writes to it. 8086tiny.c defaults
+# DOS_ELIDE to 0 and compiles an inert arm in its place, so without this line the
+# device build shipped the stubs and the feature had NEVER EXECUTED ON HARDWARE
+# -- while test286/runelide.sh, runelide2.sh and runelide3.sh had been passing
+# on the host all along.
+#
+# IT NEEDS AN IMAGE TO MAP AT, which is why this lands in the same change as
+# DOS_XIP_CACHE going on by default (Core/Src/porting/dos/main_dos.c): with no
+# cached .dsk, dos_elide_set_image() is never called, dos_elide_img stays NULL
+# and every read is declined. The two are one feature and must not be enabled
+# separately.
+#
+# DOS_ELIDE_VERIFY is left at its default of 1. While the INT 13h copy still
+# happens it compares every elided granule against the bytes DOS actually wrote,
+# which is the ONLY evidence on the device that the image-offset arithmetic is
+# right -- `mismatch` in the elide log line is where it reports. It must be
+# turned off in the same change that removes the copy and not before.
+DOS_CFLAGS += -DDOS_ELIDE=1
+
 # THE EXTENT OF THE GUEST'S PHYSICAL ADDRESS SPACE, in bytes. 8 MB.
 #
 # dos_fold()'s map covers this much; everything above the 8086 wrap (0x110000)

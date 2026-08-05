@@ -20,7 +20,8 @@
 #include "gw_malloc.h"   /* ahb_calloc() */
 #include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
 #include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
-#include "dos_xms.h"     /* dos_xms_grown_bytes -- the backing-store zero-fill */
+#include "dos_xms.h"     /* dos_xms_grown_bytes, and dos_pgf_install() -- see below */
+#include "dos_zram.h"    /* dos_zram_pgf_lower() -- the COW pool's tier 2 */
 #include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
 #include "dos_fbs.h"     /* the FAST-BOOT SNAPSHOT container (external/8086tiny) */
 /* PER-TITLE USER SETTINGS, and note that this is NOT dos_meta.h above it. That
@@ -366,19 +367,155 @@ static int dos_cache_xip_to_flash(void)
     return 0;
 }
 
+/* ---- THE SHARED PAGEFILE: ONE HANDLE, TWO CLIENTS -------------------------
+ *
+ * external/8086tiny/docs/memory/22-one-pagefile-handle.md, "What is left".
+ * This is the firmware half of that document, and until it existed the COW
+ * pool's tier 2 had never executed on the device: dos_zram.c's lower tier is
+ * complete, the 4 KB slot allocator in dos_xms.c is complete, XMS has already
+ * been folded onto the same handle -- and nothing opened a file, so
+ * dos_zram_pgf_lower() returned NULL and 8086tiny.c installed tier 1 only.
+ *
+ * WHY THE PORTING LAYER OWNS THE HANDLE AND NOT THE EMULATOR. MAX_OPEN_FILES
+ * is 8 (Core/Src/syscalls.c:51) and the DOS core already holds THREE for its
+ * whole run: disk[0] (hard disk), disk[1] (floppy), disk[2] (the BIOS blob),
+ * all opened by dos_cpu_init(). Running out is SILENT -- every other fopen()
+ * in the firmware starts returning NULL and callers read that as "asset
+ * missing", so rg_i18n.c:245 falls back to the unknown glyph and the entire UI
+ * renders as diamonds with nothing logged and nothing faulting. That is the
+ * failure that kept tier 2 dark. The way out is that there is exactly ONE
+ * file for both clients, it is opened HERE, once, before dos_cpu_init(), and
+ * it is held for the run.
+ *
+ * THE NET HANDLE COUNT DOES NOT RISE. Before this change XMS opened its own
+ * /dos_xms.swp lazily on the first extended-memory write (dos_xms.c:220), so a
+ * title that used XMS -- which is every title booting MS-DOS 6.22 with
+ * HIMEM.SYS in CONFIG.SYS -- was already at four. dos_pgf_install() makes XMS
+ * a client of this handle instead and it never opens anything again, so the
+ * count is 3 + 1 = 4 with tier 2 running, exactly what it was with tier 2
+ * dark. See dos_xms.h, "ONLY USED WHEN NO SHARED PAGEFILE HAS BEEN INSTALLED".
+ *
+ * FAILURE IS NOT FATAL AND IS NOT SILENT. A missing card, a full card or a
+ * read-only card means no tier 2: the pool keeps its compressed tier and its
+ * cold tier and behaves exactly as this build did before, which is a working
+ * configuration that has shipped. It says so on one line. What it must never
+ * do is refuse to start a title, and it cannot -- nothing below consults the
+ * return value.
+ *
+ * THE FILE IS SCRATCH. "w+b" is FA_CREATE_ALWAYS|FA_READ|FA_WRITE
+ * (syscalls.c:93), i.e. it truncates on open, so a crash or a pause-menu exit
+ * on the previous run cannot leave megabytes of stale swap to be inherited --
+ * and the file is removed at teardown as well. Truncation is also what
+ * dos_pgf_install(&io, 0) asserts by being passed a current length of 0.
+ *
+ * UNBUFFERED, AND THAT IS A CORRECTNESS REQUIREMENT rather than a tuning
+ * choice. dos_xms.h's contract on these two callbacks is "position and
+ * transfer, and must NOT buffer": the slot allocator hands out byte ranges and
+ * relies on a write having landed before the matching read is issued, and a
+ * stdio buffer would also cost BUFSIZ of heap for no benefit -- every transfer
+ * here is already a whole 4 KB slot or a whole XMS move.
+ *
+ * The path is at the card root rather than under /saves/dos, for two reasons:
+ * /saves/dos is created by the savestate machinery and may not exist at core
+ * entry (dos_fbs_glue.c:268 handles exactly that case), and this file is not a
+ * save -- it must not survive a run, let alone be backed up beside one. The
+ * root is where XMS's private swap lived for the same reason.
+ */
+#define DOS_PGF_PATH "/dos_pgf.swp"
+
+static FILE *dos_pgf_fp;
+
+/* Both return NONZERO ON SUCCESS -- dos_xms.h's struct dos_pgf_io. A short
+ * transfer is a failure, not a partial success: the caller has no way to
+ * resume half a granule and counts the failure as a lost store, which is a
+ * legitimate outcome the pool already handles. */
+static int dos_pgf_read_cb(void *ctx, unsigned long off, void *buf, unsigned int len)
+{
+    FILE *f = (FILE *)ctx;
+
+    if (!f || fseek(f, (long)off, SEEK_SET) != 0)
+        return 0;
+    return fread(buf, 1, len, f) == len;
+}
+
+static int dos_pgf_write_cb(void *ctx, unsigned long off, const void *buf, unsigned int len)
+{
+    FILE *f = (FILE *)ctx;
+
+    if (!f || fseek(f, (long)off, SEEK_SET) != 0)
+        return 0;
+    return fwrite(buf, 1, len, f) == len;
+}
+
+/* Call BEFORE dos_cpu_init(). Two orderings depend on it and both are silent
+ * when broken:
+ *
+ *  - dos_cpu_init() is where 8086tiny.c's DOS_ZRAM_AUTO block runs, and that
+ *    block asks dos_zram_pgf_lower() for the lower tier. No handle installed
+ *    by then means NULL means tier 1 only for the whole run.
+ *  - dos_xms_reset() runs in there too, and in standalone mode it remove()s
+ *    dos_xms_store_path. With a handle installed it leaves the shared file
+ *    alone (docs/memory/22-one-pagefile-handle.md step 2).
+ */
+static void dos_pgf_open(void)
+{
+    struct dos_pgf_io io;
+
+    dos_pgf_fp = fopen(DOS_PGF_PATH, "w+b");
+    if (!dos_pgf_fp) {
+        /* Loud, because "the pool is quietly one tier smaller" is
+         * indistinguishable from "tier 2 is working badly" in a cow log. */
+        printf("DOS: pagefile %s could not be opened - COW tier 2 and XMS "
+               "backing store are OFF for this run (pool keeps tiers 1 and 3)\n",
+               DOS_PGF_PATH);
+        return;
+    }
+    setvbuf(dos_pgf_fp, NULL, _IONBF, 0);
+
+    io.read  = dos_pgf_read_cb;
+    io.write = dos_pgf_write_cb;
+    io.ctx   = dos_pgf_fp;
+    dos_pgf_install(&io, 0);            /* 0 = we just truncated it */
+
+    printf("DOS: pagefile %s open (handle 4 of %d; disks+BIOS take 3)\n",
+           DOS_PGF_PATH, 8);
+}
+
+static void dos_pgf_close(void)
+{
+    if (!dos_pgf_fp)
+        return;
+    /* Uninstall before the close, so a late transfer from a teardown path
+     * cannot reach a FILE* that has already gone. */
+    dos_pgf_install(NULL, 0);
+    fclose(dos_pgf_fp);
+    dos_pgf_fp = NULL;
+    remove(DOS_PGF_PATH);
+}
+
 /* ------------------------------------------------------------ guest XIP ---
  * Phase 3 of external/8086tiny/docs/memory/02-guest-xip.md: cache the whole
  * .dsk into the 64 MB of OSPI NOR that an SD_CARD=1 build leaves entirely
  * unused at runtime (docs/gwemu.md:194), and hand back the memory-mapped
- * pointer. NOTHING READS IT YET -- the fold's third case is phase 5. This is
- * here so the cost, the failure modes and the address are all measured before
- * anything depends on them.
+ * pointer.
  *
- * OFF BY DEFAULT, and that is the phase's own rule rather than caution: phase 3
- * is specified as a pure observer, and a multi-second "first boot of this
- * image" stall in exchange for a pointer nobody dereferences is a behaviour
- * change. Enable with DOS_CFLAGS_EXTRA=-DDOS_XIP_CACHE=1 (which is NOT a make
- * dependency -- touch the file, see docs/testing.md section 4).
+ * ON BY DEFAULT SINCE LOAD ELISION WAS WIRED UP, and the reason it was off
+ * before no longer holds. Phase 3 was specified as a pure observer, and a
+ * multi-second "first boot of this image" stall bought nothing but a pointer
+ * nobody dereferenced, so paying it by default would have been a behaviour
+ * change with no benefit. There is now a consumer: dos_elide_set_image()
+ * below. Elision maps a guest granule straight at the NOR copy instead of
+ * spending a COW pool page on bytes that came off the disk unmodified, and
+ * WITHOUT THIS CACHE THERE IS NO IMAGE TO MAP AT -- elision compiles in,
+ * declines everything and reports zeros. So the stall is now the entry price
+ * for pool pages the demanding titles do not have (WOLF3D wants ~156 against
+ * 67 hot + 63 cold, and drops stores it cannot place).
+ *
+ * The stall is paid ONCE PER IMAGE, not once per launch:
+ * store_file_in_flash() recognises a file already resident in NOR and returns
+ * its address. Turn it back off with DOS_CFLAGS_EXTRA=-DDOS_XIP_CACHE=0
+ * (which is NOT a make dependency -- touch the file, see docs/testing.md
+ * section 4); that is the negative control for any elision measurement.
  *
  * store_file_in_flash() and not odroid_overlay_cache_file_in_flash(): the
  * latter draws the "Caching game" progress bar, and by the time app_main_dos()
@@ -394,7 +531,7 @@ static int dos_cache_xip_to_flash(void)
  * 02-guest-xip.md section 4.2. Nothing needs patching on the way in.
  */
 #ifndef DOS_XIP_CACHE
-#define DOS_XIP_CACHE 0
+#define DOS_XIP_CACHE 1
 #endif
 
 #if DOS_XIP_CACHE
@@ -415,7 +552,24 @@ static void dos_xip_progress(uint32_t total, uint32_t done, uint8_t pct)
     wdog_refresh();
 }
 
-static void dos_xip_cache(const char *path, uint32_t known_size)
+/* LOAD ELISION. Declared here rather than pulled from a header because
+ * 8086tiny.c exports it without one (test286/host_main.c:297 declares it the
+ * same way). "The bytes of this guest granule are at offset X of that image",
+ * recorded on an INT 13h read that filled a whole aligned granule from a
+ * sector run -- so the granule can be mapped at NOR and cost no COW pool page
+ * at all until the guest writes to it.
+ *
+ * THE DRIVE INDEX IS NOT DECORATION. 8086tiny.c compares the FILE* of every
+ * INT 13h transfer against disk[dos_elide_drive] and declines anything that
+ * does not match (8086tiny.c:6144). Hand it the wrong index and elision
+ * silently declines every read for the whole run, which looks exactly like
+ * elision being useless rather than mis-wired. disk[0] is the hard disk,
+ * disk[1] the floppy, disk[2] the BIOS image (8086tiny.c:1856), and which of
+ * the first two this title is depends on the argv slot chosen below from
+ * st.size. */
+extern void dos_elide_set_image(const unsigned char *base, unsigned int len, int drive);
+
+static void dos_xip_cache(const char *path, uint32_t known_size, int drive)
 {
     uint32_t t0 = HAL_GetTick();
 
@@ -423,18 +577,42 @@ static void dos_xip_cache(const char *path, uint32_t known_size)
     dos_xip_base = store_file_in_flash(path, &dos_xip_size, false, &dos_xip_progress);
 
     if (dos_xip_base == NULL) {
-        /* Expected, not exceptional. BATTLECHESS.dsk is 66,060,288 bytes
-         * against a 64 MB part, and find_write_slot() (gw_flash_alloc.c:144)
-         * answers false for anything that cannot fit clear of the files
-         * already live this boot. A full or failing cache must still boot the
-         * guest -- 02-guest-xip.md section 5, "the one new obligation" -- and it
-         * does, because nothing downstream of here consults the pointer. */
-        printf("DOS: xip NOT cached (%s, %lu bytes) - guest runs from SD as before\n",
+        /* Expected, not exceptional, and NOT A REASON TO REFUSE THE TITLE --
+         * that mistake has been made in this file before and BATTLECHESS would
+         * not launch. BATTLECHESS.dsk is 66,060,288 bytes against a 64 MB part,
+         * so it is uncacheable BY CONSTRUCTION and no amount of free flash will
+         * change that; find_write_slot() (gw_flash_alloc.c:144) also answers
+         * false for anything that cannot fit clear of the files already live
+         * this boot. Either way the guest runs from SD with no elision, exactly
+         * as it did before this was switched on -- 02-guest-xip.md section 5,
+         * "the one new obligation".
+         *
+         * The size is in the log on purpose: "no elision" and "elision working
+         * badly" are indistinguishable in a cow log, so the reason has to be
+         * stated where it happens. */
+        printf("DOS: xip NOT cached (%s, %lu bytes, too big or no room) - "
+               "guest runs from SD, LOAD ELISION OFF for this title\n",
                path, (unsigned long)known_size);
         return;
     }
     printf("DOS: xip .dsk at %p, %lu bytes, %lu ms\n", (void *)dos_xip_base,
            (unsigned long)dos_xip_size, (unsigned long)(HAL_GetTick() - t0));
+
+    /* AND HAND IT OVER. Until this call existed, dos_elide_set_image() was
+     * reached from exactly one place in the tree -- test286/host_main.c's
+     * DOS_ELIDE_IMAGE -- so load elision had never executed on the device
+     * despite being complete and having three host tests (runelide, runelide2,
+     * runelide3).
+     *
+     * BEFORE dos_cpu_init(), which the call site below guarantees, and that is
+     * an ordering constraint rather than tidiness: this function clears the
+     * whole per-granule offset table and the NOR residency bitmap, and
+     * dos_cpu_init() is what rebuilds the fold map afterwards. Handing the
+     * image over after init would wipe entries the rebuilt map still refers
+     * to. */
+    dos_elide_set_image(dos_xip_base, dos_xip_size, drive);
+    printf("DOS: load elision armed on disk[%d] (%s)\n",
+           drive, drive == 0 ? "hard disk" : "floppy");
 }
 #endif
 
@@ -738,6 +916,13 @@ static void dos_xipsm_report(void) { }
  * for what is mapped. The fix is no longer a make flag: raise the page count
  * dos_cow_pool_add() is called with in app_main_dos(), at 4,114 B a page out of
  * the AXI headroom that call already prints. */
+/* 8086tiny.c exports these without a header (test286/host_main.c declares them
+ * the same way). Both arms are defined -- the DOS_ELIDE=0 arm returns zeros --
+ * so this call site does not need a build-flag guard. */
+extern void dos_elide_stats(unsigned int *mapped, unsigned int *declined,
+                            unsigned int *replays, unsigned int *checked,
+                            unsigned int *mismatch);
+
 static void dos_cow_log(const char *when)
 {
     unsigned faults = 0, pages = 0, pool = 0, lost = 0;
@@ -758,6 +943,46 @@ static void dos_cow_log(const char *when)
            "live=%u grows=%u spare=%uB\n",
            when, faults, pages, pool, lost, arena, resv, live, grows,
            (unsigned)((arena > live ? arena - live : 0) * 4104u));
+
+    /* THE TWO SUBSYSTEMS THAT WERE DARK, ON THE SAME CADENCE AND FOR THE SAME
+     * REASON THE COW LINE IS NOT BEHIND A DEBUG FLAG. Neither of these can be
+     * evaluated from the cow line alone:
+     *
+     *  - Load elision. `mapped` is granules served straight out of NOR, i.e.
+     *    pool pages not spent; `declined` is reads that reached the hook and
+     *    were refused (unaligned, wrong drive, image stale after a disk write,
+     *    no pool to serve a later COW fault). mapped=0 with declined climbing
+     *    is mis-wiring -- most likely the drive index -- and mapped=0 with
+     *    declined=0 means the hook is not being reached at all. `mismatch` MUST
+     *    be 0: it is DOS_ELIDE_VERIFY comparing the mapped bytes against what
+     *    the INT 13h copy actually delivered, and a nonzero value is the offset
+     *    arithmetic being wrong, which is the one failure here that costs
+     *    correctness rather than pages.
+     *  - The pagefile. `lower` in the zram line counts granules that went to
+     *    tier 2, which is the number that says whether opening the handle
+     *    bought anything. len is the live set, not the total ever evicted:
+     *    slots are freed on page-in.
+     *
+     * Both print unconditionally so that "off", "on and doing nothing" and "on
+     * and working" are three distinguishable readings rather than one silence.
+     */
+    {
+        unsigned emapped = 0, edecl = 0, erepl = 0, echk = 0, emis = 0;
+        unsigned zpages = 0, zbytes = 0, zstored = 0, zrej = 0, zlower = 0;
+        unsigned long pwr = 0, prd = 0, pzero = 0, plen = 0;
+        unsigned pwrc = 0, prdc = 0, pslots = 0;
+
+        dos_elide_stats(&emapped, &edecl, &erepl, &echk, &emis);
+        dos_zram_stats(&zpages, &zbytes, &zstored, &zrej, &zlower);
+        dos_pgf_stats(&pwr, &prd, &pzero, &pwrc, &prdc, &pslots, &plen);
+        printf("DOS: elide %s mapped=%u declined=%u replays=%u checked=%u "
+               "mismatch=%u | zram pages=%u bytes=%u stored=%u rejected=%u "
+               "lower=%u | pgf %s len=%luB slots=%u w%u/%luB r%u/%luB zero=%luB\n",
+               when, emapped, edecl, erepl, echk, emis,
+               zpages, zbytes, zstored, zrej, zlower,
+               dos_pgf_ready() ? "on" : "OFF", plen, pslots,
+               pwrc, pwr, prdc, prd, pzero);
+    }
 }
 
 /* ---- The .dosmeta sidecar -------------------------------------------------
@@ -1238,24 +1463,44 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
     // Check if the selected image is small enough to be a floppy (< 2.88MB)
     rg_stat_t st = rg_storage_stat(ACTIVE_FILE->path);
+    /* ...and this is ALSO the elision drive index, which is why it is a named
+     * variable now. dos_cpu_init() opens argv[3] as disk[0] (hard disk) and
+     * argv[2] as disk[1] (floppy) -- 8086tiny.c:13017 -- and the elision code
+     * matches transfers by FILE* against disk[dos_elide_drive]. Deriving the
+     * index from the same `if` that chooses the argv slot is what keeps the two
+     * from drifting; a hard-coded 0 would decline every read of a floppy title
+     * and say nothing about it. */
+    int dos_disk_index;
     if (st.size <= 2880 * 1024) {
         argv[2] = (char *)ACTIVE_FILE->path; // Floppy disk
         argv[3] = NULL;
         argc = 3;
+        dos_disk_index = 1;                  // disk[1]
     } else {
         argv[2] = NULL; // No floppy
         argv[3] = (char *)ACTIVE_FILE->path; // Hard disk
         argv[4] = NULL;
         argc = 4;
+        dos_disk_index = 0;                  // disk[0]
     }
-    
+
 #if DOS_XIP_CACHE
-    /* Before dos_cpu_init(), for one reason worth stating: the cache opens the
-     * .dsk itself, and dos_cpu_init() then holds three FILE* for the whole run.
-     * MAX_OPEN_FILES is 8 (Core/Src/syscalls.c:51) and running out fails
-     * SILENTLY -- see the fopen entry in ../../../../CLAUDE.md. Doing the cache
-     * first keeps its handle transient and the count at three afterwards. */
-    dos_xip_cache(ACTIVE_FILE->path, (uint32_t)st.size);
+    /* Before dos_cpu_init(), for two reasons and both of them are load-bearing.
+     *
+     * The fopen budget: the cache opens the .dsk itself, and dos_cpu_init()
+     * then holds three FILE* for the whole run. MAX_OPEN_FILES is 8
+     * (Core/Src/syscalls.c:51) and running out fails SILENTLY -- see the fopen
+     * entry in ../../../../CLAUDE.md. Doing the cache first keeps its handle
+     * transient.
+     *
+     * And the elision hand-over inside it: dos_elide_set_image() clears the
+     * per-granule table, while dos_cpu_init() is what rebuilds the fold map.
+     * Ordering is the recurring bug in this function -- everything the emulator
+     * has to be told is told before init, and dos_cow_cold_add() stays last of
+     * the pool registrations. */
+    dos_xip_cache(ACTIVE_FILE->path, (uint32_t)st.size, dos_disk_index);
+#else
+    (void)dos_disk_index;
 #endif
 
     /* The BIOS is mandatory: 8086tiny reads its instruction-decode tables out of
@@ -1304,6 +1549,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * needing a cached .dsk to serve the tail from, so a title can no longer
      * fail to start because its image was too large to cache, which is what
      * BATTLECHESS.dsk would have done. */
+    /* THE SHARED PAGEFILE. Last thing before dos_cpu_init(), because that is
+     * where 8086tiny.c's DOS_ZRAM_AUTO block asks dos_zram_pgf_lower() for the
+     * COW pool's tier 2 and where dos_xms_reset() decides whether it owns a
+     * swap file of its own. See dos_pgf_open() for why the handle lives here
+     * and not in the emulator, and for the MAX_OPEN_FILES accounting. */
+    dos_pgf_open();
+
     int init_rc = dos_cpu_init(argc, argv);
     if (init_rc != 0) {
         /* -4 is DOS_INIT_ENOPOOL, and it gets its own line because it is a
@@ -1581,4 +1833,9 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * number that decides whether the pool was big enough. */
     dos_cow_log("final");
     dos_xipsm_report();
+    /* The pagefile is scratch and can be megabytes. Deleting it here covers the
+     * guest-halt exit; the "w+b" truncation in dos_pgf_open() covers every
+     * other way out of this core (the pause menu does not come through here),
+     * so the card never carries a stale swap into the next session. */
+    dos_pgf_close();
 }
