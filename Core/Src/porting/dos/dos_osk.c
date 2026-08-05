@@ -23,6 +23,7 @@
  */
 
 #include "dos_osk.h"
+#include "dos_mouse_ui.h"
 #include "dos_video.h"      /* dos_font_8x8, DOS_LCD_* , DOS_LETTERBOX */
 #include <string.h>
 
@@ -68,6 +69,12 @@ enum {
     OSK_ACT_ALT,
     OSK_ACT_LAYER,      /* cycle layer */
     OSK_ACT_CLOSE,      /* hide the keyboard */
+    /* Mouse mode is a MODE OF THIS KEYBOARD, not a third top-level mode.
+     * The d-pad cannot drive a key grid and a pointer at once, and the OSK is
+     * already the place the user goes for "the thing my buttons do not have" --
+     * so it is reached from here and left from here. See dos_mouse_ui.h. */
+    OSK_ACT_MOUSE,      /* enter mouse mode */
+    OSK_ACT_CURSOR,     /* toggle the driver-drawn pointer */
 };
 
 /* Cell width is one 8x8 glyph per label character, so a row's total label
@@ -85,7 +92,7 @@ typedef struct {
 
 /* Common tail keys, spelled out per row because C has no array splicing. */
 #define K_MODS   KA("SHF", OSK_ACT_SHIFT), KA("CTL", OSK_ACT_CTRL), KA("ALT", OSK_ACT_ALT)
-#define K_NAV    KA("LYR", OSK_ACT_LAYER), KA("OFF", OSK_ACT_CLOSE)
+#define K_NAV    KA("LYR", OSK_ACT_LAYER), KA("MSE", OSK_ACT_MOUSE), KA("OFF", OSK_ACT_CLOSE)
 
 /* Layer 0 -- letters. 13 + 4*3 = 25 cells / 13 + 3*3 + 3*3 = 31 cells. */
 static const osk_key_t osk_l0r0[] = {
@@ -111,7 +118,15 @@ static const osk_key_t osk_l1r1[] = {
     KL(','), KL(';'), KL('\''), KL('"'), KL('('),
     KL(')'), KL('['), KL(']'), KL('<'), KL('>'),
     KL('!'), KL('@'), KL('#'), KL('$'), KL('%'),
-    KL('&'), KL('^'), KL('~'), KL('|'), KL('`'),
+    /* '`' USED TO BE HERE AND WAS REMOVED WHEN K_NAV GAINED THE MSE KEY.
+     * A row is 320/8 = 40 cells and this one was already at 41 with the extra
+     * three-cell key: 20 single-char keys + K_MODS(9) + ESC(3) + K_NAV(9).
+     * draw_glyph() CLIPS SILENTLY, so the symptom would have been the OFF key
+     * simply not being drawn on this layer -- no warning, no fault, just an
+     * unreachable way out of the keyboard. Backtick is the least useful key on
+     * the row at a DOS prompt; it is still reachable nowhere else, which is
+     * stated rather than hidden. */
+    KL('&'), KL('^'), KL('~'), KL('|'),
     K_MODS, KS("ESC", 27), K_NAV,
 };
 
@@ -252,6 +267,18 @@ static void draw_status(uint8_t *fb)
 
     memset(fb, C_BLACK, DOS_LETTERBOX * OSK_W);
 
+    /* Mouse mode replaces the whole top bar rather than sharing it: the
+     * position readout changes every frame and interleaving it with the sticky
+     * modifier indicators made both unreadable. */
+    if (dos_mouse_ui_active()) {
+        char st[41];
+        dos_mouse_ui_status(st, sizeof st);
+        draw_text(fb, 0, OSK_TOP_Y0, st, C_WHITE, C_BLACK);
+        draw_text(fb, 0, OSK_TOP_Y1,
+                  "dpad move  B lclick  A rclick  TIME back", C_DIM, C_BLACK);
+        return;
+    }
+
     x = draw_text(fb, 0, OSK_TOP_Y0, "KBD ", C_WHITE, C_BLACK);
     x = draw_text(fb, x, OSK_TOP_Y0, lay, C_WHITE, C_BLACK);
     x = draw_text(fb, x, OSK_TOP_Y0, "  ", C_WHITE, C_BLACK);
@@ -291,6 +318,14 @@ void dos_osk_draw(uint8_t *fb)
     }
 
     draw_status(fb);
+    if (dos_mouse_ui_active()) {
+        /* The grid is not reachable in mouse mode, so drawing it would be
+         * offering keys the buttons cannot press. Blank the bottom bar and
+         * leave the rest of this function's tail clears to tidy the edges. */
+        memset(fb + (DOS_LETTERBOX + DOS_ACTIVE_ROWS) * OSK_W, C_BLACK,
+               DOS_LETTERBOX * OSK_W);
+        return;
+    }
     draw_row(fb, OSK_BOT_Y0, 0);
     draw_row(fb, OSK_BOT_Y1, 1);
 
@@ -393,6 +428,12 @@ static void osk_press(void)
     case OSK_ACT_CLOSE:
         osk_shown = false;
         break;
+    case OSK_ACT_MOUSE:
+        dos_mouse_ui_set_active(true);
+        break;
+    case OSK_ACT_CURSOR:
+        dos_mouse_ui_set_render(!dos_mouse_ui_render());
+        break;
     }
 }
 
@@ -409,6 +450,33 @@ void dos_osk_input(const odroid_gamepad_state_t *js)
 
     went = now & ~osk_prev_buttons;
     osk_prev_buttons = now;
+
+    /* ---- mouse mode ------------------------------------------------------
+     *
+     * Taken BEFORE the `if (!went)` early-out, and that is load-bearing: the
+     * grid is edge-driven because a key must not repeat, but a pointer is
+     * LEVEL-driven -- a held direction has to produce motion on every frame or
+     * there is nothing for the acceleration ramp to ramp. So this arm gets the
+     * raw state, every frame, and returns before any grid navigation runs.
+     *
+     * TIME (ODROID_INPUT_SELECT -- see dos_input.c's naming warning) is the way
+     * back to the key grid, and CUR toggles the pointer without leaving. GAME
+     * still closes the whole keyboard, which dos_input.c handles a level up and
+     * which is why there is always a way out even from in here. */
+    if (dos_mouse_ui_active()) {
+        if (went & (1u << ODROID_INPUT_SELECT)) {
+            dos_mouse_ui_set_active(false);
+            osk_mark_dirty();
+            return;
+        }
+        if (went & (1u << ODROID_INPUT_X)) {    /* START, zelda only */
+            dos_mouse_ui_set_render(!dos_mouse_ui_render());
+            osk_mark_dirty();
+        }
+        dos_mouse_ui_input(js);
+        osk_mark_dirty();       /* the status line shows a live position */
+        return;
+    }
 
     if (!went)
         return;
@@ -454,6 +522,7 @@ void dos_osk_reset(void)
     osk_seen_mode    = mem[0x449];
     osk_seen_cols    = mem[0x44A];
     osk_paints       = 0;
+    dos_mouse_ui_reset();
 }
 
 bool dos_osk_visible(void) { return osk_shown; }
@@ -461,6 +530,12 @@ bool dos_osk_visible(void) { return osk_shown; }
 void dos_osk_toggle(void)
 {
     osk_shown = !osk_shown;
+    /* Closing the keyboard leaves mouse mode too. There is no way to drive the
+     * pointer with the keyboard shut -- the d-pad goes back to the guest -- so
+     * a mouse mode that survived the close would be an invisible state that
+     * swallowed the next open. */
+    if (!osk_shown)
+        dos_mouse_ui_set_active(false);
     if (osk_shown) {
         /* Do not inherit a stale button image from game mode -- the same press
          * that opened the keyboard must not also register as a grid press. */
