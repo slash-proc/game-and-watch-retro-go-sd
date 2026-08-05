@@ -20,7 +20,8 @@
 #include "gw_malloc.h"   /* ahb_calloc() */
 #include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
 #include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
-#include "dos_xms.h"     /* dos_xms_grown_bytes -- the backing-store zero-fill */
+#include "dos_xms.h"     /* dos_xms_grown_bytes, and dos_pgf_install() -- see below */
+#include "dos_zram.h"    /* dos_zram_pgf_lower() -- the COW pool's tier 2 */
 #include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
 #include "dos_fbs.h"     /* the FAST-BOOT SNAPSHOT container (external/8086tiny) */
 /* PER-TITLE USER SETTINGS, and note that this is NOT dos_meta.h above it. That
@@ -364,6 +365,132 @@ static int dos_cache_xip_to_flash(void)
            (void *)g_dos_xip_addr, (unsigned long)g_dos_xip_size, n,
            (unsigned long)(HAL_GetTick() - t0));
     return 0;
+}
+
+/* ---- THE SHARED PAGEFILE: ONE HANDLE, TWO CLIENTS -------------------------
+ *
+ * external/8086tiny/docs/memory/22-one-pagefile-handle.md, "What is left".
+ * This is the firmware half of that document, and until it existed the COW
+ * pool's tier 2 had never executed on the device: dos_zram.c's lower tier is
+ * complete, the 4 KB slot allocator in dos_xms.c is complete, XMS has already
+ * been folded onto the same handle -- and nothing opened a file, so
+ * dos_zram_pgf_lower() returned NULL and 8086tiny.c installed tier 1 only.
+ *
+ * WHY THE PORTING LAYER OWNS THE HANDLE AND NOT THE EMULATOR. MAX_OPEN_FILES
+ * is 8 (Core/Src/syscalls.c:51) and the DOS core already holds THREE for its
+ * whole run: disk[0] (hard disk), disk[1] (floppy), disk[2] (the BIOS blob),
+ * all opened by dos_cpu_init(). Running out is SILENT -- every other fopen()
+ * in the firmware starts returning NULL and callers read that as "asset
+ * missing", so rg_i18n.c:245 falls back to the unknown glyph and the entire UI
+ * renders as diamonds with nothing logged and nothing faulting. That is the
+ * failure that kept tier 2 dark. The way out is that there is exactly ONE
+ * file for both clients, it is opened HERE, once, before dos_cpu_init(), and
+ * it is held for the run.
+ *
+ * THE NET HANDLE COUNT DOES NOT RISE. Before this change XMS opened its own
+ * /dos_xms.swp lazily on the first extended-memory write (dos_xms.c:220), so a
+ * title that used XMS -- which is every title booting MS-DOS 6.22 with
+ * HIMEM.SYS in CONFIG.SYS -- was already at four. dos_pgf_install() makes XMS
+ * a client of this handle instead and it never opens anything again, so the
+ * count is 3 + 1 = 4 with tier 2 running, exactly what it was with tier 2
+ * dark. See dos_xms.h, "ONLY USED WHEN NO SHARED PAGEFILE HAS BEEN INSTALLED".
+ *
+ * FAILURE IS NOT FATAL AND IS NOT SILENT. A missing card, a full card or a
+ * read-only card means no tier 2: the pool keeps its compressed tier and its
+ * cold tier and behaves exactly as this build did before, which is a working
+ * configuration that has shipped. It says so on one line. What it must never
+ * do is refuse to start a title, and it cannot -- nothing below consults the
+ * return value.
+ *
+ * THE FILE IS SCRATCH. "w+b" is FA_CREATE_ALWAYS|FA_READ|FA_WRITE
+ * (syscalls.c:93), i.e. it truncates on open, so a crash or a pause-menu exit
+ * on the previous run cannot leave megabytes of stale swap to be inherited --
+ * and the file is removed at teardown as well. Truncation is also what
+ * dos_pgf_install(&io, 0) asserts by being passed a current length of 0.
+ *
+ * UNBUFFERED, AND THAT IS A CORRECTNESS REQUIREMENT rather than a tuning
+ * choice. dos_xms.h's contract on these two callbacks is "position and
+ * transfer, and must NOT buffer": the slot allocator hands out byte ranges and
+ * relies on a write having landed before the matching read is issued, and a
+ * stdio buffer would also cost BUFSIZ of heap for no benefit -- every transfer
+ * here is already a whole 4 KB slot or a whole XMS move.
+ *
+ * The path is at the card root rather than under /saves/dos, for two reasons:
+ * /saves/dos is created by the savestate machinery and may not exist at core
+ * entry (dos_fbs_glue.c:268 handles exactly that case), and this file is not a
+ * save -- it must not survive a run, let alone be backed up beside one. The
+ * root is where XMS's private swap lived for the same reason.
+ */
+#define DOS_PGF_PATH "/dos_pgf.swp"
+
+static FILE *dos_pgf_fp;
+
+/* Both return NONZERO ON SUCCESS -- dos_xms.h's struct dos_pgf_io. A short
+ * transfer is a failure, not a partial success: the caller has no way to
+ * resume half a granule and counts the failure as a lost store, which is a
+ * legitimate outcome the pool already handles. */
+static int dos_pgf_read_cb(void *ctx, unsigned long off, void *buf, unsigned int len)
+{
+    FILE *f = (FILE *)ctx;
+
+    if (!f || fseek(f, (long)off, SEEK_SET) != 0)
+        return 0;
+    return fread(buf, 1, len, f) == len;
+}
+
+static int dos_pgf_write_cb(void *ctx, unsigned long off, const void *buf, unsigned int len)
+{
+    FILE *f = (FILE *)ctx;
+
+    if (!f || fseek(f, (long)off, SEEK_SET) != 0)
+        return 0;
+    return fwrite(buf, 1, len, f) == len;
+}
+
+/* Call BEFORE dos_cpu_init(). Two orderings depend on it and both are silent
+ * when broken:
+ *
+ *  - dos_cpu_init() is where 8086tiny.c's DOS_ZRAM_AUTO block runs, and that
+ *    block asks dos_zram_pgf_lower() for the lower tier. No handle installed
+ *    by then means NULL means tier 1 only for the whole run.
+ *  - dos_xms_reset() runs in there too, and in standalone mode it remove()s
+ *    dos_xms_store_path. With a handle installed it leaves the shared file
+ *    alone (docs/memory/22-one-pagefile-handle.md step 2).
+ */
+static void dos_pgf_open(void)
+{
+    struct dos_pgf_io io;
+
+    dos_pgf_fp = fopen(DOS_PGF_PATH, "w+b");
+    if (!dos_pgf_fp) {
+        /* Loud, because "the pool is quietly one tier smaller" is
+         * indistinguishable from "tier 2 is working badly" in a cow log. */
+        printf("DOS: pagefile %s could not be opened - COW tier 2 and XMS "
+               "backing store are OFF for this run (pool keeps tiers 1 and 3)\n",
+               DOS_PGF_PATH);
+        return;
+    }
+    setvbuf(dos_pgf_fp, NULL, _IONBF, 0);
+
+    io.read  = dos_pgf_read_cb;
+    io.write = dos_pgf_write_cb;
+    io.ctx   = dos_pgf_fp;
+    dos_pgf_install(&io, 0);            /* 0 = we just truncated it */
+
+    printf("DOS: pagefile %s open (handle 4 of %d; disks+BIOS take 3)\n",
+           DOS_PGF_PATH, 8);
+}
+
+static void dos_pgf_close(void)
+{
+    if (!dos_pgf_fp)
+        return;
+    /* Uninstall before the close, so a late transfer from a teardown path
+     * cannot reach a FILE* that has already gone. */
+    dos_pgf_install(NULL, 0);
+    fclose(dos_pgf_fp);
+    dos_pgf_fp = NULL;
+    remove(DOS_PGF_PATH);
 }
 
 /* ------------------------------------------------------------ guest XIP ---
@@ -1304,6 +1431,13 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * needing a cached .dsk to serve the tail from, so a title can no longer
      * fail to start because its image was too large to cache, which is what
      * BATTLECHESS.dsk would have done. */
+    /* THE SHARED PAGEFILE. Last thing before dos_cpu_init(), because that is
+     * where 8086tiny.c's DOS_ZRAM_AUTO block asks dos_zram_pgf_lower() for the
+     * COW pool's tier 2 and where dos_xms_reset() decides whether it owns a
+     * swap file of its own. See dos_pgf_open() for why the handle lives here
+     * and not in the emulator, and for the MAX_OPEN_FILES accounting. */
+    dos_pgf_open();
+
     int init_rc = dos_cpu_init(argc, argv);
     if (init_rc != 0) {
         /* -4 is DOS_INIT_ENOPOOL, and it gets its own line because it is a
@@ -1581,4 +1715,9 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * number that decides whether the pool was big enough. */
     dos_cow_log("final");
     dos_xipsm_report();
+    /* The pagefile is scratch and can be megabytes. Deleting it here covers the
+     * guest-halt exit; the "w+b" truncation in dos_pgf_open() covers every
+     * other way out of this core (the pause menu does not come through here),
+     * so the card never carries a stale swap into the next session. */
+    dos_pgf_close();
 }

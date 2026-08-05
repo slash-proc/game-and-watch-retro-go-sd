@@ -202,7 +202,26 @@ void dos_fbs_boot(const char *dsk_path, unsigned long dsk_size,
         return;
     }
     dos_fbs_set_unlzma(dos_fbs_unlzma);
-    dos_fbs_set_xms_carried(1);          /* dos_fbs.h §7 -- the copies below */
+    /* dos_fbs.h §7 -- the copies below. CONDITIONAL SINCE THE SHARED PAGEFILE
+     * LANDED, and this is docs/memory/22-one-pagefile-handle.md's "Known gaps"
+     * item 1 handled rather than discovered later:
+     *
+     * §7's bargain is "I will copy dos_xms_store_path beside the snapshot, so
+     * you may snapshot a guest holding an XMS block". Once main_dos.c has
+     * called dos_pgf_install(), THERE IS NO SUCH FILE -- XMS is a client of the
+     * shared pagefile, which also holds transient COW granules and whose chunk
+     * map is not in the snapshot blob. Copying it would carry the wrong bytes
+     * and, worse, claiming to carry it would let dos_fbs_capture() snapshot a
+     * guest with a live EMB whose handle table then points at a pool of zeros.
+     *
+     * So in shared mode we do not make the claim. dos_fbs_capture() answers
+     * DOS_FBS_EXTMEM while any XMS block is outstanding -- no snapshot for that
+     * title, which is a missed optimisation and not a wrong guest. Titles that
+     * never allocate an EMB (which is most of the shipped set: HIMEM's own boot
+     * traffic is freed before the capture mark) still snapshot exactly as
+     * before. Carrying the chunk map properly needs 256 B more than
+     * DOS_XMS_SNAP_STATE_MAX allows and a DOS_FBS_ABI bump. */
+    dos_fbs_set_xms_carried(dos_pgf_ready() ? 0 : 1);
 
     /* store_file_in_flash() opens and closes the file itself. NULL is the
      * missing-file case AND the full-flash case, and neither is an error:
@@ -218,7 +237,7 @@ void dos_fbs_boot(const char *dsk_path, unsigned long dsk_size,
     /* THE POOL BEFORE THE SNAPSHOT. Restoring the scalar block closes the XMS
      * driver's FILE* and drops its cached seek position precisely so the next
      * access reopens the file we have just put in place. */
-    {
+    if (!dos_pgf_ready()) {
         char xp[112];
         snprintf(xp, sizeof xp, "%s" DOS_FBS_XMS_SUFFIX, dos_fbs_path);
         dos_fbs_copy(xp, dos_xms_store_path);
@@ -283,8 +302,11 @@ void dos_fbs_frame(unsigned int frames)
         return;
     }
     /* The XMS pool, beside the snapshot, and AFTER the .fbs is closed so a
-     * failure here cannot also truncate the snapshot. */
-    {
+     * failure here cannot also truncate the snapshot. Skipped in shared-
+     * pagefile mode -- see dos_fbs_set_xms_carried() in dos_fbs_boot(); there
+     * is no XMS-only file to copy, and a copy of the shared one would be a
+     * snapshot of transient COW granules. */
+    if (!dos_pgf_ready()) {
         char xp[112];
         snprintf(xp, sizeof xp, "%s" DOS_FBS_XMS_SUFFIX, dos_fbs_path);
         if (!dos_fbs_copy(dos_xms_store_path, xp))
