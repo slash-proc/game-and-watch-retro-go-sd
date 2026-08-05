@@ -120,6 +120,12 @@ extern uint8_t __gba_ahb_end__[];
 extern void * _DOS_MAIN_CODE_END[];
 extern void * _OVERLAY_DOS_LOAD_END[];
 extern void * __ram_emu_dos_start__[];
+/* The top of everything the DOS overlay declares in AXI. [_OVERLAY_DOS_BSS_END,
+ * __RAM_EMU_END__) is the headroom demand paging freed, and main_dos.c hands it
+ * to dos_cow_pool_add() as the COW pool -- the pool is registered at run time
+ * now, not linked, precisely so that this arithmetic can happen on the side of
+ * the fence that knows both ends. */
+extern void * _OVERLAY_DOS_BSS_END[];
 extern void * _OVERLAY_VIDEOPAC_LOAD_START[];
 extern uint8_t _OVERLAY_VIDEOPAC_SIZE;
 extern void * _OVERLAY_VIDEOPAC_BSS_START[];

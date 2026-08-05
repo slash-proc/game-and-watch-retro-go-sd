@@ -2316,97 +2316,60 @@ DOS_CFLAGS += -O3
 # dump of the guest's 0xB8000 text buffer, or "-DDOS_TRACE_INSNS=200" for an
 # instruction trace. See Core/Src/porting/dos/main_dos.c and 8086tiny.c.
 DOS_CFLAGS_EXTRA ?=
-# The COW pool's pages are carved from the hole a per-title INT 12h machine size
-# leaves above the guest's limit, not from BSS -- a pool page costs 6,212 B at the
-# link but only 4,104 B of memory DOS can never hand out. DOS_COW_RO_WINDOWS is the
-# declaration that this build calls dos_mem_map_ro() from code 8086tiny.c's
-# preprocessor cannot see (dos_xipsm.c), and 8086tiny.c #errors on a read-only
-# window with no pool.
+# THE COW POOL IS REGISTERED AT RUN TIME, NOT DECLARED HERE. There is no
+# DOS_COW_POOL_PAGES any more, and no static array behind it: demand paging is
+# now the mechanism rather than an option (external/8086tiny, "the demand region
+# becomes the mechanism"), so mem[] no longer reserves guest [0x10000,0xA0000)
+# at all -- 8086tiny.o's BSS went 790,934 -> 238,824 B. Those 589,824 bytes
+# leave the emulator at the LINK, which means they are AXI headroom in
+# STM32H7B0VBTx_SDCARD.ld and only the PARENT knows how much of them is spare.
+# So the porting layer calls
 #
-# ON BY DEFAULT SINCE docs/memory/22-arena-xip.md. It did not link before that:
-#   ld: Error: DOS code + guest RAM would overflow the LCD bonus area + RAM_EMU
-# .overlay_dos_bss starts at ALIGN(_OVERLAY_DOS_LOAD_END, 4096) and the pad was
-# ZERO, so the arena's text crossed the 4 KB quantum. Two changes bought it:
-# the arena's cold startup path became its own object (dos_arena.o) and moved
-# into .xip_dos, external flash, which is what that section is for; and the
-# static fallback array went to zero pages, immediately below.
-# DOS_MEM_TRIM -- AXI SRAM handed back at the LINK, by making mem[] shorter.
+#     dos_cow_pool_add(base, bytes)     /* Core/Src/porting/dos/main_dos.c */
 #
-# RAM_SIZE = DOS_MAPPED_SIZE + 4 - DOS_MEM_TRIM - DOS_DEMAND_SIZE, so this comes
-# straight off the guest RAM array. Guest [0x100000-N, 0x100000) then has no
-# SRAM behind it and is served by ONE zero page in the AHB block, armed by
-# dos_cpu_init() itself (dos_trim_arm_self()). No flash, no cached .dsk, no
-# zero-run scan, and -- unlike the DOS_XIP_CACHE path this replaces -- nothing
-# that can refuse to start a title.
+# with the AXI it actually has, before dos_cpu_init(). A page costs 4,114 B
+# (4,096 of granule + 8 of straddle slack + 2 of owner + 8 of slack0) and the
+# region table holds four registrations.
 #
-# 0xD000 = 53,248 B IS THE HARD MAXIMUM and 8086tiny.c #errors above it: the
-# emulator's register file lives at guest 0xF0000-0xF2FFF and is the hottest
-# read/write data in the machine, so the trim can never reach below 0xF3000.
+# WHAT USED TO BE HERE AND WHY IT IS GONE. DOS_MEM_TRIM (0xD000 of mem[] handed
+# back at the link, self-armed from a zero page), DOS_COW_ARENA (the run-time
+# reclaim arena that funded the pool out of a per-title INT 12h machine-size
+# hole), DOS_COW_POOL_PAGES, DOS_COW_POOL_MIN, DOS_COW_RO_WINDOWS,
+# DOS_DEMAND_BASE and DOS_DEMAND_TOP were one interlocking mechanism: the trim
+# made mem[] shorter, the arena found pages to cover the stores that fell in the
+# hole, and the static array was the fallback when it could not. All of it is
+# deleted. The arena's premise -- that a title's .dosmeta mach_kb leaves a hole
+# -- was the thing that kept failing (see the MEMORY note "a mach_kb swept on a
+# non-launching title measures the failure"), and the demand region reclaims an
+# order of magnitude more without consulting mach_kb at all.
 #
-# THE BET, AND IT IS MEASURED. The region is not immutable -- every boot writes
-# 38 bytes of BIOS scratch into it. It is safe because COW catches those stores,
-# which is why the pool pairing below is not optional. test286/runtrimzero.sh
-# sweeps all fourteen shipped images at 0xD000: each boots, is byte-identical to
-# an untrimmed run, copies out exactly 2 granules and loses 0 stores.
-DOS_MEM_TRIM ?= 0xD000
-DOS_CFLAGS += -DDOS_MEM_TRIM=$(DOS_MEM_TRIM)
+# A STALE -D FOR ANY OF THEM IS NOW A COMPILE ERROR, ON PURPOSE. 8086tiny.c
+# #errors rather than ignoring them, because a build that silently kept its old
+# flags would look identical to one that was rewired.
+#
+# THE FAILURE IS LOUD NOW TOO: a build that registers no pool has no backing
+# store for the demand region, so every first store to conventional memory would
+# be served from the scratch page and lost, counted only in dos_cow_lost.
+# dos_cpu_init() returns DOS_INIT_ENOPOOL (-4) instead of starting the guest
+# (test286/runnopool.sh). This project's recurring failure is the SILENT one
+# (external/8086tiny/docs/traps.md); this one is not.
 
-DOS_COW_ARENA ?= 1
-DOS_CFLAGS += -DDOS_COW_ARENA=$(DOS_COW_ARENA)
-ifeq ($(DOS_COW_ARENA),1)
-DOS_CFLAGS += -DDOS_COW_RO_WINDOWS=1
-# ...and the static array goes to ZERO PAGES, which is not a tuning choice: with
-# DOS_COW_RO_WINDOWS=1 the default derivation in 8086tiny.c (DOS_COW_POOL_MIN)
-# gives 4 static pages = 16,416 B of BSS, and in an arena build that array is
-# only the FALLBACK -- the live pages arrive at run time out of mem[]'s own
-# machine-size hole and cost the link nothing. Paying 16,416 B of RAM_EMU
-# headroom for a fallback is exactly the inertness the arena exists to remove
-# (docs/memory/21-cow-arena.md section 1: a BSS pool can never be big enough to
-# matter). When the arena refuses -- no per-title .dosmeta machine size, the
-# common case today -- capacity is 0 and the build behaves as it does with
-# DOS_COW_ARENA=0; the runtime dos_cow_capacity() check in dos_xipsm.c is what
-# makes a window decline rather than lose stores.
-ifeq ($(DOS_MEM_TRIM),0)
-DOS_CFLAGS += -DDOS_COW_POOL_PAGES=0
-else
-# ...UNLESS THE TRIM IS ON, and this pairing is load-bearing rather than
-# cautious. The arena funds the pool AT RUN TIME out of the hole a per-title
-# INT 12h machine size leaves in mem[]; a title with no .dosmeta mach_kb leaves
-# no hole, dos_arena_open() refuses with reason 1, and dos_cow_capacity() is 0.
-# That is survivable for dos_xipsm.c because it ASKS before it arms and then
-# declines (docs/memory/19-the-window-with-no-pool.md). A TRIM CANNOT DECLINE:
-# mem[] is physically shorter, the window is the only backing store the tail
-# has, and it is armed on every run of every title.
-#
-# MEASURED, NOT REASONED: test286/runtrimzero.sh arm 4 builds exactly the
-# POOL_PAGES=0 arena flags with no machine size and loses 38 guest stores per
-# boot; arm 5 is the same build with these four static pages and is
-# byte-identical to an untrimmed run. Four is DOS_COW_POOL_MIN, a two-page
-# margin on a floor of two granules measured across all fourteen shipped images
-# (docs/memory/18-why-trim-is-not-on.md section 3).
-#
-# It costs 4 x 4,114 = 16,456 B of BSS back out of the 53,248 the trim reclaims.
-#
-# A VARIABLE RATHER THAN A LITERAL since PM3: the pool is the term that decides
-# whether demand paging (below) frees anything at all, so it has to be settable
-# on the make command line beside it. The value is unchanged.
-DOS_COW_POOL_PAGES ?= 4
-DOS_CFLAGS += -DDOS_COW_POOL_PAGES=$(DOS_COW_POOL_PAGES)
-endif
-# EVICTION, and it ships WITH the arena or not at all. dos_zram.c has been
-# finished, host-tested (test286/runevict.sh, docs/memory/17-eviction.md) and
-# completely dark since it landed, for want of these two lines. It is what
-# covers a pool smaller than a title's write set, which is now the binding
-# constraint rather than a hypothetical: KEEN4's write set is 146 granules and
-# SIMCITY's is 113 against an arena that funds 21 pages. Eviction on top of a
-# 0-page or 2-page pool would be meaningless, hence the coupling.
+# EVICTION. dos_zram.c is what covers a pool smaller than a title's write set,
+# which is the binding constraint rather than a hypothetical: KEEN4's write set
+# is 146 granules and SIMCITY's is 113. Host-tested in test286/runevict.sh and
+# documented in external/8086tiny/docs/memory/17-eviction.md.
 #
 # DOS_ZRAM_AUTO is the firmware's wiring switch: dos_cpu_init() installs the
-# store itself, from the pool's spare, tier 1 (compressed SRAM) only. The host
+# store itself, out of the pool's spare, tier 1 (compressed SRAM) only. The host
 # harness must NOT define it -- test286/host_main.c does its own wiring from
-# DOS_COW_STORE and the two would claim the same arena.
+# DOS_COW_STORE and the two would claim the same block.
+#
+# UNCONDITIONAL SINCE THE ARENA WENT. These two lines used to sit inside
+# `ifeq ($(DOS_COW_ARENA),1)` and were coupled to it because eviction on top of
+# a 0- or 2-page pool would have been meaningless. With the pool registered from
+# AXI headroom that floor no longer exists, so the coupling has nothing left to
+# express.
 DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=1
-endif
 
 # THE EXTENT OF THE GUEST'S PHYSICAL ADDRESS SPACE, in bytes. 8 MB.
 #
@@ -2537,35 +2500,20 @@ DOS_CFLAGS += -DDOS_FOLD_DOMAIN=$(DOS_FOLD_DOMAIN)u
 DOS_SS_BIG_STACK ?= 1
 DOS_CFLAGS += -DDOS_SS_BIG_STACK=$(DOS_SS_BIG_STACK)
 
-# PM3 -- DEMAND-PAGED CONVENTIONAL MEMORY. Guest [BASE, TOP) keeps its address
-# space and gets its SRAM 4 KB at a time on the first store: mem[] shrinks by
-# TOP-BASE (RAM_SIZE, 8086tiny.c) and the COW pool grows by the granules the
-# guest actually writes. Both default to 0, i.e. OFF, and that is a MEASURED
-# default rather than caution -- see
-# external/8086tiny/docs/memory/25-demand-does-not-pay.md.
+# NO DOS_DEMAND_BASE / DOS_DEMAND_TOP. Demand paging is not a knob any more --
+# it is how guest conventional memory works, wired into 8086tiny.c with the
+# region fixed at [0x10000, 0xA0000). Passing either name is now a compile
+# error. The old comment here priced it as an option that "does not pay" against
+# ONE STATIC ARRAY that had to satisfy every title (149 pool pages for KEEN 4 in
+# play against a 144-granule region, net -14,564 B). That arithmetic is what
+# changed: the pool is registered at run time out of the AXI the region itself
+# frees, so the term it was measured against no longer exists. See the pool
+# block above and external/8086tiny/docs/memory/.
 #
-# A pool page costs 4,114 B to hold a 4,096 B granule, so the whole saving is
-# the granules a title never writes. KEEN 4 in play needs 149 pool pages against
-# a 144-granule region, and one static array has to satisfy every title, so at a
-# pool where nothing loses a store the net is -14,564 B: it COSTS AXI. It turns
-# positive only by dropping guest stores (59,993 of them on KEEN 4 at 133), and
-# that is not a trade worth making for a title that runs today.
-#
-# TEN OF TWELVE IMAGES WOULD FREE 150-450 KB EACH. Unlocking that needs a
-# PER-TITLE pool, i.e. PM2's arena -- at which point this is one make flag:
-#
-#   make ... DOS_DEMAND_BASE=0x10000 DOS_DEMAND_TOP=0xA0000 DOS_COW_POOL_PAGES=149
-#
-# NEVER SET THESE WITHOUT SETTING DOS_COW_POOL_PAGES. 8086tiny.c's default
-# derivation is SIZE/GRAN + 2, which gives back exactly what it took -- and is
-# still short of KEEN 4, because dos_seam_sync() takes pool pages BELOW the
-# region and cascades downward. Measure with test286/demandmap.sh --entries and
-# price with test286/demandsize.sh; do not guess.
-#
-# The region must lie inside [0x10000, 0xA0000) and both ends must be
-# 4096-aligned; 8086tiny.c #errors otherwise. The 0x10000 floor is empirical --
-# demand-paging any granule below it breaks a FreeDOS boot
-# (docs/memory/06-straddle-and-demand.md, LOW=1 in test286/rundemand.sh).
+# The 0x10000 floor is still empirical and still worth knowing: demand-paging
+# any granule below it breaks a FreeDOS boot
+# (external/8086tiny/docs/memory/06-straddle-and-demand.md, LOW=1 in
+# test286/rundemand.sh).
 # DOS_XIP_CACHE=1 caches the whole .dsk into external flash at core entry
 # (main_dos.c). It used to be reachable only as DOS_CFLAGS_EXTRA="-DDOS_XIP_CACHE=1",
 # the same channel ad-hoc debug flags use, so every use of it silently competed
@@ -2581,10 +2529,6 @@ DOS_CFLAGS += -DDOS_SS_BIG_STACK=$(DOS_SS_BIG_STACK)
 # (external/8086tiny/docs/memory/24-trim-self-arm.md).
 DOS_XIP_CACHE ?= 0
 DOS_CFLAGS += -DDOS_XIP_CACHE=$(DOS_XIP_CACHE)
-
-DOS_DEMAND_BASE ?= 0
-DOS_DEMAND_TOP  ?= 0
-DOS_CFLAGS += -DDOS_DEMAND_BASE=$(DOS_DEMAND_BASE) -DDOS_DEMAND_TOP=$(DOS_DEMAND_TOP)
 
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
 

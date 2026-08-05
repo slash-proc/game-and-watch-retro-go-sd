@@ -5,8 +5,7 @@
 // entry and installs no copy-on-write trap. A restore is a straight decompress
 // into ordinary writable guest RAM. It buys BOOT TIME and zero bytes of AXI.
 //
-// WHY THIS IS A TRANSLATION UNIT OF ITS OWN, and it is the same reason
-// dos_arena.c is one. main_dos.o is EXCLUDED from `.xip_dos` in
+// WHY THIS IS A TRANSLATION UNIT OF ITS OWN: main_dos.o is EXCLUDED from `.xip_dos` in
 // STM32H7B0VBTx_SDCARD.ld -- ITCM->flash veneers fail on arm-none-eabi 15.x for
 // the objects that section takes -- so anything written inside main_dos.c is
 // charged to `.overlay_dos`, i.e. to AXI, i.e. to guest RAM in 4 KB quanta.

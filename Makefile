@@ -538,7 +538,7 @@ DOS_C_SOURCES =
 CORE_DOS = external/8086tiny
 DOS_C_SOURCES += \
 $(CORE_DOS)/8086tiny.c \
-$(CORE_DOS)/dos_arena.c \
+$(CORE_DOS)/dos_paging.c \
 $(CORE_DOS)/dos_zram.c \
 $(CORE_DOS)/dos_xms.c \
 $(CORE_DOS)/dos_ems.c \
