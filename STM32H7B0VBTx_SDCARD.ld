@@ -1049,10 +1049,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_arena.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1116,6 +1116,8 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_osk.o (.rodata .rodata* .text .text*)
     build/dos/dos_xms.o (.rodata .rodata* .text .text*)
     build/dos/dos_ems.o (.rodata .rodata* .text .text*)
+    build/dos/dos_mouse.o (.rodata .rodata* .text .text*)
+    build/dos/dos_mouse_ui.o (.rodata .rodata* .text .text*)
     build/dos/dos_xipsm.o (.rodata .rodata* .text .text*)
     build/dos/dos_xipimg.o (.rodata .rodata* .text .text*)
     build/dos/dos_arena.o (.rodata .rodata* .text .text*)

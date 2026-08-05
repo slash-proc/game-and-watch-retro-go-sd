@@ -13,6 +13,7 @@
 #include "dos_video.h"
 #include "dos_input.h"
 #include "dos_osk.h"
+#include "dos_mouse_ui.h"
 #include "dos_cpu.h"
 #include "dos_audio.h"
 #include "dos_ospi_bench.h"
@@ -1262,6 +1263,14 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
              * per *blit* are different numbers, and both are reported. */
             dos_prof_blit_begin();
             dos_blit();
+            /* The synthesised mouse pointer, between the guest image and the
+             * OSK bars. It owns no rows of its own: it draws INTO rows 20-219,
+             * over whatever dos_blit() just put there, which is why it has to
+             * come after. Nothing to undraw -- dos_blit() is a full repaint of
+             * those rows every painted frame, so a pointer never survives into
+             * the next one and switching it off leaves no smear
+             * (dos_mouse_ui.c says what would break that). */
+            dos_mouse_ui_draw((uint8_t *)lcd_get_active_buffer());
             /* After the guest blit, before the swap. The OSK owns rows 0-19 and
              * 220-239, which dos_blit() never touches, so ordering only matters
              * for the mode-change case where video clears the whole buffer --

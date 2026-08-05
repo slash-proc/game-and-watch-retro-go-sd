@@ -542,6 +542,7 @@ $(CORE_DOS)/dos_arena.c \
 $(CORE_DOS)/dos_zram.c \
 $(CORE_DOS)/dos_xms.c \
 $(CORE_DOS)/dos_ems.c \
+$(CORE_DOS)/dos_mouse.c \
 $(CORE_DOS)/dos_meta.c \
 $(CORE_DOS)/dos_xipimg.c \
 $(CORE_DOS)/dos_xipsm.c \
@@ -550,6 +551,7 @@ Core/Src/porting/dos/main_dos.c \
 Core/Src/porting/dos/dos_video.c \
 Core/Src/porting/dos/dos_input.c \
 Core/Src/porting/dos/dos_osk.c \
+Core/Src/porting/dos/dos_mouse_ui.c \
 Core/Src/porting/dos/dos_cpu.c \
 Core/Src/porting/dos/dos_audio.c \
 Core/Src/porting/dos/dos_ospi_bench.c \
