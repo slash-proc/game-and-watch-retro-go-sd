@@ -2548,7 +2548,17 @@ DOS_CFLAGS += -DDOS_SS_BIG_STACK=$(DOS_SS_BIG_STACK)
 # boot of this image" stall, and nothing in the shipping build dereferences the
 # result. The trim that used to depend on it no longer does
 # (external/8086tiny/docs/memory/24-trim-self-arm.md).
-DOS_XIP_CACHE ?= 0
+# ON since load elision shipped: elision maps guest granules straight at the
+# .dsk in memory-mapped NOR, so with no cached image dos_elide_img is NULL and
+# every granule declines -- the whole mechanism is inert. main_dos.c's own
+# default is 1, but it sits behind #ifndef and THIS -D WINS, so setting it there
+# alone changed nothing. That is exactly how it shipped dark once already.
+#
+# The multi-second "first boot of this image" stall the paragraph above warns
+# about is real and is the price. A title too big for the part (BATTLECHESS at
+# 66,060,288 B against 64 MB) degrades to running from SD with elision off; it
+# must never refuse to start.
+DOS_XIP_CACHE ?= 1
 DOS_CFLAGS += -DDOS_XIP_CACHE=$(DOS_XIP_CACHE)
 
 DOS_CFLAGS += $(DOS_CFLAGS_EXTRA)
