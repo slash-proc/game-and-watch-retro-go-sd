@@ -250,6 +250,7 @@ external/8086tiny/
     handover.md                <- Entry point for picking the work up cold.
     decisions.md               <- Settled calls + WHY. Read before relitigating anything.
     testing.md                 <- How to test what you build.
+    references.md              <- External emulators to look behaviour up in, and where.
     <category>-roadmap.md      <- Feature checklist per category, links into the subdir below
     <category>/                <- Design detail, numbered 01.., 02..
     sprint-first-boot.md       <- COMPLETED RECORD, not an active plan.
@@ -281,6 +282,14 @@ repeating work:
    find out why it was made first.
 3. **`docs/sprint-first-boot.md`** — the current milestone and its ordered steps.
 4. **`docs/<category>-roadmap.md`** — then drill into `docs/<category>/` as needed.
+
+### Before hypothesising about CPU or peripheral behaviour
+
+Read **`docs/references.md`** first. It maps a question — protected mode, V86, gate
+DPL, the PIC, the PIT, VGA planes — onto the file and line in the `external/tiny386`
+checkout that already implements it, and records the per-file licence headers.
+Several Windows 3.11 blockers here were settled 386 behaviour that cost a session
+of bisecting guest symptoms and would have taken minutes to look up.
 
 ### Conventions
 

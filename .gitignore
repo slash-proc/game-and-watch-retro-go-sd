@@ -65,3 +65,7 @@ gwemu.app/
 /*.gdb
 /gwemu-*.png
 /out/
+
+# Read-only reference checkout, not a submodule and never built. Clone it with
+# the pin recorded in external/8086tiny/docs/references.md.
+/external/tiny386/
