@@ -2404,7 +2404,24 @@ DOS_CFLAGS_EXTRA ?=
 # chased. With it off, an evicted page goes straight to the SD pagefile: slower,
 # but one mechanism instead of two, and a lost store can only have come from one
 # place. Turn it back on ONLY with a title that fills 8 MB as the witness.
-DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=0
+#
+# -DDOS_COW_STORE_AUTO=1 IS WHAT MAKES "STRAIGHT TO THE SD PAGEFILE" TRUE, and
+# without it the paragraph above described a build that had NO backing store at
+# all. dos_cpu_init()'s install of the pool's store was compiled behind
+# `#if DOS_COW_EVICT && DOS_ZRAM_AUTO`, so -DDOS_ZRAM_AUTO=0 removed the call
+# that hands dos_zram_pgf_lower() -- the SD pagefile -- to the evictor, not just
+# the compressed tier. (The same trap was reachable the other way: the
+# documented tier-1 negative control DOS_ZRAM_SHARE_PCT=0 skipped the identical
+# call behind `if (rows)`.) Measured on the device at -DDOS_ZRAM_AUTO=0:
+# `evict=1 zram=0` in the banner, `pgf on len=0B slots=0`, `cold=63`,
+# `** POOL WEDGED: stores discarded **`, 13,502 guest stores lost -- and a lost
+# store is a correctness bug, never a performance one.
+#
+# The two flags are now separate: STORE_AUTO installs the store, ZRAM_AUTO
+# decides whether tier 1 also gets an arena. The banner grew a RUNTIME `store=`
+# field so this cannot go quiet again: `evict=1 store=0` is the wedge, in line
+# one, instead of thirteen thousand instructions of `lost=`.
+DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=0 -DDOS_COW_STORE_AUTO=1
 
 # LOAD ELISION. A guest granule filled whole by an INT 13h read is mapped
 # straight at the .dsk in NOR instead of being copied into a COW pool page, so
