@@ -227,7 +227,13 @@ void dos_input_update(const odroid_gamepad_state_t *js)
     /* ---- Mode toggle ------------------------------------------------------
      *
      * GAME (ODROID_INPUT_START on the case's legend -- see the naming warning
-     * above) opens and closes the on-screen keyboard.
+     * above) cycles the on-screen keyboard through three states:
+     *
+     *     off --GAME--> keyboard --GAME--> mouse --GAME--> off
+     *
+     * This file does not know that. It asks dos_osk_visible() whether the OSK
+     * owns the buttons and routes on that alone, which is why growing the cycle
+     * from two states to three changed nothing here but a function name.
      *
      * docs/input-roadmap.md flagged this as a CONFLICT and suggested the
      * zelda-only START button (ODROID_INPUT_X) as "the obvious spare". That is
@@ -244,14 +250,15 @@ void dos_input_update(const odroid_gamepad_state_t *js)
      * the gain is 90-odd keys that were not reachable at all.
      *
      * While the OSK is up it owns the d-pad, A, B and TIME; GAME stays the
-     * toggle so there is always a way out. */
+     * cycle so there is always a way out -- from mouse mode too, which is the
+     * property that makes it safe for mouse mode to take the d-pad entirely. */
     const bool osk_was_up = dos_osk_visible();
     const uint8_t toggle_now = js->values[ODROID_INPUT_START] ? 1 : 0;
 
     if (toggle_now && !dos_toggle_prev) {
         if (!osk_was_up)
             dos_input_release_all();
-        dos_osk_toggle();
+        dos_osk_cycle();
     }
     dos_toggle_prev = toggle_now;
 

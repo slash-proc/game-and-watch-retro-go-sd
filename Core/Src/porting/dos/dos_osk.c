@@ -20,6 +20,17 @@
  *
  * Rendering lives here rather than in dos_video.c because the two own disjoint
  * parts of the panel: video owns rows 20-219, input owns rows 0-19 and 220-239.
+ *
+ * THREE TOP-LEVEL MODES, ONE BUTTON. GAME cycles
+ *
+ *     OFF --GAME--> KBD --GAME--> MOUSE --GAME--> OFF
+ *
+ * and osk_set_mode() is the ONLY place a transition happens. Everything that
+ * has to be true on a mode change -- the mouse UI following the mode, held
+ * clicks released, the stale button image discarded, both framebuffers
+ * repainted -- lives in that one function, so a future per-mode behaviour is a
+ * branch there and in draw_status()/dos_osk_input(), not a rewrite. See
+ * external/8086tiny/docs/input/03-onscreen-keyboard.md.
  */
 
 #include "dos_osk.h"
@@ -68,11 +79,11 @@ enum {
     OSK_ACT_CTRL,
     OSK_ACT_ALT,
     OSK_ACT_LAYER,      /* cycle layer */
-    OSK_ACT_CLOSE,      /* hide the keyboard */
-    /* Mouse mode is a MODE OF THIS KEYBOARD, not a third top-level mode.
-     * The d-pad cannot drive a key grid and a pointer at once, and the OSK is
-     * already the place the user goes for "the thing my buttons do not have" --
-     * so it is reached from here and left from here. See dos_mouse_ui.h. */
+    OSK_ACT_CLOSE,      /* straight to OFF, short-cutting mouse mode */
+    /* Mouse mode IS a top-level mode now (GAME cycles into it), so no grid key
+     * carries OSK_ACT_MOUSE any more -- see the K_NAV comment below. The action
+     * is kept because it costs three lines and is the whole of re-adding an
+     * MSE cell if the button route turns out not to be discoverable enough. */
     OSK_ACT_MOUSE,      /* enter mouse mode */
     OSK_ACT_CURSOR,     /* toggle the driver-drawn pointer */
 };
@@ -92,7 +103,18 @@ typedef struct {
 
 /* Common tail keys, spelled out per row because C has no array splicing. */
 #define K_MODS   KA("SHF", OSK_ACT_SHIFT), KA("CTL", OSK_ACT_CTRL), KA("ALT", OSK_ACT_ALT)
-#define K_NAV    KA("LYR", OSK_ACT_LAYER), KA("MSE", OSK_ACT_MOUSE), KA("OFF", OSK_ACT_CLOSE)
+/* MSE IS GONE FROM THE GRID AND ITS THREE CELLS WENT BACK TO BACKTICK.
+ * GAME now reaches mouse mode in one press from anywhere, on every unit, with
+ * no grid navigation at all -- so an MSE cell would be a strictly slower
+ * duplicate of a button that already exists. Backtick, by contrast, is
+ * reachable nowhere else on the device, which is exactly what the comment on
+ * layer 1 row 1 said when it was dropped to make room. Trading a duplicate for
+ * the only route to a key is the good side of that trade.
+ *
+ * Discoverability moved to the status bar instead of the grid: the top line
+ * says "GAME>MSE" on every layer, which is more visible than one cell on one
+ * layer ever was. */
+#define K_NAV    KA("LYR", OSK_ACT_LAYER), KA("OFF", OSK_ACT_CLOSE)
 
 /* Layer 0 -- letters. 13 + 4*3 = 25 cells / 13 + 3*3 + 3*3 = 31 cells. */
 static const osk_key_t osk_l0r0[] = {
@@ -118,15 +140,16 @@ static const osk_key_t osk_l1r1[] = {
     KL(','), KL(';'), KL('\''), KL('"'), KL('('),
     KL(')'), KL('['), KL(']'), KL('<'), KL('>'),
     KL('!'), KL('@'), KL('#'), KL('$'), KL('%'),
-    /* '`' USED TO BE HERE AND WAS REMOVED WHEN K_NAV GAINED THE MSE KEY.
-     * A row is 320/8 = 40 cells and this one was already at 41 with the extra
-     * three-cell key: 20 single-char keys + K_MODS(9) + ESC(3) + K_NAV(9).
-     * draw_glyph() CLIPS SILENTLY, so the symptom would have been the OFF key
-     * simply not being drawn on this layer -- no warning, no fault, just an
-     * unreachable way out of the keyboard. Backtick is the least useful key on
-     * the row at a DOS prompt; it is still reachable nowhere else, which is
-     * stated rather than hidden. */
-    KL('&'), KL('^'), KL('~'), KL('|'),
+    /* '`' IS BACK. It was dropped when K_NAV gained the three-cell MSE key,
+     * because a row is 320/8 = 40 cells and this one would have been at 41.
+     * K_NAV lost MSE again (see its comment), so the arithmetic is now
+     * 20 single-char keys + K_MODS(9) + ESC(3) + K_NAV(6) = 38. Still under 40,
+     * which matters because draw_glyph() CLIPS SILENTLY -- an over-long row
+     * loses its OFF key with no warning and no fault.
+     *
+     * This number is no longer maintained by hand: test286/runoskmode.sh arm C
+     * counts all six rows from the source and fails over 40. */
+    KL('&'), KL('^'), KL('~'), KL('|'), KL('`'),
     K_MODS, KS("ESC", 27), K_NAV,
 };
 
@@ -166,7 +189,17 @@ static const osk_row_t osk_layout[OSK_LAYERS][OSK_ROWS] = {
 
 #define OSK_ECHO_MAX 38
 
-static bool     osk_shown;
+/* The GAME cycle. Order IS the cycle order -- dos_osk_cycle() is (mode + 1) %
+ * OSK_MODE_COUNT and nothing else, so inserting a mode here inserts it into the
+ * cycle and nowhere else has to agree. */
+enum {
+    OSK_MODE_OFF = 0,   /* buttons belong to the guest (dos_input.c's table) */
+    OSK_MODE_KBD,       /* the key grid owns the d-pad */
+    OSK_MODE_MOUSE,     /* the pointer owns the d-pad */
+    OSK_MODE_COUNT,
+};
+
+static uint8_t  osk_mode;
 static uint8_t  osk_layer;
 static uint8_t  osk_row;
 static uint8_t  osk_col;
@@ -194,6 +227,38 @@ static uint8_t  osk_seen_cols;       /* BDA 0x44A low byte */
 #define C_WHITE   15
 
 static void osk_mark_dirty(void) { osk_paints = 2; }
+
+/* THE ONLY PLACE osk_mode CHANGES. Four obligations, all of which have a
+ * failure behind them, and all of which are easy to forget at a new call site:
+ *
+ *  - the mouse UI must follow the mode. dos_mouse_ui_set_active(false) releases
+ *    a held click; a click "let go" by a mode switch rather than by the user
+ *    would otherwise stay down forever (dos_mouse_ui.h), which is the same trap
+ *    dos_input_release_all() exists for on the keyboard side.
+ *  - entering a mode must NOT inherit the button image from the previous one.
+ *    The GAME press that causes the transition is still physically held on the
+ *    frame the new mode first runs, and without this it reads as a fresh press
+ *    inside the new mode. ~0u means "everything was already down", so the first
+ *    frame in a mode sees no edges at all.
+ *  - a latched modifier must not survive a mode change. It is invisible from
+ *    outside the key grid, so it would fire on whatever key was pressed next.
+ *  - both framebuffers must be repainted (the file header, note 1).
+ *
+ * Adding per-mode entry/exit behaviour later means adding it here. */
+static void osk_set_mode(uint8_t m)
+{
+    if (m == osk_mode)
+        return;
+
+    osk_mode = m;
+    dos_mouse_ui_set_active(m == OSK_MODE_MOUSE);
+
+    if (m != OSK_MODE_OFF) {
+        osk_prev_buttons = ~0u;
+        osk_sticky       = 0;
+    }
+    osk_mark_dirty();
+}
 
 /* ---------------------------------------------------------------------------
  * Painting
@@ -270,12 +335,16 @@ static void draw_status(uint8_t *fb)
     /* Mouse mode replaces the whole top bar rather than sharing it: the
      * position readout changes every frame and interleaving it with the sticky
      * modifier indicators made both unreadable. */
-    if (dos_mouse_ui_active()) {
+    if (osk_mode == OSK_MODE_MOUSE) {
         char st[41];
         dos_mouse_ui_status(st, sizeof st);
         draw_text(fb, 0, OSK_TOP_Y0, st, C_WHITE, C_BLACK);
+        /* 38 cells of 40. The old line spent nine of them on "TIME back" and
+         * had no room to name GAME at all; GAME is the one that must be here,
+         * because it is the only control that exists on every unit and the only
+         * way back to the game. */
         draw_text(fb, 0, OSK_TOP_Y1,
-                  "dpad move  B lclick  A rclick  TIME back", C_DIM, C_BLACK);
+                  "dpad move  B/A click  TIME kbd  GAME off", C_DIM, C_BLACK);
         return;
     }
 
@@ -288,6 +357,10 @@ static void draw_status(uint8_t *fb)
                   (osk_sticky & DOS_KMOD_CTRL) ? C_WHITE : C_DIM, C_BLACK);
     x = draw_text(fb, x, OSK_TOP_Y0, "ALT",
                   (osk_sticky & DOS_KMOD_ALT) ? C_WHITE : C_DIM, C_BLACK);
+    /* Where GAME goes from here. This replaces the MSE grid cell as the way
+     * mouse mode is discovered, and it is on every layer rather than one.
+     * 19 cells used above + 13 = 32 of 40. */
+    draw_text(fb, x, OSK_TOP_Y0, "   GAME>MSE", C_DIM, C_BLACK);
 
     /* Echo of what has been sent. Genuinely useful: the guest may be mid-redraw,
      * or not echoing at all, and then this is the only feedback there is. */
@@ -312,13 +385,13 @@ void dos_osk_draw(uint8_t *fb)
         return;
     osk_paints--;
 
-    if (!osk_shown) {
+    if (osk_mode == OSK_MODE_OFF) {
         blank_bars(fb);
         return;
     }
 
     draw_status(fb);
-    if (dos_mouse_ui_active()) {
+    if (osk_mode == OSK_MODE_MOUSE) {
         /* The grid is not reachable in mouse mode, so drawing it would be
          * offering keys the buttons cannot press. Blank the bottom bar and
          * leave the rest of this function's tail clears to tidy the edges. */
@@ -426,10 +499,10 @@ static void osk_press(void)
         osk_clamp_col();
         break;
     case OSK_ACT_CLOSE:
-        osk_shown = false;
+        osk_set_mode(OSK_MODE_OFF);
         break;
     case OSK_ACT_MOUSE:
-        dos_mouse_ui_set_active(true);
+        osk_set_mode(OSK_MODE_MOUSE);
         break;
     case OSK_ACT_CURSOR:
         dos_mouse_ui_set_render(!dos_mouse_ui_render());
@@ -459,14 +532,18 @@ void dos_osk_input(const odroid_gamepad_state_t *js)
      * there is nothing for the acceleration ramp to ramp. So this arm gets the
      * raw state, every frame, and returns before any grid navigation runs.
      *
-     * TIME (ODROID_INPUT_SELECT -- see dos_input.c's naming warning) is the way
-     * back to the key grid, and CUR toggles the pointer without leaving. GAME
-     * still closes the whole keyboard, which dos_input.c handles a level up and
-     * which is why there is always a way out even from in here. */
-    if (dos_mouse_ui_active()) {
+     * TIME (ODROID_INPUT_SELECT -- see dos_input.c's naming warning) steps BACK
+     * to the key grid. That is a deliberate retention, not an oversight: GAME
+     * only goes forwards round the cycle, so without it the way from mouse mode
+     * to the keyboard is two presses through OFF, which drops the guest's
+     * buttons back to the game in between. It is also the arm a future per-mode
+     * TIME behaviour would replace -- it is one branch, in one place.
+     *
+     * GAME cycles on to OFF, which dos_input.c handles a level up, and which is
+     * why there is always a way out even from in here. */
+    if (osk_mode == OSK_MODE_MOUSE) {
         if (went & (1u << ODROID_INPUT_SELECT)) {
-            dos_mouse_ui_set_active(false);
-            osk_mark_dirty();
+            osk_set_mode(OSK_MODE_KBD);
             return;
         }
         if (went & (1u << ODROID_INPUT_X)) {    /* START, zelda only */
@@ -511,7 +588,7 @@ void dos_osk_input(const odroid_gamepad_state_t *js)
 
 void dos_osk_reset(void)
 {
-    osk_shown        = false;
+    osk_mode         = OSK_MODE_OFF;
     osk_layer        = 0;
     osk_row          = 0;
     osk_col          = 0;
@@ -525,22 +602,22 @@ void dos_osk_reset(void)
     dos_mouse_ui_reset();
 }
 
-bool dos_osk_visible(void) { return osk_shown; }
+/* "Visible" is really "the OSK owns the buttons", which is what dos_input.c
+ * asks. Both non-OFF modes own them: the key grid drives a cursor over cells,
+ * mouse mode drives a pointer over the guest image, and in neither case may the
+ * d-pad also reach the guest's keyboard. */
+bool dos_osk_visible(void) { return osk_mode != OSK_MODE_OFF; }
 
-void dos_osk_toggle(void)
+/* GAME. OFF -> KBD -> MOUSE -> OFF.
+ *
+ * One button rather than two because GAME is the only spare button present on
+ * BOTH unit variants -- a mario has no START (Core/Inc/main.h) -- and
+ * docs/input/02-button-mapping.md's DECIDED note is that the door to the OSK
+ * must be on a button the whole fleet has. Adding a second door on START would
+ * make mouse mode a zelda-only feature. Cycling costs at most two presses to
+ * reach any mode and never strands the user, because the cycle always returns
+ * to OFF. */
+void dos_osk_cycle(void)
 {
-    osk_shown = !osk_shown;
-    /* Closing the keyboard leaves mouse mode too. There is no way to drive the
-     * pointer with the keyboard shut -- the d-pad goes back to the guest -- so
-     * a mouse mode that survived the close would be an invisible state that
-     * swallowed the next open. */
-    if (!osk_shown)
-        dos_mouse_ui_set_active(false);
-    if (osk_shown) {
-        /* Do not inherit a stale button image from game mode -- the same press
-         * that opened the keyboard must not also register as a grid press. */
-        osk_prev_buttons = ~0u;
-        osk_sticky       = 0;
-    }
-    osk_mark_dirty();
+    osk_set_mode((uint8_t)((osk_mode + 1u) % OSK_MODE_COUNT));
 }

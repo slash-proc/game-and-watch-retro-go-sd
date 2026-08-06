@@ -26,11 +26,22 @@
 /* Clear all state. Call once before the frame loop. */
 void dos_osk_reset(void);
 
-/* True while the keyboard owns the buttons. dos_input.c consults this. */
+/* True while the OSK owns the buttons -- in EITHER non-off mode. dos_input.c
+ * consults this and must not care which of the two it is. */
 bool dos_osk_visible(void);
 
-/* Show/hide. Hiding schedules a blank of both bars in both framebuffers. */
-void dos_osk_toggle(void);
+/* GAME. Advance one step round
+ *
+ *     off --> keyboard --> mouse --> off
+ *
+ * Reaching OFF schedules a blank of both bars in both framebuffers. The mode
+ * enum and the single transition point (osk_set_mode) are private to dos_osk.c
+ * on purpose: nothing outside needs to name a mode, and the day something does,
+ * an accessor is cheaper than a shared enum that two files can disagree about.
+ *
+ * The current mode is always on screen -- blank bars, "KBD L<n>", or
+ * "MOUSE <x>,<y>" -- so there is no state the user is in without being told. */
+void dos_osk_cycle(void);
 
 /* Consume one frame of gamepad state. Only called while visible. Edge
  * detection is internal, so this must be called exactly once per frame. */
