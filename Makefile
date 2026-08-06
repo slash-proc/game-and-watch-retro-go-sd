@@ -544,6 +544,7 @@ $(CORE_DOS)/dos_xms.c \
 $(CORE_DOS)/dos_ems.c \
 $(CORE_DOS)/dos_mouse.c \
 $(CORE_DOS)/dos_meta.c \
+$(CORE_DOS)/dos_cfg.c \
 $(CORE_DOS)/dos_settings.c \
 $(CORE_DOS)/dos_xipimg.c \
 $(CORE_DOS)/dos_xipsm.c \

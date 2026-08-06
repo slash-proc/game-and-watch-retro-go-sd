@@ -45,6 +45,7 @@
 #include "gw_flash_alloc.h"       /* store_file_in_flash() */
 #include "dos_fbs.h"              /* the container (external/8086tiny) */
 #include "dos_xms.h"              /* dos_xms_store_path -- the pool file, §7 */
+#include "dos_settings.h"         /* DOS_SET_BOOT_SNAPSHOT -- the fast_boot key */
 
 #ifndef DOS_FBS_ENABLE
 #define DOS_FBS_ENABLE 1
@@ -191,6 +192,24 @@ void dos_fbs_boot(const char *dsk_path, unsigned long dsk_size,
     uint32_t t0 = HAL_GetTick();
     dos_fbs_hdr_t h;
     dos_fbs_status_t rs;
+
+    /* fast_boot = off. BEFORE the path is built and before store_file_in_flash()
+     * opens anything: the setting has to cost NOTHING, not merely produce
+     * nothing. dos_fbs_restore() and dos_fbs_capture() would both answer
+     * DOS_FBS_EOFF anyway -- this is the caller declining to do the I/O that
+     * precedes those answers, which on this device is an OSPI read of a
+     * megabyte-class file.
+     *
+     * dos_fbs_captured = 1 is what stops the FRAME half from capturing. Without
+     * it a title with fast_boot off would rewrite its snapshot on every launch
+     * and then refuse to use it -- a write loop rather than a setting, paid for
+     * in SD-card wear and boot time by exactly the title whose owner asked for
+     * less machinery. */
+    if (!dos_settings_get(DOS_SET_BOOT_SNAPSHOT)) {
+        dos_fbs_captured = 1;
+        printf("DOS: fbs off for this title (fast_boot = off) - booting normally\n");
+        return;
+    }
 
     dos_fbs_key.key_crc  = key_crc;
     dos_fbs_key.key_size = dsk_size;

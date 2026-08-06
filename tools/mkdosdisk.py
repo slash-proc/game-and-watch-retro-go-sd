@@ -329,6 +329,11 @@ COW_PAGES = {
 COW_PAGES_OVERRIDE: int | None = None
 EMIT_META = True
 
+# --no-cfg. Same shape as EMIT_META, and deliberately a SEPARATE switch: the
+# two sidecars have OPPOSITE LIFETIMES (see write_gamecfg) and anyone who wants
+# one suppressed almost never wants the other suppressed too.
+EMIT_CFG = True
+
 # Extra CONFIG.SYS lines from --config-line, appended after the generated ones.
 CONFIG_EXTRA: list[str] = []
 
@@ -396,6 +401,118 @@ def write_dosmeta(dsk: Path, pages: int | None = None, verbose: bool = True) -> 
     if verbose:
         print(f"  {out.name}: COW pool reservation {pages} pages "
               f"({pages * 4104:,} B)")
+
+
+# ---------------------------------------------------------------------------
+# The per-game .cfg
+#
+# THE TEMPLATE IS ALL COMMENTS AND NO ACTIVE KEYS, AND THAT IS THE WHOLE
+# DESIGN. A generated file must behave EXACTLY as no file at all, for every
+# title, or `mkdosdisk.py` would be silently retuning the library every time
+# somebody repacked an image. Every key below is commented out and annotated
+# with the default it would replace, so uncommenting one is a decision a human
+# makes with the number in front of them.
+#
+# Do not "helpfully" emit `ss_big_stack = on` because it is the default. A key
+# that restates today's default PINS the title to it: change the firmware
+# default later and every title carrying the line stays behind, which is the
+# opposite of what a default is for. (The same reasoning is spelled out in
+# external/8086tiny/docs/config/examples/TYRIAN.cfg.)
+GAME_CFG_TEMPLATE = """\
+# {stem}.cfg -- per-game settings. GENERATED ONCE and NEVER overwritten;
+# delete it for a fresh copy. Spec, every key, and the evidence behind each:
+# external/8086tiny/docs/config/01-game-cfg.md
+#
+# `key = value`, one per line. `#`/`;` comment. Case-insensitive. LF or CRLF.
+# OVER 2048 BYTES THE WHOLE FILE IS REFUSED. A bad key or value is not fatal
+# and never clamped: it keeps its default and the rest of the file applies.
+#
+#   compiled-in default  <  THIS FILE  <  the device's options menu
+#
+# A key REPLACES THE DEFAULT rather than setting a value, so the user's own
+# menu choice still wins and editing this file later moves the title.
+#
+# EVERY LINE BELOW IS A COMMENT: as shipped this file changes NOTHING.
+# Uncomment only what you MEAN to change -- a key restating today's default
+# pins this title to it, and stops a future firmware default from moving it.
+
+# bool, DEFAULT on. Honour SS.B (ESP, not SP, on the hot stack macros). A
+# DOS/4GW or Borland-DPMI title CANNOT RUN with it off; a real-mode one buys
+# back a measured 6.0% of dos_cpu_frame (sscost.sh).
+#ss_big_stack = on
+
+# bool, DEFAULT on. Fast-boot snapshot. `off` disables restore AND capture --
+# use it while debugging this title's boot, or to force a fresh one.
+#fast_boot = off
+
+# bool, DEFAULT no reservation. Expanded memory; `on` == `ems_kb = 64`.
+#ems = on
+
+# int KB, DEFAULT 0 = unspecified (leaves the .dosmeta latch alone). 0, or
+# >= 64 and a multiple of 16, up to 512: a frame is 64 KB and all-or-nothing,
+# so 16 and 48 are REFUSED, not rounded. COSTS COW POOL, ~12 pages per 64 KB.
+#ems_kb = 64
+
+# Reserved but NOT wired, so writing one does nothing: refresh_hz, cpu_speed,
+# xms, xms_kb, mouse_mode, mouse_cursor, cpu_level (docs/cpu/14-cpu-level.md).
+# NOT settings at all: the DOS variant, the program to run and its arguments
+# are baked into the .dsk (--system, --entry, --entry-args). Repack to change.
+"""
+
+
+def write_gamecfg(dsk: Path, verbose: bool = True) -> None:
+    """Emit a commented-out .cfg template beside a freshly built image.
+
+    NEVER OVERWRITES. This is the one hard rule, and it is the opposite of
+    write_dosmeta()'s rule, which is why the two are separate functions with
+    separate switches:
+
+      .dosmeta  a MEASUREMENT of these exact bytes, keyed on (size, crc).
+                Regenerating the .dsk INVALIDATES it, so it MUST be rewritten
+                -- a measurement against different bytes is a wrong number.
+      .cfg      a HUMAN DECISION about the title. Nothing regenerates it and
+                nothing may: clobbering somebody's tuning on a repack is the
+                worst thing this feature could do, and it would be silent.
+
+    Confusing those two has already cost this project a day: every sidecar on
+    the card once read `mach_kb = 0` after a repack and four subsystems
+    switched off with nothing logged (external/8086tiny/docs/traps.md).
+
+    The template is all comments, so a freshly generated file is behaviourally
+    identical to no file at all. That is asserted, not assumed --
+    tools/test_mkdosdisk_cfg.py parses it with the real dos_cfg.c and checks
+    that ZERO settings are applied.
+    """
+    if not EMIT_CFG:
+        return
+    out = dsk.with_suffix(".cfg")
+    if out.exists():
+        # SAID OUT LOUD. A user who edited this file needs to see that the
+        # repack respected it; silence would look identical to overwriting it.
+        if verbose:
+            print(f"  {out.name}: kept (hand-edited files are never overwritten)")
+        return
+    text = GAME_CFG_TEMPLATE.format(stem=dsk.stem)
+
+    # THE 2048-BYTE CAP IS NOT ADVISORY AND IT BITES THE TEMPLATE FIRST.
+    # dos_cfg.c REFUSES AN OVERSIZED FILE WHOLE (DOS_CFG_ETOOBIG) rather than
+    # truncating it, so a template that grew one byte past the cap would be
+    # rejected on the device by every title in the library at once -- and,
+    # because the template is inert anyway, with NO VISIBLE SYMPTOM beyond one
+    # log line nobody reads. The first draft of this template was 2049 bytes
+    # and test286/runcfggen.sh arm 1 caught it. Raising here rather than
+    # warning: a .cfg the firmware will not read is not a file worth writing.
+    if len(text.encode("ascii")) > 2048:
+        raise RuntimeError(
+            f"GAME_CFG_TEMPLATE renders to {len(text)} bytes for stem "
+            f"{dsk.stem!r}; dos_cfg.c refuses anything over 2048 WHOLE. "
+            f"Shorten the template.")
+
+    out.write_text(text, encoding="ascii", newline="\n")
+    if verbose:
+        print(f"  {out.name}: template written (all keys commented out -- "
+              f"changes nothing until you edit it)")
+
 
 # Names that are almost never the thing you want to run. Checked before the
 # generic pick so a directory shipping SETUP.EXE next to the real binary does
@@ -2033,6 +2150,7 @@ def pack_hdd(src: Path | None, dst: Path, source: MsDosSource,
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(img.build())
     write_dosmeta(out)
+    write_gamecfg(out)
 
     if verbose:
         used = img.total_clusters * img.cluster_bytes - img.free_bytes
@@ -2115,6 +2233,7 @@ def pack(src: Path | None, dst: Path, source: DosSource, entry_override: str | N
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(img.build())
     write_dosmeta(out)
+    write_gamecfg(out)
 
     if verbose:
         used = IMAGE_SIZE - img.free_bytes
@@ -2313,6 +2432,12 @@ def main() -> int:
                         help="do not write a .dosmeta sidecar (the image then "
                              "gets the full COW pool at runtime, which is the "
                              "pre-sidecar behaviour)")
+    parser.add_argument("--no-cfg", action="store_true",
+                        help="do not write a .cfg template beside the image. "
+                             "An EXISTING .cfg is never touched with or without "
+                             "this flag -- it is hand-authored and repacking "
+                             "must not clobber it; this only suppresses "
+                             "creating one where there is none.")
     parser.add_argument("--verify", action="store_true",
                         help="Re-open each written image and check it structurally")
     parser.add_argument("--config-line", action="append", metavar="LINE",
@@ -2336,9 +2461,10 @@ def main() -> int:
                         help="List what the selected DOS source contains, and exit")
     args = parser.parse_args()
 
-    global COW_PAGES_OVERRIDE, EMIT_META, CONFIG_EXTRA, SKIP_BOOT_KEYS, EXPAND_SYSTEM
+    global COW_PAGES_OVERRIDE, EMIT_META, EMIT_CFG, CONFIG_EXTRA, SKIP_BOOT_KEYS, EXPAND_SYSTEM
     COW_PAGES_OVERRIDE = args.cow_pages
     EMIT_META = not args.no_meta
+    EMIT_CFG = not args.no_cfg
     CONFIG_EXTRA = list(args.config_line or [])
     SKIP_BOOT_KEYS = args.skip_boot_keys
     EXPAND_SYSTEM = not args.no_expand_system

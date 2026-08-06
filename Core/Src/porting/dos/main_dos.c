@@ -1541,6 +1541,15 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * file all mean "defaults" and all say which; none of them stops a title.
      * The fopen is transient -- it is closed before dos_cpu_init() takes its
      * three long-lived handles out of MAX_OPEN_FILES = 8. */
+    /* THE PER-GAME .cfg, and BEFORE dos_settings_rg_load() because that is the
+     * layering: the .cfg supplies this title's DEFAULTS, and load() then resets
+     * onto them and overlays whatever the user changed by hand. The reverse
+     * order would let a file on the card overrule the user's own menu choices.
+     *
+     * Also before dos_cpu_init(), like everything else in this block, and for
+     * the same two reasons: dos_ss_big_cfg is read on the segment-load path,
+     * and the EMS reservation is claimed inside dos_cpu_init() itself. */
+    dos_cfg_rg_load(ACTIVE_FILE->path);
     dos_settings_rg_load(ACTIVE_FILE->path);
     dos_settings_rg_apply();
 
