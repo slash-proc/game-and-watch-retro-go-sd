@@ -23,6 +23,8 @@ bool rg_favorites_remove(const char *path);
 bool rg_favorites_reset(void);
 /** Register the ★ tab; MUST be the first tab added (tab index 0). */
 void rg_favorites_register_tab(void);
+/** Drop the ★ tab's RAM_EMU-allocated pseudo-emulator after ahb_init(). */
+void rg_favorites_forget_tab(void);
 /** True when the launcher is currently showing the favorites tab. */
 bool rg_favorites_is_current_tab(void);
 

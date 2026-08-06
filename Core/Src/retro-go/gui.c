@@ -241,11 +241,25 @@ tab_t *gui_add_tab(const char *name, int16_t logo_idx, int16_t header_idx, void 
     tab->is_empty = false;
     tab->arg = arg;
 
+    /* Stamped last, so a half-built tab never validates. */
+    tab->magic = GUI_TAB_MAGIC;
+    tab->alloc_generation = ram_alloc_generation;
+
     gui.tabs[gui.tabcount++] = tab;
 
     //printf("gui_add_tab: Tab '%s' added at index %d\n", tab->name, gui.tabcount - 1);
 
     return tab;
+}
+
+void gui_forget_tabs(void)
+{
+    /* No free(): ahb_calloc is a bump allocator and the caller has already
+     * reset it. All this can do is stop the launcher pointing at the corpses.
+     * memset rather than tabcount = 0 alone, so a stale pointer cannot be
+     * reached through gui.tabs[] by a later off-by-one either. */
+    memset(gui.tabs, 0, sizeof(gui.tabs));
+    gui.tabcount = 0;
 }
 
 void gui_init_tab(tab_t *tab)
@@ -289,9 +303,37 @@ void gui_refresh_tab(tab_t *tab)
     gui_event(TAB_REFRESH_LIST, tab);
 }
 
+/* The single choke point through which every tab_t reaches the rest of the
+ * launcher -- gui_get_current_tab, gui_set_current_tab, gui_change_tab and
+ * rg_emulators_restore_main_menu_browse_path all route through here -- which
+ * is why the validation lives here and nowhere else.
+ *
+ * Deliberately a hard stop rather than a NULL return. Callers already tolerate
+ * NULL and would carry on drawing an empty screen: exactly the "degrades
+ * gracefully, reports nothing" mode that made the fopen-handle exhaustion bug
+ * so expensive to find. A stale tab means the launcher's whole data model is
+ * gone, so there is nothing to degrade to. */
 tab_t *gui_get_tab(int index)
 {
-    return (index >= 0 && index < gui.tabcount) ? gui.tabs[index] : NULL;
+    if (index < 0 || index >= gui.tabcount)
+        return NULL;
+
+    tab_t *tab = gui.tabs[index];
+    if (tab == NULL)
+        return NULL;
+
+    if (tab->magic != GUI_TAB_MAGIC || tab->alloc_generation != ram_alloc_generation)
+    {
+        printf("gui_get_tab: tab[%d]=%p is STALE (magic=%08lx want %08lx, gen=%lu want %lu).\n"
+               "  A tab_t is ahb_calloc'd into RAM_EMU, which every emulator core overwrites.\n"
+               "  Whoever ran a core did not rebuild the launcher state afterwards.\n",
+               index, (void *)tab, (unsigned long)tab->magic, (unsigned long)GUI_TAB_MAGIC,
+               (unsigned long)tab->alloc_generation, (unsigned long)ram_alloc_generation);
+        assert(!"stale tab_t: launcher state not rebuilt after a core run");
+        return NULL;
+    }
+
+    return tab;
 }
 
 tab_t *gui_get_current_tab()

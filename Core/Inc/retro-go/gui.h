@@ -50,6 +50,25 @@ typedef struct {
 typedef void (*gui_event_handler_t)(gui_event_t event, void *arg);
 
 typedef struct {
+    /* Self-validation, checked by gui_get_tab() on every lookup.
+     *
+     * A tab_t is ahb_calloc'd, and ahb_calloc prefers ram_malloc while the
+     * launcher has ram_start set -- so the tabs live in RAM_EMU, the same RAM
+     * every emulator core loads itself into. Measured on an SD build: the 24
+     * tabs sit at 0x2404c68c and 0x240d23e8..0x240d34cc, inside RAM_EMU
+     * (0x2404b000..0x24100000). A tab pointer that outlives a core run
+     * therefore still addresses mapped memory holding whatever the core left
+     * behind, so nothing faults at the dereference; the garbage propagates and
+     * the crash lands somewhere else entirely.
+     *
+     * magic catches "these bytes are not a tab any more"; alloc_generation
+     * catches the stricter "this tab predates an ahb_init()", which holds even
+     * in the lucky case where the bytes happen to have survived intact. Both
+     * are compared, because the cheap one alone is a check that can pass by
+     * accident. */
+    uint32_t magic;
+    uint32_t alloc_generation;
+
     char name[64];
     char status[96];
     int16_t header_idx;
@@ -60,6 +79,9 @@ typedef struct {
     listbox_t listbox;
     gui_event_handler_t event_handler;
 } tab_t;
+
+/* Arbitrary, but deliberately not a plausible pointer, length or ASCII run. */
+#define GUI_TAB_MAGIC 0x7AB1AC7Eu
 
 typedef struct {
     tab_t *tabs[32];
@@ -79,6 +101,9 @@ extern colors_t *curr_colors;
 extern colors_t gui_colors[];
 
 tab_t *gui_add_tab(const char *name, int16_t logo_idx, int16_t header_idx, void *arg, void *event_handler);
+/** Drop every tab pointer. Call after ahb_init() has invalidated them; the
+ *  tabs cannot be freed (bump allocator) and must be rebuilt instead. */
+void gui_forget_tabs(void);
 tab_t *gui_get_tab(int index);
 tab_t *gui_get_current_tab();
 tab_t *gui_set_current_tab(int index);

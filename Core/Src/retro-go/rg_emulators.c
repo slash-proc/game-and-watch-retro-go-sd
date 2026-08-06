@@ -10,6 +10,7 @@
 #include "dos_precache.h"
 #include "gw_firmware_abi.h"
 #include "gwhb.h"
+#include "appid.h"
 #include "rg_emulators.h"
 #include "rg_storage.h"
 #include "rg_i18n.h"
@@ -1695,6 +1696,16 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
     ram_start = 0;
     emulators = NULL;
     systems = NULL;
+    emulators_count = 0;
+    shared_files = NULL;
+    /* gui.tabs[] and favorites_emu hold RAM_EMU pointers too, and leaving them
+     * populated across the core run is the dangling window this whole class of
+     * bug lives in. Dropped here, at the moment of invalidation, so that
+     * anything reaching for a tab between now and the rebuild gets a clean NULL
+     * or trips gui_get_tab's check, rather than a plausible pointer into the
+     * core's working set. */
+    rg_favorites_forget_tab();
+    gui_forget_tabs();
     // some pointers were freed, set them to null
     rg_reset_logo_buffers();
 
@@ -1947,13 +1958,80 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
     free(newfile);
 #endif
 
+    /* Reached only when a core RETURNS instead of rebooting.
+     *
+     * Almost every core leaves via odroid_system_switch_app(0) -> a reset, so
+     * the launcher is rebuilt from a cold boot and none of this matters. The
+     * exceptions are the ones that fall through: app_main_dos() returns on
+     * every refuse-to-start path and again when the guest halts, and
+     * run_internal_emu()/run_gwhb_homebrew() return when the core or homebrew
+     * binary is rejected. On those paths execution goes back into retro_loop(),
+     * which immediately calls gui_redraw() on gui.tabs[gui.selected].
+     *
+     * Every one of those tabs is gone. gui_add_tab() uses ahb_calloc(), which
+     * prefers ram_malloc() while ram_start is set, so the tabs are allocated
+     * out of RAM_EMU -- measured at 0x2404c68c and 0x240d23e8..0x240d34cc,
+     * against a RAM_EMU of 0x2404b000..0x24100000. They still address mapped
+     * RAM, so nothing faults at the dereference; the garbage propagates
+     * instead and the crash lands somewhere else entirely (a wild
+     * tab->header_idx -> rg_get_logo() -> an unchecked index into the logo
+     * cache -> a BusFault attributed to odroid_overlay_draw_logo).
+     *
+     * The old code here reset the allocators and nulled a few pointers, which
+     * left gui.tabs[] pointing at the wreckage. Rebuilding is the only correct
+     * answer: nothing in RAM_EMU can be preserved, so the launcher's data model
+     * has to be constructed again exactly as it is at boot. */
+    rg_launcher_rebuild_after_core();
+}
+
+/* Rebuild every launcher structure that lives in RAM a core is allowed to use.
+ * Mirrors the sequence in app_main() (rg_main.c) deliberately: if the two ever
+ * diverge, the post-core launcher is not the boot launcher. */
+void rg_launcher_rebuild_after_core(void)
+{
+    /* 1. Invalidate. ahb_init() bumps ram_alloc_generation, which is what makes
+     *    any tab pointer that escapes this function detectable rather than
+     *    merely wrong (gui_get_tab). */
     ahb_init();
     itc_init();
     ram_start = 0;
-#if SD_CARD == 1
-    // some pointers were freed, set them to null
-    rg_reset_logo_buffers();
-#endif
+    rg_reset_logo_buffers();   /* the logo cache was itc_malloc'd; ITC is reset */
+
+    /* 2. Drop every reference to the invalidated memory. These are intflash
+     *    statics holding RAM_EMU pointers, so they survive the reset and would
+     *    otherwise be reused. emulators_count matters as much as the pointers:
+     *    add_emulator() appends, so a stale count would make the rebuild run
+     *    off the end of emulators[]. */
+    emulators = NULL;
+    systems = NULL;
+    emulators_count = 0;
+    shared_files = NULL;
+    rg_favorites_forget_tab();
+    gui_forget_tabs();
+
+    /* 3. A core may have left the LCD in LUT8 (DOS, PICO-8). The launcher draws
+     *    RGB565 and would otherwise paint through a palette it does not own.
+     *    Do this before anything draws. */
+    lcd_setup_framebuffers(LCD_MODE_RGB565);
+
+    /* 4. Re-establish the launcher identity. A core called odroid_system_init()
+     *    with its own appid, and gui_save_current_tab() refuses to persist
+     *    anything unless the current app is the launcher -- without this the
+     *    user's tab and cursor silently stop being saved. */
+    odroid_system_init(APPID_LAUNCHER, 32000);
+
+    /* 5. Rebuild, in boot order. */
+    ram_start = (uint32_t)&__RAM_EMU_START__;
+    emulators_init();
+    rg_emulators_restore_main_menu_browse_path();
+
+    /* 6. Put the user back where they were. gui_set_current_tab() clamps, and
+     *    gui_init_tab() repopulates the ROM list the core destroyed -- without
+     *    it the first gui_redraw() would draw a listbox whose items pointer is
+     *    stale in exactly the way the tab was. */
+    tab_t *tab = gui_set_current_tab(odroid_settings_MainMenuSelectedTab_get());
+    if (tab)
+        gui_init_tab(tab);
 }
 
 void emulators_init()

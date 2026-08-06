@@ -16,9 +16,17 @@
 #define INT_LOGO_COUNT 3
 
 static retro_logo_image** logo_image_cache;
+/* How many slots of logo_image_cache the last fill actually populated. The
+ * cache is itc_malloc'd for MAX_LOGO_COUNT but /bios/logo.bin decides how many
+ * are written; the rest are uninitialised ITC, i.e. whatever the last core left
+ * there. Indexing past this returns a plausible non-NULL pointer that faults on
+ * first use, which is how a wild tab->header_idx used to present as a BusFault
+ * inside odroid_overlay_draw_logo. */
+static int logo_image_count;
 
 void rg_reset_logo_buffers() {
     logo_image_cache = NULL;
+    logo_image_count = 0;
 }
 
 retro_logo_image *rg_get_logo(int16_t logo_index) {
@@ -43,7 +51,7 @@ retro_logo_image *rg_get_logo(int16_t logo_index) {
     logo_index -= INT_LOGO_COUNT;
 
     if (logo_image_cache != NULL) {
-        return logo_image_cache[logo_index];
+        return (logo_index < logo_image_count) ? logo_image_cache[logo_index] : NULL;
     }
 
     FILE* file = fopen("/bios/logo.bin", "rb");
@@ -56,7 +64,7 @@ retro_logo_image *rg_get_logo(int16_t logo_index) {
     assert(logo_image_cache != (void *)0xffffffff);
 
     int current_logo_index = 0;
-    while (1) {
+    while (current_logo_index < MAX_LOGO_COUNT) {
         if (fread(header, 1, 4, file) != 4)
             break;
 
@@ -78,7 +86,8 @@ retro_logo_image *rg_get_logo(int16_t logo_index) {
     }
 
     fclose(file);
-    return logo_image_cache[logo_index];
+    logo_image_count = current_logo_index;
+    return (logo_index < logo_image_count) ? logo_image_cache[logo_index] : NULL;
 }
 
 #pragma GCC push_options

@@ -9,6 +9,13 @@ static uint32_t current_ram_pointer;
 uint32_t ram_start;
 extern uint32_t __RAM_EMU_END__;
 
+/* Bumped by every ahb_init(). See gw_malloc.h for the rationale: these
+   allocators cannot free, so the only event that invalidates an outstanding
+   pointer is the bulk reset below -- and nothing used to record that the reset
+   had happened, leaving a holder no way to tell a live pointer from a dead
+   one before dereferencing it. */
+uint32_t ram_alloc_generation;
+
 static uint32_t current_ahb_pointer;
 extern uint32_t __ahbram_heap_start__;
 extern uint32_t __ahbram_audio_start__;
@@ -28,6 +35,9 @@ extern uint16_t __NULLPTR_LENGTH__;
 void ahb_init() {
   current_ram_pointer = (uint32_t)0;
   current_ahb_pointer = (uint32_t)(&__ahbram_heap_start__);
+  /* Every pointer handed out before this call is now dangling. Generation 0 is
+     reserved for "never stamped", so the first ahb_init() yields 1. */
+  ram_alloc_generation++;
 }
 
 size_t ram_get_free_size() {

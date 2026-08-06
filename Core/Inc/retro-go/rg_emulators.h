@@ -72,6 +72,9 @@ typedef struct {
 
 
 void emulators_init();
+/** Rebuild every launcher structure a core's use of RAM_EMU destroyed.
+ *  Call on the paths where a core RETURNS instead of rebooting. */
+void rg_launcher_rebuild_after_core(void);
 void rg_emulators_restore_main_menu_browse_path(void);
 void emulator_init(retro_emulator_t *emu);
 void emulator_refresh_list(retro_emulator_t *emu);

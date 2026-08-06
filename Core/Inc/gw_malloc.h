@@ -10,6 +10,24 @@ extern "C" {
 
 extern uint32_t ram_start;
 
+/* Generation counter for the bump allocators below.
+ *
+ * ram_malloc()/ahb_malloc()/ahb_calloc() cannot free, so the one event that
+ * invalidates every outstanding pointer at once is ahb_init() -- which the
+ * launcher calls both immediately before and immediately after every core run
+ * (emulator_start, rg_emulators.c). A holder that survives a core run holds a
+ * pointer into memory the core has since used, which historically presented as
+ * "a random BusFault" in whatever unrelated code dereferenced it first,
+ * several frames away from the mistake.
+ *
+ * Stamp this beside any pointer kept across a core launch and compare before
+ * use. tab_t.alloc_generation / gui_get_tab() is the reference use.
+ *
+ * Starts at 0 == "no allocation was ever valid", so a stamp sitting in zeroed
+ * .bss -- or in RAM a core has just wiped -- can never equal a live
+ * generation. */
+extern uint32_t ram_alloc_generation;
+
 void ahb_init();
 void *ahb_malloc(size_t size);
 void *ahb_only_malloc(size_t size);

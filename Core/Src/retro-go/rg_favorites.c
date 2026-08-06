@@ -271,6 +271,15 @@ void rg_favorites_register_tab(void)
                 favorites_emu, favorites_event_handler);
 }
 
+/* The ★ tab's pseudo-emulator is ahb_calloc'd, so it lives in RAM_EMU and is
+ * destroyed by any core that runs. Called from emulator_start's teardown so the
+ * pointer cannot outlive the memory; rg_favorites_register_tab() allocates a
+ * fresh one during the rebuild. */
+void rg_favorites_forget_tab(void)
+{
+    favorites_emu = NULL;
+}
+
 bool rg_favorites_is_current_tab(void)
 {
     tab_t *tab = gui_get_current_tab();
