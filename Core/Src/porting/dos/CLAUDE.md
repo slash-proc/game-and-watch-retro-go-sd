@@ -222,6 +222,7 @@ external/8086tiny/
   STATUS.md                    <- START HERE. Status, blockers, memory budget, traps. ~100 lines.
   docs/
     decisions.md               <- Settled calls + WHY. Read before relitigating anything.
+    references.md              <- External emulators to look behaviour up in, and where.
     sprint-first-boot.md       <- The active work plan.
     <category>-roadmap.md      <- Feature checklist per category, links into the subdir below
     <category>/                <- Design detail, numbered 01.., 02..
@@ -241,6 +242,14 @@ Still unwritten: memory map, integration, BIOS & system services.
    find out why it was made first.
 3. **`docs/sprint-first-boot.md`** — the current milestone and its ordered steps.
 4. **`docs/<category>-roadmap.md`** — then drill into `docs/<category>/` as needed.
+
+### Before hypothesising about CPU or peripheral behaviour
+
+Read **`docs/references.md`** first. It maps a question — protected mode, V86, gate
+DPL, the PIC, the PIT, VGA planes — onto the file and line in the `external/tiny386`
+checkout that already implements it, and records the per-file licence headers.
+Several Windows 3.11 blockers here were settled 386 behaviour that cost a session
+of bisecting guest symptoms and would have taken minutes to look up.
 
 ### Conventions
 
