@@ -2394,7 +2394,17 @@ DOS_CFLAGS_EXTRA ?=
 # a 0- or 2-page pool would have been meaningless. With the pool registered from
 # AXI headroom that floor no longer exists, so the coupling has nothing left to
 # express.
-DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=1
+# ZRAM IS OFF BY DELIBERATE CHOICE, 2026-08-06, not because it is broken.
+# Doug, while extended-memory failures were being isolated: "I want to disable
+# zram for now. I don't trust it and I want to isolate certain 'extra' tricks
+# while we're isolating the issues we're currently happening."
+#
+# Tier 1 (compressed SRAM) is untested against a guest that actually fills high
+# memory, and it sits directly in the path of the store-loss failures being
+# chased. With it off, an evicted page goes straight to the SD pagefile: slower,
+# but one mechanism instead of two, and a lost store can only have come from one
+# place. Turn it back on ONLY with a title that fills 8 MB as the witness.
+DOS_CFLAGS += -DDOS_COW_EVICT=1 -DDOS_ZRAM_AUTO=0
 
 # LOAD ELISION. A guest granule filled whole by an INT 13h read is mapped
 # straight at the .dsk in NOR instead of being copied into a COW pool page, so
