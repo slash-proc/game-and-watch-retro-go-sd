@@ -20,6 +20,7 @@ extern unsigned int dos_sb_mix(short *buf, unsigned int len,
                               unsigned int out_rate, int amp);
 
 #include "gw_audio.h"
+#include "dos_perf.h"   /* bucketed cycle accounting, OFF by default */
 #include "common.h"
 #include "dos_audio.h"
 #include "dos_audio_wave.h"
@@ -61,6 +62,7 @@ void dos_audio_init(void)
 
 void dos_audio_submit(void)
 {
+    DOS_PERF_SCOPE(DOS_PB_AUDIO);
     /* Sample-and-clear the latch FIRST, unconditionally. This has to happen on
      * every call including the muted and clamped paths below: dos_spkr_take()
      * is the only thing that clears spkr_en, so an early return that skips it

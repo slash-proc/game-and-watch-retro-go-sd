@@ -1049,10 +1049,10 @@ INCLUDE build/fceumm_mappers.ld
      * names them first, and .data must stay in RAM because flash is not
      * writable (dos_xms.o has 4 bytes of it). */
     build/dos/*.o (.data .data*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .rodata*)
-    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text
-                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o) .text*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o build/dos/dos_perf.o) .rodata
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o build/dos/dos_perf.o) .rodata*)
+    build/dos/*.o (EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o build/dos/dos_perf.o) .text
+                   EXCLUDE_FILE(build/dos/dos_font_data.o build/dos/dos_osk.o build/dos/dos_xms.o build/dos/dos_ems.o build/dos/dos_mouse.o build/dos/dos_mouse_ui.o build/dos/dos_xipsm.o build/dos/dos_xipimg.o build/dos/dos_paging.o build/dos/dos_zram.o build/dos/dos_meta.o build/dos/dos_cfg.o build/dos/dos_settings.o build/dos/dos_settings_rg.o build/dos/dos_fbs.o build/dos/dos_fbs_glue.o build/dos/dos_cpu.o build/dos/dos_input.o build/dos/dos_audio.o build/dos/dos_perf.o) .text*)
     . = ALIGN(4);
     _OVERLAY_DOS_LOAD_END = .;
   } AT > CORES
@@ -1244,6 +1244,14 @@ INCLUDE build/fceumm_mappers.ld
     build/dos/dos_settings_rg.o (.rodata .rodata* .text .text*)
     build/dos/dos_fbs.o (.rodata .rodata* .text .text*)
     build/dos/dos_fbs_glue.o (.rodata .rodata* .text .text*)
+    /* dos_perf.o: bucketed cycle accounting. EMPTY unless -DDOS_PERF=1, and
+       even then it is one printf per reporting window -- the instrumented
+       call sites are `((void)0)` or six inline instructions elsewhere, not
+       here. Cold by construction, so it takes the default (this section) and
+       never .overlay_dos. Its .bss -- 156 B of counters, and only with
+       DOS_PERF=1 -- lands in .overlay_dos_bss with every other DOS object;
+       see dos_perf.h on what that costs a measurement build. */
+    build/dos/dos_perf.o (.rodata .rodata* .text .text*)
     build/dos/dos_cpu.o (.rodata .rodata* .text .text*)
     build/dos/dos_input.o (.rodata .rodata* .text .text*)
     build/dos/dos_audio.o (.rodata .rodata* .text .text*)

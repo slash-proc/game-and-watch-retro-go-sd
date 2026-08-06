@@ -24,6 +24,7 @@
 #include "dos_zram.h"    /* dos_zram_pgf_lower() -- the COW pool's tier 2 */
 #include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
 #include "dos_fbs.h"     /* the FAST-BOOT SNAPSHOT container (external/8086tiny) */
+#include "dos_perf.h"    /* bucketed cycle accounting, OFF by default (external/8086tiny) */
 /* PER-TITLE USER SETTINGS, and note that this is NOT dos_meta.h above it. That
  * one is packaging-time CONTENT about a title, keyed on the .dsk's bytes and
  * correctly invalidated when the image is rebuilt; this one is what the USER
@@ -431,6 +432,12 @@ static FILE *dos_pgf_fp;
  * legitimate outcome the pool already handles. */
 static int dos_pgf_read_cb(void *ctx, unsigned long off, void *buf, unsigned int len)
 {
+    /* THE SD LATENCY BUCKET, and the reason it is HERE rather than in
+     * dos_pgf_read(): this is the only place in the pagefile path that actually
+     * touches the card. dos_pgf_read() also serves reads past the end of the
+     * file out of its own bookkeeping, and counting those as SD time would
+     * make the tier-2 cost look larger than it is. */
+    DOS_PERF_SCOPE(DOS_PB_PGFR);
     FILE *f = (FILE *)ctx;
 
     if (!f || fseek(f, (long)off, SEEK_SET) != 0)
@@ -440,6 +447,7 @@ static int dos_pgf_read_cb(void *ctx, unsigned long off, void *buf, unsigned int
 
 static int dos_pgf_write_cb(void *ctx, unsigned long off, const void *buf, unsigned int len)
 {
+    DOS_PERF_SCOPE(DOS_PB_PGFW);
     FILE *f = (FILE *)ctx;
 
     if (!f || fseek(f, (long)off, SEEK_SET) != 0)
@@ -1636,6 +1644,18 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
     dos_cpu_speed_init();
 
+    /* AFTER dos_cpu_speed_init(), which is where common_emu_enable_dwt_cycles()
+     * is called. dos_perf_init() re-arms DWT itself and prints a live/dead
+     * verdict on the counter, so the ordering is belt and braces rather than a
+     * dependency -- but a table of zeros with no explanation is exactly the
+     * silent failure this project keeps paying for, and the verdict line is the
+     * positive indicator that rules it out.
+     *
+     * SystemCoreClock, not a constant: the PLL is user-selectable (280 MHz
+     * stock, ~354 overclocked) and a hardcoded 340 would misreport every unit
+     * that is not at 340. Expands to nothing unless DOS_PERF=1. */
+    dos_perf_init((unsigned int)(SystemCoreClock / 1000000u));
+
     /* Baseline for the input edge detector. Without this, any button already
      * held when the core starts (typically A, which launched the ROM) would look
      * like a fresh press on frame 1 and inject a stray Enter into the guest. */
@@ -1682,6 +1702,12 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         }
 
         ++dbg_frames;
+        /* Folds the free-running 32-bit DWT counter into a 64-bit software
+         * clock while the interval is ~5.6 M ticks. This is what makes the
+         * reporting period free of the 12.6 s CYCCNT wrap -- see dos_perf.h.
+         * Two loads, a subtract and a 64-bit add, once per frame; nothing at
+         * all unless DOS_PERF=1. */
+        dos_perf_frame();
         /* Once, a couple of seconds in: by then the guest has booted and the
          * copy-on-write pool has taken whatever the boot was going to take, so
          * this is the reading that sizes it. Silent when no window is armed. */
@@ -1766,6 +1792,30 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
              * costs one call and prints nothing. */
             dos_cow_log("run");
         }
+
+        /* THE BUCKET REPORT, on its OWN cadence and not the prof line's.
+         *
+         * The device log ring is 4 KB and WRAPS TO INDEX 0 (Core/Src/main.c:94)
+         * -- it is not a true ring, so anything printed too often erases the
+         * evidence before `gnwmanager monitor` can read it. The perf line is
+         * longer than the prof line, so it gets a longer period, and the period
+         * is a knob rather than a constant because the right value depends on
+         * what is being measured: a boot needs a short one, a TOPBENCH loop
+         * wants a long one.
+         *
+         * DOS_PERF_PERIOD is in FRAMES. 256 is ~4.3 s at 60 Hz, which fits
+         * roughly eight reports in the ring. Override with
+         * DOS_CFLAGS_EXTRA="-DDOS_PERF=1 -DDOS_PERF_PERIOD=64".
+         *
+         * Compiles to nothing at all unless DOS_PERF=1: dos_perf_report() is
+         * `((void)0)` and the compiler drops the test with it. */
+#if DOS_PERF
+#ifndef DOS_PERF_PERIOD
+#define DOS_PERF_PERIOD 256
+#endif
+        if ((dbg_frames % (unsigned)DOS_PERF_PERIOD) == 0)
+            dos_perf_report();
+#endif
 
         if (!lcd_is_swap_pending() && drawFrame) {
             /* Bracketed for the cpu/blit/idle split (docs/video/09-video-profiling.md).
