@@ -230,7 +230,18 @@ EMSHOOK_LINE = "DEVICE=\\" + EMSHOOK_NAME
 # write) against the SD card, so a title that page-switches hard could be slower
 # with EMS than without. Put a name here when a measurement says so, not on
 # suspicion, and `--no-ems` disables it for a one-off build.
-EMS_EXCLUDE: set[str] = set()
+# WIN311 IS NOT A THRASH EXCLUSION -- IT IS A REFUSAL, AND WINDOWS SAYS SO.
+# Windows Enhanced Mode provides EMS to its own DOS boxes and will not start on
+# a machine that already has a DOS EMM it does not recognise. Measured, host
+# harness, WIN311.dsk: with DEVICE=\EMSHOOK.SYS in CONFIG.SYS, WfW 3.11 prints
+#
+#   ERROR: Unsupported expanded-memory driver already installed.
+#   Remove the driver from CONFIG.SYS.
+#
+# and returns to C:\WINDOWS>; with the line removed it runs on into V86MMGR and
+# DOSMGR init. See external/8086tiny/docs/cpu/12-windows-311.md section 7.
+# The driver FILE stays on the image -- only the DEVICE= line is withheld.
+EMS_EXCLUDE: set[str] = {"WIN311"}
 EMS_DEFAULT = True
 
 # Files copied out of the template to make the image bootable. KERNEL.SYS and
@@ -1137,7 +1148,12 @@ def wants_ems(stem: str | None) -> bool:
     """Should this title's image carry EMSHOOK.SYS? See EMS_EXCLUDE."""
     if not EMS_DEFAULT:
         return False
-    return stem is None or stem not in EMS_EXCLUDE
+    # CASE-FOLDED, because the stem reaching here is a filename or a --name and
+    # is NOT normalised by the caller: `win311.dsk`, `WIN311` and a directory
+    # called `Win311` are the same title and an exclusion that only matched one
+    # spelling would be a silent no-op -- which is exactly the failure mode this
+    # table exists to prevent.
+    return stem is None or stem.upper() not in EMS_EXCLUDE
 
 
 def add_ems_line(text: str, sep: str) -> str:
