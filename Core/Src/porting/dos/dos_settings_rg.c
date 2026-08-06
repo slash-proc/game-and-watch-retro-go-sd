@@ -8,6 +8,9 @@
 #include "odroid_system.h"
 #include "odroid_overlay.h"
 #include "dos_settings.h"      /* the format, from external/8086tiny */
+#include "dos_cfg.h"           /* the .cfg parser, from external/8086tiny */
+#include "dos_ems.h"           /* dos_ems_set_arena_kb() */
+#include "dos_fbs.h"           /* dos_fbs_set_enabled() */
 #include "dos_settings_rg.h"
 
 /* The per-title 32-bit-stack switch, defined in 8086tiny.c beside the macro it
@@ -83,6 +86,61 @@ static bool dos_settings_path(const char *rom_path, char *out, size_t cap)
     return true;
 }
 
+/* `<image>.cfg`: the extension is REPLACED, not appended, exactly as
+ * dos_pool_reserve_from_meta() derives the .dosmeta path in main_dos.c --
+ * "KEEN4.dsk" -> "KEEN4.cfg". Deliberately the same derivation, so the three
+ * files a title can have sit beside each other with names a user can predict.
+ *
+ * BESIDE THE IMAGE, NOT UNDER /saves. The .dosset is keyed on the saves path
+ * because the DEVICE writes it; the .cfg is authored by a human and ships with
+ * the game, so it lives where the game does and is copied along with it. */
+void dos_cfg_rg_load(const char *rom_path)
+{
+    unsigned char buf[DOS_CFG_MAX_BYTES + 1];
+    char path[RG_PATH_MAX + 1];
+    dos_cfg_result_t res;
+    dos_cfg_status_t st;
+    size_t n = 0, len, i;
+    FILE *f;
+
+    /* Unconditionally, before anything below can go wrong: no .cfg is in force.
+     * dos_cfg_parse(NULL, 0, ...) is the documented way to say that and it
+     * clears the base itself, so there is no path out of this function that
+     * leaves the PREVIOUS title's .cfg behind. */
+    dos_cfg_parse(0, 0, &res);
+
+    if (!rom_path)
+        return;
+    len = strlen(rom_path);
+    if (len + 5 >= sizeof path)
+        return;
+    memcpy(path, rom_path, len + 1);
+    for (i = len; i > 0; i--)
+        if (path[i - 1] == '.') { len = i - 1; break; }
+        else if (path[i - 1] == '/') break;
+    strcpy(path + len, ".cfg");
+
+    /* Read one byte MORE than the cap, so a file that is exactly one byte too
+     * long is reported TOOBIG rather than silently read as the largest legal
+     * file. Truncating is the failure dos_cfg.h refuses. */
+    f = fopen(path, "rb");
+    if (f) {
+        n = fread(buf, 1, sizeof buf, f);
+        fclose(f);                      /* OPEN, READ, CLOSE -- never held */
+    }
+    st = dos_cfg_parse(buf, (unsigned long)n, &res);
+
+    /* The BASE NAME, not the whole path: the log ring is 4 KB and wraps to
+     * index 0, and "/roms/dos/KEEN4.cfg" spends nineteen of them saying what
+     * "KEEN4.cfg" says. */
+    {
+        const char *base = path, *p;
+        for (p = path; *p; p++)
+            if (*p == '/') base = p + 1;
+        dos_cfg_report(base, st, &res);
+    }
+}
+
 void dos_settings_rg_load(const char *rom_path)
 {
     char path[RG_PATH_MAX + 1];
@@ -128,8 +186,32 @@ void dos_settings_rg_apply(void)
         printf("DOS: settings -- 32-bit stack OFF for this title"
                " (SS.B will be ignored)\n");
 
+    /* EXPANDED MEMORY. ONLY WHEN NON-ZERO: 0 is "unspecified", and calling the
+     * setter with it would stamp on the .dosmeta ems_kb latch, which is the
+     * other route to a reservation (dos_ems.h). Applied HERE because apply()
+     * runs before dos_cpu_init(), and the claim is made inside it just before
+     * dos_cow_pool_bind() -- a reservation made any later is silently ignored,
+     * which is the shape of the bug that left EMS dark on every device build
+     * for a day (dos_ems.c, "THE ORDER BUG"). */
+    {
+        int kb = dos_settings_get(DOS_SET_EMS_KB);
+        if (kb > 0) {
+            dos_ems_set_arena_kb((unsigned)kb);
+            printf("DOS: settings -- EMS arena %d KB for this title\n", kb);
+        }
+    }
+
+    /* FAST BOOT. One line, because the gate is inside dos_fbs.c rather than in
+     * the caller -- which is exactly what let test286/runfbs.sh arm 9 watch it
+     * work without a device. */
+    if (!dos_settings_get(DOS_SET_BOOT_SNAPSHOT)) {
+        dos_fbs_set_enabled(0);
+        printf("DOS: settings -- fast boot OFF for this title"
+               " (no restore, and no capture either)\n");
+    }
+
     /* HOOKS. dos_settings_get(DOS_SET_CPU_PROFILE / _MOUSE_MODE / _MOUSE_CURSOR
-     * / _BOOT_SNAPSHOT) already return persisted, range-checked values. Wiring
+     * ) already return persisted, range-checked values. Wiring
      * one up is a line here plus a menu row; it is deliberately NOT done, because
      * "the value is persisted" and "the value is honoured" are different claims
      * and this tree has three subsystems on record that passed their tests while

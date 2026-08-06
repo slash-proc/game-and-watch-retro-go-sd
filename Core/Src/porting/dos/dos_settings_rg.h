@@ -39,6 +39,25 @@
  * feature look intermittent. */
 void dos_settings_rg_load(const char *rom_path);
 
+/* Read this title's `<image>.cfg` and make it the DEFAULT for every setting it
+ * names. See external/8086tiny/docs/config/01-game-cfg.md.
+ *
+ * MUST BE CALLED BEFORE dos_settings_rg_load(), and the order is the whole
+ * layering: this sets the defaults, and load() then resets onto them and
+ * overlays the user's .dosset. Calling it afterwards would make a file on the
+ * card overrule the user's own menu choices, which is backwards.
+ *
+ * CANNOT FAIL IN A WAY THAT MATTERS, for the same reason load() cannot: a
+ * missing file, an unreadable card, a binary blob and a file full of keys from
+ * a newer firmware all mean "the compiled-in defaults", and dos_cfg_report()
+ * prints at most one line naming which. There is no return value because there
+ * is no decision for the caller to make.
+ *
+ * OPEN, READ, CLOSE. One handle, transient. MAX_OPEN_FILES is 8 across the
+ * whole firmware and the DOS core already holds three for its entire run plus a
+ * fourth for the pagefile; exhaustion is SILENT. */
+void dos_cfg_rg_load(const char *rom_path);
+
 /* Push the live settings into the emulator. Separate from load() so that the
  * menu callback can re-apply after a change without re-reading the card, and so
  * that "what the file said" and "what the emulator was told" are two steps that
