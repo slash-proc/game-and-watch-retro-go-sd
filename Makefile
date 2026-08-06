@@ -549,6 +549,7 @@ $(CORE_DOS)/dos_settings.c \
 $(CORE_DOS)/dos_xipimg.c \
 $(CORE_DOS)/dos_xipsm.c \
 $(CORE_DOS)/dos_fbs.c \
+$(CORE_DOS)/dos_perf.c \
 Core/Src/porting/dos/main_dos.c \
 Core/Src/porting/dos/dos_video.c \
 Core/Src/porting/dos/dos_input.c \

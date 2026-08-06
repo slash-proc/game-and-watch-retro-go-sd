@@ -2316,6 +2316,31 @@ DOS_CFLAGS += -O3
 # dump of the guest's 0xB8000 text buffer, or "-DDOS_TRACE_INSNS=200" for an
 # instruction trace. See Core/Src/porting/dos/main_dos.c and 8086tiny.c.
 DOS_CFLAGS_EXTRA ?=
+
+# BUCKETED CYCLE ACCOUNTING lives behind this same knob and is OFF BY DEFAULT:
+#
+#     DOS_CFLAGS_EXTRA="-DDOS_PERF=1 -DDOS_PERF_PERIOD=256"
+#
+# It decomposes the `prof` line's opaque cpu=NN% into COW faults, eviction, the
+# LZ4 tier, SD pagefile I/O, cold folds, INT 13h, video and audio, using
+# DWT->CYCCNT and SELF time (children subtracted, so the buckets sum). See
+# external/8086tiny/dos_perf.h for the site table and the cost measurements, and
+# docs/perf/01-cycle-buckets.md for the hardware procedure.
+#
+# IT COSTS THE INTERPRETER NOTHING AND THAT IS A DISASSEMBLY: `sh
+# test286/perfcost.sh` builds 8086tiny.c for the Cortex-M7 at these very flags
+# and reports dos_cpu_frame at 8,381 instructions with DOS_PERF=1 and without --
+# +0 -- because every site is a `noinline` cold handler and none of them inlines
+# into the loop. The same script proves .text is BYTE-IDENTICAL with the feature
+# compiled out, and carries a mutation control so that claim can fail.
+#
+# NOT ON BY DEFAULT, unlike the prof line, for two reasons that are not caution:
+# a probe costs 35-79 instructions (fine on a fault, most of dos_fold_oob), and
+# the counter table is 232 B of .overlay_dos_bss -- RAM_EMU, where the margin is
+# measured in hundreds of bytes. A measurement build may cross a 4 KB cliff.
+#
+# AND REMEMBER DOS_CFLAGS_EXTRA IS NOT A MAKE DEPENDENCY: `touch` the DOS
+# sources first or you will link the previous setting and measure nothing.
 # THE COW POOL IS REGISTERED AT RUN TIME, NOT DECLARED HERE. There is no
 # DOS_COW_POOL_PAGES any more, and no static array behind it: demand paging is
 # now the mechanism rather than an option (external/8086tiny, "the demand region

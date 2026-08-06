@@ -14,6 +14,7 @@
  */
 
 #include "dos_video.h"
+#include "dos_perf.h"   /* bucketed cycle accounting, OFF by default */
 
 #include "gw_lcd.h"
 
@@ -1268,6 +1269,11 @@ void dos_video_page_flip(void)
 
 void dos_video_blit(void)
 {
+    /* Child of the existing blit bracket (dos_prof_blit_begin/end), on purpose:
+     * blit%% already says what the whole paint costs, and what it does not say is
+     * how much of that is the planar/chunky pixel conversion in this file as
+     * opposed to the LCD swap around it. Per PAINTED FRAME, never per pixel. */
+    DOS_PERF_SCOPE(DOS_PB_VIDEO);
     if (!initialised)
         dos_video_init();
 
