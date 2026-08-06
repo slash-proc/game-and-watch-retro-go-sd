@@ -219,19 +219,38 @@ detailed than this file. This file is only a summary and a list of traps.
 
 ```
 external/8086tiny/
-  STATUS.md                    <- START HERE. Status, blockers, memory budget, traps. ~100 lines.
+  STATUS.md                    <- START HERE. Dated blocks, newest first. Status,
+                                  blockers, open decisions. Read the top TWO blocks.
   docs/
+    traps.md                   <- Things that have already cost real time. Its
+                                  "READ THIS FIRST" section names the two bug
+                                  families behind almost every Windows blocker,
+                                  and the ledger of RETRACTED claims at the end.
+    handover.md                <- Entry point for picking the work up cold.
     decisions.md               <- Settled calls + WHY. Read before relitigating anything.
-    sprint-first-boot.md       <- The active work plan.
+    testing.md                 <- How to test what you build.
     <category>-roadmap.md      <- Feature checklist per category, links into the subdir below
     <category>/                <- Design detail, numbered 01.., 02..
+    sprint-first-boot.md       <- COMPLETED RECORD, not an active plan.
     upstream/manual.md         <- Upstream's own manual. Describes SDL/terminal behaviour
                                   that does NOT apply here — see its caveats section.
   GNW_PORT.md                  <- STALE. Superseded. Do not trust it.
 ```
 
-Categories with docs today: `video` (10 files), `cpu` (2 files), `storage`, `input`, `audio`.
-Still unwritten: memory map, integration, BIOS & system services.
+Categories with docs today: `memory` (~45 files), `cpu` (13), `video` (~15),
+`storage` (8), `games` (2), `config` (2), `input`, `audio`, `perf`.
+
+**Three files earn a special mention**, because they are the ones that stop you
+repeating work:
+
+* **`docs/traps.md`** — read the "READ THIS FIRST" block *before* debugging
+  anything CPU-shaped. Two patterns account for ten of the twelve Windows 3.11
+  blockers, and its retraction ledger lists claims that were disproved *and then
+  re-used as fact anyway* because they survived in prose.
+* **`docs/cpu/12-windows-311.md`** — the Windows investigation end to end. Long,
+  chronological, and honest about which leads died and why.
+* **`docs/games/00-title-survey.md`** — what all 17 titles actually do, with
+  verbatim guest errors and outcomes.
 
 ### The reading path
 
