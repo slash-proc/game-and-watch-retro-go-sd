@@ -73,22 +73,26 @@ line, so when A2 arrives as a real per-game config file it populates the same
 parameters rather than replacing them, and "multiple entries per game" becomes
 a list of these tuples instead of a new mechanism.
 
-Regenerating the whole of roms/dos from the masters (2026-08-01). The three
-hard disks are the commands above with --dst roms/dos; the rest need no --entry
-at all, because the entry-point heuristic picks correctly for every one of them
-(WOLF3D included -- it is listed above with --entry only for illustration).
-TOPBENCH is the one image that needs an option: --entry-args=-l makes it
-profile continuously with no keypress, which is what it is on the card for.
+Regenerating the whole of roms/dos from the masters: the current, verified
+recipe is external/8086tiny/docs/storage/08-repack-2026-08-06.md, which lists
+every title with its exact command and the boot result it was checked against.
+Use that, not the sketch that used to be here -- three things in it were wrong,
+each of which produced an image that packed cleanly and then misbehaved:
 
-    for g in ALLEYCAT KEEN4 PRINCE_OF_PERSIA SIMCITY TANKWARS; do
-        python3 tools/mkdosdisk.py --dst roms/dos --verify \\
-            external/8086tiny/games/$g
-    done
-    python3 tools/mkdosdisk.py --dst roms/dos --verify --entry-args=-l \\
-        external/8086tiny/games/TOPBENCH
-    python3 tools/mkdosdisk.py --dst roms/dos --verify roms/dos/CAT.EXE
-    python3 tools/mkdosdisk.py --dst roms/dos --verify \\
-        --bare --system msdos --name msdos622
+  * STAR_WARS_DARKFORCES does NOT take --size 10321920. That yields a
+    10,321,920-byte image; the shipped one is 11,321,856, which is what default
+    sizing produces. Pass no --size.
+  * The entry heuristic does NOT pick correctly for every title. EPIC_PINBALL
+    needs --entry PINBALL.EXE (it picks EP1.EXE, which refuses to run) and
+    MORTAL_KOMBAT needs --entry MK1.EXE (it picks the DOS/4GW extender).
+  * PRINCE_OF_PERSIA needs --no-expand-system --boot-keys. With the defaults it
+    halts at CS:IP=0000:0000 in 7 runs out of 7.
+
+The generated AUTOEXEC.BAT records the entry point, so an old image is the
+authoritative record of its own --entry -- diff that line before trusting a
+reconstructed command:
+
+    mtype -i OLD.dsk ::AUTOEXEC.BAT | grep 'runs .* on boot'
 
 Those commands now also EXPAND the DOS system files (see expand_upx below), so
 re-running them changes every generated image's size and CRC -- which is exactly
