@@ -6,6 +6,8 @@
 
 #include "gw_linker.h"
 #include "gw_malloc.h"
+#include "gw_flash_alloc.h"
+#include "dos_precache.h"
 #include "gw_firmware_abi.h"
 #include "gwhb.h"
 #include "rg_emulators.h"
@@ -144,6 +146,123 @@ fail:
 /* Exposed for ITCM sentinel patching (main_pico8.c) */
 uint8_t *pico8_code_flash_addr = NULL;
 uint32_t pico8_code_flash_size = 0;
+
+/* ------------------------------------------------------- MS-DOS pre-cache ---
+ * Read Core/Inc/dos_precache.h first: it states the contract and why this is
+ * here rather than in main_dos.c. In short -- these are the three slow NOR
+ * writes a DOS session needs, and they run here, before
+ * lcd_setup_framebuffers(LCD_MODE_LUT8), so that the launcher's own progress
+ * bar can be drawn in the launcher's own colours. Same ordering as
+ * Pico8CacheCodeToFlash() below. */
+uint8_t *dos_xip_code_flash_addr = NULL;
+uint32_t dos_xip_code_flash_size = 0;
+uint8_t *dos_dsk_flash_addr = NULL;
+uint32_t dos_dsk_flash_size = 0;
+uint8_t *dos_xipsm_flash_addr = NULL;
+uint32_t dos_xipsm_flash_size = 0;
+
+/* The IN-BOUND half of the relocation only. Every sentinel word is rewritten
+ * in the 16 KB buffer BEFORE it is programmed, exactly as before -- see the
+ * big block comment above DOS_CODE_BASE in main_dos.c for why it is done this
+ * way and not by rewriting flash afterwards.
+ *
+ * The OUT-BOUND half (patching the overlay's own veneers in RAM) deliberately
+ * stays in the core: it needs _DOS_MAIN_CODE_END, and it must not run until
+ * the overlay has actually been copied to __overlay_dos_vma, which happens
+ * after the LUT8 switch. skip_base is 0 here for the same reason it always
+ * was: this window is the blob, which does not define the constant. */
+static void DosRelocateXip(uint8_t *buffer, uint32_t length, uint32_t offset_in_file,
+                           uint8_t *file_address, uint32_t file_size)
+{
+  (void)offset_in_file;
+  int32_t offset = (int32_t)((uint32_t)file_address - DOS_CODE_BASE);
+  uint32_t *end = (uint32_t *)(buffer + (length & ~3u));
+  for (uint32_t *p = (uint32_t *)buffer; p < end; p++) {
+    uint32_t v = *p;
+    /* & ~1 so a Thumb function pointer matches; the bit survives the add. */
+    if ((v & ~1u) >= DOS_CODE_BASE && (v & ~1u) < DOS_CODE_BASE + file_size)
+      *p = (uint32_t)(v + offset);
+  }
+}
+
+/* "/roms/dos/KEEN4.dsk" -> "/saves/dos/KEEN4.xipimg". Duplicated from
+ * dos_sm_make_path() in main_dos.c because it is pure string work and the
+ * alternative is exporting a core-overlay symbol the launcher would call
+ * before the overlay is loaded. The KEY that validates the sidecar is NOT
+ * computed here -- that stays in dos_xipsm_boot(), which still offers the
+ * bytes to dos_xipsm_offer() and still rejects a stale snapshot. Caching a
+ * sidecar that later fails its key check costs one wasted NOR write, which is
+ * what happened before this moved too. */
+static bool DosMakeXipsmPath(const char *dsk_path, char *out, size_t out_len)
+{
+  const char *base = dsk_path, *p, *dot = NULL;
+  size_t n;
+
+  for (p = dsk_path; *p; p++)
+    if (*p == '/' || *p == '\\')
+      base = p + 1;
+  for (p = base; *p; p++)
+    if (*p == '.')
+      dot = p;
+  n = dot ? (size_t)(dot - base) : strlen(base);
+  if (n == 0 || n + sizeof("/saves/dos/.xipimg") >= out_len)
+    return false;
+  strcpy(out, "/saves/dos/");
+  memcpy(out + 11, base, n);
+  strcpy(out + 11 + n, ".xipimg");
+  return true;
+}
+
+/* Returns false only for the one fatal case: no XIP code blob. The caller
+ * then refuses the title, which is what app_main_dos() used to do.
+ *
+ * ORDER IS LOAD-BEARING and is the order the core used to run these in. The
+ * code blob goes first so find_write_slot() sees it live and cannot later
+ * erase it to make room for the .dsk; the .dsk goes before the sidecar for the
+ * same reason. */
+static bool DosCacheFilesToFlash(const char *dsk_path)
+{
+  char xipsm_path[64];
+
+  dos_xip_code_flash_size = 0;   /* 0 = "whole file"; the cache fills it in */
+  dos_xip_code_flash_addr = odroid_overlay_cache_file_in_flash_relocate(
+      DOS_XIP_PATH, &dos_xip_code_flash_size, false, DosRelocateXip);
+  if (!dos_xip_code_flash_addr || dos_xip_code_flash_size == 0) {
+    printf("DOS: %s missing or uncacheable - cannot start\n", DOS_XIP_PATH);
+    return false;
+  }
+  printf("DOS: xip code at %p, %lu bytes\n", (void *)dos_xip_code_flash_addr,
+         (unsigned long)dos_xip_code_flash_size);
+
+#if DOS_XIP_CACHE
+  /* NULL here is expected, not exceptional, and NOT a reason to refuse the
+   * title -- BATTLECHESS.dsk is 66,060,288 bytes against a 64 MB part, so it
+   * is uncacheable by construction. The guest then runs from SD with load
+   * elision off, exactly as it did before the cache existed. The size is
+   * logged on purpose: "no elision" and "elision working badly" are
+   * indistinguishable in a cow log. */
+  dos_dsk_flash_size = 0;
+  dos_dsk_flash_addr = odroid_overlay_cache_file_in_flash(dsk_path, &dos_dsk_flash_size, false);
+  if (!dos_dsk_flash_addr)
+    printf("DOS: xip NOT cached (%s, too big or no room) - guest runs from SD, "
+           "LOAD ELISION OFF for this title\n", dsk_path);
+  else
+    printf("DOS: xip .dsk at %p, %lu bytes\n", (void *)dos_dsk_flash_addr,
+           (unsigned long)dos_dsk_flash_size);
+#else
+  (void)dsk_path;
+#endif
+
+  if (DosMakeXipsmPath(dsk_path, xipsm_path, sizeof xipsm_path)) {
+    dos_xipsm_flash_size = 0;
+    dos_xipsm_flash_addr = odroid_overlay_cache_file_in_flash(xipsm_path,
+                                                              &dos_xipsm_flash_size, false);
+    printf("DOS: xipimg %s flash %p %lu B\n", xipsm_path,
+           (void *)dos_xipsm_flash_addr, (unsigned long)dos_xipsm_flash_size);
+  }
+
+  return true;
+}
 
 /**
  * PatchPico8SentinelRefs - Patches 0xBEEF0000-range sentinel addresses
@@ -1679,12 +1798,23 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
        * run_internal_emu(), which hardcodes __RAM_EMU_START__.
        *
        * Two-stage load, same reasoning as PICO-8 below:
+       *   0. Cache the three DOS files into NOR (DosCacheFilesToFlash). This
+       *      is the multi-second part of starting a DOS title, and it is here
+       *      -- not in app_main_dos() where it used to be -- for one reason:
+       *      it is the last point at which the LCD is still RGB565 with the
+       *      launcher's theme loaded, so odroid_overlay_cache_file_in_flash()
+       *      can draw the real "Caching game" progress bar. Downstream of the
+       *      LUT8 switch there are no theme colours left and the user gets a
+       *      frozen screen. Nothing here needs the guest's mem[] to exist:
+       *      the write path streams through a 16 KB stack buffer.
        *   1. Read dos.bin from SD to a temp at __RAM_EMU_START__, outside the
        *      LCD pool. SD reads are slow, so doing it here keeps in-flight
        *      writes away from anything the LTDC might still be scanning.
        *   2. Switch to LUT8. lcd_setup_framebuffers() zeroes the 300 KB pool
        *      footprint (which covers __overlay_dos_vma) and re-marks the bonus
        *      area cacheable, so it MUST happen before the copy, not after.
+       *      This is also why step 0 cannot live in the core: the overlay is
+       *      not in memory until after the switch that step 0 must precede.
        *   3. memcpy temp -> __overlay_dos_vma: fast, cached, post-switch.
        * The ITC image is copied to ITCM before BSS is zeroed, because it lands
        * just past the code and therefore inside the BSS VMA. */
@@ -1697,7 +1827,14 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
 
       uint8_t *dos_load_addr = (uint8_t *)__overlay_dos_vma;
       uint8_t *dos_temp_addr = (uint8_t *)&__RAM_EMU_START__;
-      size_t   dos_bin_size  = load_core_bin_with_header("/cores/dos.bin", dos_temp_addr);
+
+      /* Before load_core_bin_with_header(), because the cache writes into the
+       * 16 KB stack buffer and dos_temp_addr must not be filled yet -- and
+       * because a bar drawn now is a bar drawn over the launcher UI the user
+       * is still looking at, rather than over a half-loaded core image. */
+      size_t dos_bin_size = 0;
+      if (DosCacheFilesToFlash(ACTIVE_FILE->path))
+        dos_bin_size = load_core_bin_with_header("/cores/dos.bin", dos_temp_addr);
 
       if (dos_bin_size) {
         lcd_setup_framebuffers(LCD_MODE_LUT8);

@@ -19,6 +19,7 @@
 #include "dos_ospi_bench.h"
 #include "gw_malloc.h"   /* ahb_calloc() */
 #include "gw_flash_alloc.h" /* store_file_in_flash() -- DOS_XIP_CACHE */
+#include "dos_precache.h"   /* the launcher caches; this core consumes */
 #include "dos_meta.h"    /* the per-title COW pool sidecar (external/8086tiny) */
 #include "dos_xms.h"     /* dos_xms_grown_bytes, and dos_pgf_install() -- see below */
 #include "dos_zram.h"    /* dos_zram_pgf_lower() -- the COW pool's tier 2 */
@@ -237,9 +238,10 @@ unsigned int dos_host_millis(void)
  * size is 8-aligned by the ALIGN(8) in .xip_dos -- so no 32-bit word ever spans
  * two chunks. The `length & ~3u` truncation below is the belt for the odd tail
  * case, exactly as gba_relocate_xip() does it. */
-#define DOS_CODE_BASE  0xDED00000u
-#define DOS_XIP_PATH   "/cores/dos.xip"
-
+/* DOS_CODE_BASE and DOS_XIP_PATH now come from dos_precache.h: the launcher
+ * does the in-bound relocation pass and has to agree with this file about
+ * both, and two copies of a sentinel constant is exactly the kind of drift
+ * that shows up as "FATAL n unrelocated xip refs" months later. */
 static uint8_t *g_dos_xip_addr;
 static uint32_t g_dos_xip_size;
 
@@ -265,32 +267,23 @@ static int patch_dos_sentinels(uint32_t *start, uint32_t *end, int32_t offset, u
     return patched;
 }
 
-static void dos_relocate_xip(uint8_t *buffer, uint32_t length, uint32_t offset_in_file,
-                             uint8_t *file_address, uint32_t file_size)
-{
-    (void)offset_in_file;
-    int32_t offset = (int32_t)((uint32_t)file_address - DOS_CODE_BASE);
-    patch_dos_sentinels((uint32_t *)buffer, (uint32_t *)(buffer + (length & ~3u)),
-                        offset, file_size, 0);
-}
-
-static void dos_xip_code_progress(uint32_t total, uint32_t done, uint8_t pct)
-{
-    (void)total; (void)done; (void)pct;
-    wdog_refresh();
-}
-
-/* 0 = ok, -1 = the core cannot run. */
+/* THE IN-BOUND HALF OF THE RELOCATION IS NOT HERE ANY MORE. It runs in
+ * DosRelocateXip() (rg_emulators.c) as part of DosCacheFilesToFlash(), because
+ * the caching itself had to move to the launcher to get a visible progress bar
+ * -- see Core/Inc/dos_precache.h. The two halves are still the two halves
+ * described in the block comment above DOS_CODE_BASE; only the first one
+ * changed address. The launcher already refused the title if the blob could
+ * not be cached, so g_dos_xip_addr is non-NULL by the time this runs.
+ *
+ * 0 = ok, -1 = the core cannot run. */
 static int dos_cache_xip_to_flash(void)
 {
     uint32_t t0 = HAL_GetTick();
     int32_t  offset;
     int      n;
 
-    g_dos_xip_size = 0;   /* 0 = "whole file"; the cache fills it in */
-    g_dos_xip_addr = store_file_in_flash_relocate(DOS_XIP_PATH, &g_dos_xip_size,
-                                                  false, &dos_xip_code_progress,
-                                                  &dos_relocate_xip);
+    g_dos_xip_addr = dos_xip_code_flash_addr;
+    g_dos_xip_size = dos_xip_code_flash_size;
     if (g_dos_xip_addr == NULL || g_dos_xip_size == 0) {
         printf("DOS: %s missing or uncacheable - cannot start\n", DOS_XIP_PATH);
         return -1;
@@ -521,44 +514,32 @@ static void dos_pgf_close(void)
  *
  * The stall is paid ONCE PER IMAGE, not once per launch:
  * store_file_in_flash() recognises a file already resident in NOR and returns
- * its address. Turn it back off with DOS_CFLAGS_EXTRA=-DDOS_XIP_CACHE=0
- * (which is NOT a make dependency -- touch the file, see docs/testing.md
- * section 4); that is the negative control for any elision measurement.
+ * its address. Turn it back off with CFLAGS_EXTRA=-DDOS_XIP_CACHE=0; that is
+ * the negative control for any elision measurement. NOTE THE FLAG MOVED from
+ * DOS_CFLAGS_EXTRA to the global CFLAGS_EXTRA, because the write itself now
+ * happens in rg_emulators.o -- and it is still NOT a make dependency, so touch
+ * the file (docs/testing.md section 4).
  *
- * store_file_in_flash() and not odroid_overlay_cache_file_in_flash(): the
- * latter draws the "Caching game" progress bar, and by the time app_main_dos()
- * runs the LCD is already in LUT8 with the DOS palette loaded (see the note
- * above the guest-RAM printf below), so that bar would paint in the wrong
- * colours into a framebuffer this core is about to own. A progress callback
- * that prints instead costs nothing and works under gwemu, where the log is
- * the only output that matters.
+ * THE WRITE IS NOT DONE HERE ANY MORE. It used to be a store_file_in_flash()
+ * from this function, with a progress callback that only printed, and the
+ * justification recorded here was that odroid_overlay_cache_file_in_flash()
+ * would paint its "Caching game" bar in the wrong colours because the LCD is
+ * already in LUT8 by the time app_main_dos() runs. That was true, and it made
+ * the longest stall in the whole port invisible: several seconds of frozen
+ * screen with the only feedback going to a 4 KB log ring the user cannot see.
+ * The answer was not a better callback but the PICO-8 ordering -- cache while
+ * the launcher still owns an RGB565 framebuffer, switch to LUT8 afterwards.
+ * DosCacheFilesToFlash() (rg_emulators.c) now does the write with the real
+ * bar, and this function only consumes the result. See Core/Inc/dos_precache.h.
  *
- * The relocation hook is deliberately NULL. A .dsk is data, contains no
- * absolute host addresses, and phase 5's window is pure arithmetic
- * (dos_xip + (a - XIP_BASE)) with no alignment requirement -- see
- * 02-guest-xip.md section 4.2. Nothing needs patching on the way in.
+ * No relocation hook is passed on the launcher side either, for the reason
+ * that was recorded here: a .dsk is data, contains no absolute host addresses,
+ * and phase 5's window is pure arithmetic (dos_xip + (a - XIP_BASE)) with no
+ * alignment requirement -- see 02-guest-xip.md section 4.2.
  */
-#ifndef DOS_XIP_CACHE
-#define DOS_XIP_CACHE 1
-#endif
-
 #if DOS_XIP_CACHE
 static uint8_t *dos_xip_base;
 static uint32_t dos_xip_size;
-
-static void dos_xip_progress(uint32_t total, uint32_t done, uint8_t pct)
-{
-    static uint8_t last = 255;
-    (void)total;
-    (void)done;
-    /* Quarters only. The log ring is 4 KB (Core/Src/main.c:94) and this runs
-     * once per 16 KB of image. */
-    if (pct / 25 != last / 25 || last == 255) {
-        last = pct;
-        printf("DOS: xip caching %u%%\n", pct);
-    }
-    wdog_refresh();
-}
 
 /* LOAD ELISION. Declared here rather than pulled from a header because
  * 8086tiny.c exports it without one (test286/host_main.c:297 declares it the
@@ -579,10 +560,8 @@ extern void dos_elide_set_image(const unsigned char *base, unsigned int len, int
 
 static void dos_xip_cache(const char *path, uint32_t known_size, int drive)
 {
-    uint32_t t0 = HAL_GetTick();
-
-    dos_xip_size = 0;   /* 0 = "whole file"; the cache fills it in */
-    dos_xip_base = store_file_in_flash(path, &dos_xip_size, false, &dos_xip_progress);
+    dos_xip_base = dos_dsk_flash_addr;
+    dos_xip_size = dos_dsk_flash_size;
 
     if (dos_xip_base == NULL) {
         /* Expected, not exceptional, and NOT A REASON TO REFUSE THE TITLE --
@@ -597,14 +576,15 @@ static void dos_xip_cache(const char *path, uint32_t known_size, int drive)
          *
          * The size is in the log on purpose: "no elision" and "elision working
          * badly" are indistinguishable in a cow log, so the reason has to be
-         * stated where it happens. */
+         * stated where it happens. The launcher logs the same fact at the point
+         * of the attempt; this line is what a cow-log reader sees. */
         printf("DOS: xip NOT cached (%s, %lu bytes, too big or no room) - "
                "guest runs from SD, LOAD ELISION OFF for this title\n",
                path, (unsigned long)known_size);
         return;
     }
-    printf("DOS: xip .dsk at %p, %lu bytes, %lu ms\n", (void *)dos_xip_base,
-           (unsigned long)dos_xip_size, (unsigned long)(HAL_GetTick() - t0));
+    printf("DOS: xip .dsk at %p, %lu bytes\n", (void *)dos_xip_base,
+           (unsigned long)dos_xip_size);
 
     /* AND HAND IT OVER. Until this call existed, dos_elide_set_image() was
      * reached from exactly one place in the tree -- test286/host_main.c's
@@ -810,12 +790,16 @@ static int dos_xipsm_boot(const char *dsk_path, uint32_t dsk_size, unsigned long
         return 0;
     }
 
-    /* store_file_in_flash() opens the file itself and closes it before
-     * returning, so no handle is held across dos_cpu_init(). NULL is the
-     * missing-file case AND the full-flash case, and neither is an error. */
-    dos_sm_flash_size = 0;
-    dos_sm_flash = store_file_in_flash(dos_sm_path, &dos_sm_flash_size,
-                                       false, &dos_sm_progress);
+    /* Already in NOR, cached by DosCacheFilesToFlash() while the launcher
+     * still had a themed RGB565 framebuffer to draw a progress bar on -- the
+     * sidecar is up to DOS_XIPSM_OBS_LEN (589,824 B), which is 36 flash-write
+     * chunks, so it is emphatically not too fast to be worth one. The launcher
+     * derives the path with the same rule dos_sm_make_path() uses; it does NOT
+     * validate the snapshot, which is still this function's job via
+     * dos_xipsm_offer(). NULL is the missing-file case AND the full-flash
+     * case, and neither is an error. */
+    dos_sm_flash      = dos_xipsm_flash_addr;
+    dos_sm_flash_size = dos_xipsm_flash_size;
     dos_xipsm_offer(&dos_sm, dos_sm_flash, (unsigned long)dos_sm_flash_size);
 
     printf("DOS: xipimg %s -> %s (%s), flash %p %lu B, %lu ms\n",
@@ -1250,9 +1234,10 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
     /* FIRST thing after system init, and before anything can reach the cold
      * half: until this returns, every reference to the font, the OSK and the
-     * XMS driver still holds a 0xDED0xxxx sentinel. Also before the .dsk cache
-     * below, so the blob is live_add()'ed first and find_write_slot() cannot
-     * later erase it. */
+     * XMS driver still holds a 0xDED0xxxx sentinel. It no longer writes flash
+     * -- the launcher did that, and in the same order, so the blob is still
+     * live_add()'ed ahead of the .dsk and find_write_slot() still cannot erase
+     * it -- but the out-bound sentinel pass is here and must stay here. */
     if (dos_cache_xip_to_flash() != 0) {
         printf("DOS: refusing to start without %s\n", DOS_XIP_PATH);
         return;
