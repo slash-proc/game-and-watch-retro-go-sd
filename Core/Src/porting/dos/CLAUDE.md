@@ -173,40 +173,31 @@ game can use the feature.** Write the guest-side test — code running inside a
 *packaged image* — and make its negative control fail in the exact state the
 shipped images were in. `test286/runemsdisk.sh` is the model.
 
-## ~~AFTER ANY `.dsk` REGENERATION, RUN `tools_machkb.sh`.~~ — SUPERSEDED, DO NOT DO THIS
+## THE PER-TITLE MACHINE SIZE IS DELETED. `tools_machkb.sh` NO LONGER EXISTS.
 
-> **`tools_machkb.sh` is VESTIGIAL. Do not run it after a repack, or at all.**
-> `mach_kb`-based pool sizing was **deleted** along with the reclaim arena and
-> `DOS_MEM_TRIM`; the pool is registered at run time and nothing reads `mach_kb`.
-> See [`docs/glossary.md`](../../../../external/8086tiny/docs/glossary.md) and the
-> retraction ledger in
-> [`docs/traps.md`](../../../../external/8086tiny/docs/traps.md).
->
-> The historical text is kept below because the *shape* of the failure is still
-> instructive — a repack silently zeroing a value that nothing validates — and
-> that shape now applies to the three sidecars (`.dosmeta` regenerated,
-> `.dosset` persisted, `.cfg` never overwritten). Getting those lifetimes
-> backwards is the live version of this trap.
+There is no `mach_kb`, no `--mach-kb`, no `dos_meta_mach_kb()`, no
+`dos_mach_set_kb()` and no post-repack step. **Every guest is told it has
+640 KB** and the pool / LZ4 / pagefile tiering backs whatever it actually
+touches. Nothing measured about a title influences how the emulator starts.
 
-<details>
-<summary>Historical (arena era, no longer applicable)</summary>
+If you find a document telling you to run `tools_machkb.sh` after a repack, that
+document is stale — the script is deleted and `tools/dosmeta.py write` now
+*errors* if passed `--mach-kb`. The full argument is on `mach_kb_DEAD` in
+[`external/8086tiny/dos_meta.h`](../../../../external/8086tiny/dos_meta.h): a
+sweep run on a title that fails to launch measures the failure and then caps the
+guest below what the game needs, and `mkdosdisk.py` cannot re-derive the number,
+so every repack silently zeroed it and switched four subsystems off with nothing
+logged. That cost a day on 2026-08-03.
 
-`tools/mkdosdisk.py` writes a fresh `.dosmeta` beside every image it packs. It
-computes `pages_cold` itself but **cannot know `mach_kb`** — that comes from a
-behavioural sweep, not from anything inspectable in the image. **So every
-repackage silently zeroes `mach_kb` and switches the arena back off**, with no
-error and no failing test (`runsidecar.sh` checks that a sidecar *funds pages*,
-and `pages_cold` survives a repack).
+**The SHAPE of that failure is still live, which is why this section survives:**
+a regenerated file silently losing a value nothing revalidates. It now applies to
+the three sidecars — `.dosmeta` is regenerated, `.dosset` is persisted, `.cfg` is
+never overwritten. Getting those lifetimes backwards is the current version of
+this trap.
 
-This happened on 2026-08-03: ver=2 sidecars landed in the morning, the EMS
-repackage wiped ten of eleven at 11:15:42, and only `freedos` survived because
-its image was not rebuilt.
-
-    sh external/8086tiny/tools_machkb.sh
-
-The values are the `safe` column of `docs/memory/26-machine-size-behavioural.md`.
-
-</details>
+What replaces the measurement is TELEMETRY, and it is an output only:
+`dos_guest_hiwater` reports how much conventional memory a title actually
+touched. Nothing reads it to decide anything, and nothing may.
 
 ## RUNNING GWEMU: TWO TRAPS THAT LOOK LIKE FIRMWARE BUGS
 

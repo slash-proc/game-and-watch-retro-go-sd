@@ -146,21 +146,21 @@ extern void dos_cow_stats(unsigned *faults, unsigned *pages_used,
  * dos_cow_stats()'s `lost` are how that shows up in the log. */
 extern unsigned int dos_cow_reserve(unsigned int pages);
 
-/* ---- Per-title machine size (INT 12h) -------------------------------------
+/* ---- Per-title machine size (INT 12h): REMOVED -----------------------------
  *
- * The .dosmeta sidecar's v2 field. Tell a title it has an N KB machine and
- * DOS's own allocator will never build an MCB above N KB, so guest memory
- * above N KB is unreachable by allocation -- no pool, no fault, no copy, no
- * bet. It must be set BEFORE dos_cpu_init(), which is where the BIOS blob is
- * loaded and the word poked; that is why the call sits here, in the function
- * the ordering comment at dos_cpu_init() already covers.
+ * `dos_mach_set_kb()`, `dos_mach_kb`, `dos_mach_applied` and `dos_mach_over`
+ * are gone. The guest is told it has 640 KB, always, because that is what the
+ * BIOS blob says and nothing lowers it any more.
  *
- * A wrong number is never fatal: DOS simply cannot allocate above it, and a
- * store that lands there anyway is served and COUNTED (dos_mach_over), exactly
- * as DOS_COW_GROW handles an under-reserved pool. See the DOS_MACH_KB_WORD
- * block in external/8086tiny/8086tiny.c and test286/runmach.sh arm 6. */
-extern int dos_mach_set_kb(unsigned int kb);
-extern unsigned int dos_mach_kb, dos_mach_applied, dos_mach_over;
+ * Do not reintroduce a per-title cap here. Three separate mechanisms have been
+ * built on a measured machine size and all three were removed for the same
+ * reason: the measurement cannot be trusted, and when it is wrong it caps the
+ * guest below what the game needs and surfaces as an unrelated error. The
+ * memory tiering makes the cap unnecessary. */
+extern unsigned int dos_guest_hiwater;
+extern unsigned int dos_cow_wedged(void);
+extern void dos_cow_cold_stats(unsigned *pages, unsigned *used, unsigned *demotes,
+                               unsigned *spills, unsigned *biased);
 extern void dos_cow_pool_stats(unsigned *arena, unsigned *reserved,
                                unsigned *live, unsigned *grows);
 #if DOS_INT13_OBS
@@ -952,6 +952,34 @@ static void dos_cow_log(const char *when)
            when, faults, pages, pool, lost, arena, resv, live, grows,
            (unsigned)((arena > live ? arena - live : 0) * 4104u));
 
+    /* THE HEADLINE, AND IT IS TELEMETRY -- NOTHING READS IT.
+     *
+     * "How much memory is the guest using, how much of it is hot, and where do
+     * the cold pages live." That is the whole question this line answers, and
+     * answering it is now the ONLY thing a memory measurement does here: no
+     * per-title profile influences how the emulator starts or how much memory a
+     * guest is offered. If you find yourself wanting to feed one of these
+     * numbers back into a sizing decision, read the tombstone on mach_kb_DEAD
+     * in external/8086tiny/dos_meta.h first.
+     *
+     * `used` is dos_guest_hiwater -- one past the highest conventional granule
+     * the guest has ever taken a first store in, i.e. its real footprint rather
+     * than what DOS offered it. `hot` is what is resident in the pool right now;
+     * everything else is in one of the cold tiers, and the tier counters say
+     * which. A wedged pool is called out by name because a counter alone has
+     * been shown to sit unread behind a guest that still boots. */
+    {
+        unsigned zp = 0, zb = 0, zs = 0, zr = 0, zl = 0;
+        unsigned cpages = 0, cused = 0, cdem = 0, cspill = 0, cbias = 0;
+
+        dos_zram_stats(&zp, &zb, &zs, &zr, &zl);
+        dos_cow_cold_stats(&cpages, &cused, &cdem, &cspill, &cbias);
+        printf("DOS: mem used=%uK hot=%u/%u cold=%u zram=%u(%uB) pgf=%u%s\n",
+               (unsigned)(dos_guest_hiwater >> 10), pages, pool, cused,
+               zp, zb, zl,
+               dos_cow_wedged() ? "  ** POOL WEDGED: stores discarded **" : "");
+    }
+
     /* THE TWO SUBSYSTEMS THAT WERE DARK, ON THE SAME CADENCE AND FOR THE SAME
      * REASON THE COW LINE IS NOT BEHIND A DEBUG FLAG. Neither of these can be
      * evaluated from the cow line alone:
@@ -1101,16 +1129,27 @@ static void dos_pool_reserve_from_meta(const char *dsk_path, uint32_t dsk_size,
      *     argument currently selects nothing at all.
      *     (external/8086tiny/docs/memory/17-xipimg-state-machine.md §5.)
      */
-    /* The machine size, before the pool: it is what dos_cpu_init() reads, and
-     * it is the only number here that cannot be applied late. 0 means the
-     * title was never profiled (and every v1 sidecar says 0 by construction),
-     * in which case the guest keeps the 640 KB it has always had. */
-    {
-        unsigned long kb = dos_meta_mach_kb(&m);
-
-        if (kb && dos_mach_set_kb((unsigned)kb))
-            printf("DOS: machine size %lu KB from %s\n", kb, path);
-    }
+    /* THE PER-TITLE MACHINE SIZE IS GONE, AND NOTHING REPLACES IT.
+     *
+     * This used to read `mach_kb` out of the .dosmeta sidecar and hand it to
+     * dos_mach_set_kb(), which patched the BIOS table so INT 12h reported LESS
+     * than 640 KB of conventional memory to the guest. Every title got whatever
+     * a profiling run had once measured.
+     *
+     * It is deleted because the premise was wrong in both directions. A profile
+     * taken on a title that did not launch measures the FAILURE and then caps
+     * the guest below what the game needs -- which presents as an EMS error,
+     * nowhere near its cause. And a profile that was right on the day is still
+     * a number nobody can re-derive reliably, because truly profiling a DOS
+     * game's memory use is not a thing this project can do.
+     *
+     * The tiering is what makes the number unnecessary: the guest is offered
+     * everything, and the pool / LZ4 / pagefile ladder backs whatever it
+     * actually touches. Running out degrades to SLOW, not to WRONG.
+     *
+     * Nothing measured about a title may influence how the emulator starts.
+     * See dos_meta.h's tombstone on the struct field, which is retained only so
+     * the on-card format does not change. */
 
     if (dos_cow_reserve((unsigned)dos_meta_pages(&m, xip_armed)) == 0) {
         printf("DOS: meta pool reservation refused\n");
@@ -1596,8 +1635,14 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * has opened the disks, loaded the BIOS blob and built the decode tables --
      * all of which a restore needs and none of which a snapshot carries -- and
      * has not run one guest instruction. See the block above dos_fbs_boot(). */
+    /* THE KEY'S MACHINE-SIZE FIELD IS NOW ALWAYS 0. It exists so the on-card
+     * .fbs header keeps its layout; it no longer distinguishes anything,
+     * because no title gets a per-title machine size any more. Passing 0 also
+     * INVALIDATES every snapshot captured under the old per-title sizes, which
+     * is the correct outcome -- those were captured on a machine that reported
+     * a different amount of conventional memory than this one does. */
     dos_fbs_boot(ACTIVE_FILE->path, (unsigned long)st.size, dos_fbs_boot_key,
-                 (unsigned long)dos_mach_kb);
+                 0ul);
     
     if (start_paused) {
         common_emu_state.pause_after_frames = 4;
