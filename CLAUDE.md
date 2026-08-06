@@ -18,6 +18,8 @@ The build system is plain GNU Make. `Makefile` lists source files; `Makefile.com
 
 - `make help` — full list of build flags with current values.
 
+**Developing and testing on the device** — which bank to link into and why, which parameters must match between a gwemu run and a hardware run, gwemu's SD-card behaviour, and how to boot straight into a chosen game unattended: [docs/device-development.md](docs/device-development.md).
+
 There are no automated tests. Verification is manual: build, flash, run on hardware.
 
 **Configuration knobs that change layout (not just behavior)** — pass on the make command line:
