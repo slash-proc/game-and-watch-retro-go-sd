@@ -490,8 +490,11 @@ def write_gamecfg(dsk: Path, verbose: bool = True) -> None:
                 worst thing this feature could do, and it would be silent.
 
     Confusing those two has already cost this project a day: every sidecar on
-    the card once read `mach_kb = 0` after a repack and four subsystems
-    switched off with nothing logged (external/8086tiny/docs/traps.md).
+    the card once read a zeroed per-title machine size after a repack and four
+    subsystems switched off with nothing logged. That particular field is now
+    deleted (external/8086tiny/dos_meta.h, mach_kb_DEAD), but the SHAPE of the
+    failure is the live lesson -- a regenerated file silently losing a value
+    that nothing revalidates (external/8086tiny/docs/traps.md).
 
     The template is all comments, so a freshly generated file is behaviourally
     identical to no file at all. That is asserted, not assumed --
