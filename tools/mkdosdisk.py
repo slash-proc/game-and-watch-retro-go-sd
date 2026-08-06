@@ -90,6 +90,13 @@ profile continuously with no keypress, which is what it is on the card for.
     python3 tools/mkdosdisk.py --dst roms/dos --verify \\
         --bare --system msdos --name msdos622
 
+Those commands now also EXPAND the DOS system files (see expand_upx below), so
+re-running them changes every generated image's size and CRC -- which is exactly
+why the .dosmeta sidecars are written by the same run that writes the .dsk.
+Never patch an image in place; rebuild it. Regenerating is worth doing: the
+expanded COMMAND.COM saves ~625 K guest instructions per boot and 8 pool pages
+with load elision on, and pool pages are the resource that binds.
+
 roms/dos/freedos.dsk is NOT generated -- it is external/8086tiny/fd.img
 verbatim, a real FreeDOS floppy with 5 fragmented files, and push-testdisk.sh
 ships it precisely because it is fragmented. Do not regenerate it.
@@ -240,6 +247,11 @@ EMS_DEFAULT = True
 # make_autoexec).
 SYSTEM_FILES = ("KERNEL.SYS", "COMMAND.COM", "CONFIG.SYS", "QUITEMU.COM")
 REQUIRED_SYSTEM_FILES = ("KERNEL.SYS", "COMMAND.COM")
+
+# The system files that get UPX-expanded on the way onto the image. See
+# expand_upx() for why. MS-DOS's IO.SYS/MSDOS.SYS/COMMAND.COM are shipped
+# uncompressed by Microsoft, so this is in practice the FreeDOS pair.
+EXPANDABLE_SYSTEM_FILES = ("KERNEL.SYS", "COMMAND.COM", "IO.SYS", "MSDOS.SYS")
 
 # MS-DOS. Order is load-bearing, not cosmetic: the boot sector checks root
 # entries 0 and 1 by name (see the module docstring).
@@ -1081,6 +1093,156 @@ def describe_dos(reader: Fat12Reader, path: Path) -> str:
     return f"{family} ({path}, OEM ID {oem!r})"
 
 
+# --- UPX expansion of the DOS system files ------------------------------------
+#
+# FreeDOS ships KERNEL.SYS and COMMAND.COM UPX-packed, and the guest unpacks both
+# on EVERY boot. Two costs, and the second is the reason this exists:
+#
+#   1. TIME. ~1.87 M guest instructions per boot, ~14% of the boot to a prompt.
+#
+#   2. POOL PAGES, which is the binding constraint. This port maps guest memory
+#      granules straight at a NOR-flash copy of the .dsk (dos_elide_set_image()),
+#      so bytes that came off disk unmodified cost ZERO pool pages. A packed
+#      executable is DECOMPRESSED INTO GUEST RAM, so every one of its pages is a
+#      dirty COW page that has to be funded from the ~700 KB AXI pool, the LZ4
+#      tier or the SD pagefile. Expanding trades NOR (64 MB, spare) for pool
+#      pages (700 KB, exhausted by WOLF3D today). Take that trade every time.
+#
+# The cost of expanding is ~110 KB of image and ~200 more sector reads, both of
+# which come out of the abundant side of the same trade.
+
+UPX_MAGIC = b"UPX!"
+
+# Set from --no-expand-system in main(). Module global for the same reason
+# CONFIG_EXTRA is one: it is a property of the invocation, not of an image.
+EXPAND_SYSTEM = True
+
+
+class UpxUnavailable(DiskFullError):
+    """upx is not installed, or cannot expand this particular file.
+
+    A DiskFullError so that it reaches the same "error: ..." print as every
+    other reason an image cannot be built, instead of a traceback.
+    """
+
+
+def upx_binary() -> str | None:
+    """Path to a upx that can expand 16-bit DOS executables, or None.
+
+    Both `upx` and `upx-ucl` (Debian's name) are accepted. Note that UPX 4.x
+    still UNPACKS dos/exe even though it no longer packs it, which is all this
+    needs.
+    """
+    import shutil
+    return shutil.which("upx") or shutil.which("upx-ucl")
+
+
+def is_upx_packed(data: bytes) -> bool:
+    """UPX's PackHeader sits at offset 85 in every 16-bit DOS file it makes."""
+    return UPX_MAGIC in data[:1024]
+
+
+def expand_upx(name: str, data: bytes) -> tuple[bytes, str]:
+    """Expand a UPX-packed DOS executable. Returns (data, note); data comes back
+    unchanged if it was not packed to begin with.
+
+    Only files `upx -d` accepts as they stand are expanded, which is a real
+    restriction and not a shortcut. FreeDOS's two packed system files are not
+    the same kind of object:
+
+      * COMMAND.COM is an ordinary UPX-packed MZ executable. `upx -d` expands
+        it, 66,090 -> 93,675 B, and it boots.
+
+      * KERNEL.SYS CANNOT BE EXPANDED FROM WHAT WE SHIP, and this was chased all
+        the way down rather than assumed. UPX (3.96 and 4.2.4 alike) answers
+        "not packed by UPX", because FreeDOS's build tool `exeflat -UPX` writes
+        its own entry header -- `EB 1B 'CONFIG' ...`, the block SYS.COM
+        patches -- over the packed file's 32-byte MZ header. Splicing a
+        synthetic MZ header back on DOES make `upx -d` work (only the magic and
+        e_cblp/e_cp matter; every other field was varied and is ignored), and it
+        yields exeflat's pre-UPX flat file. That file does not boot, and cannot:
+        exeflat writes the compressed image with `curbufoffset = stubsize`, i.e.
+        the flat image's first `stubsize` bytes are REPLACED by the UPX entry
+        stub before compression, so the kernel's real first bytes are not in the
+        packed file at any point. The recovered image begins with that stub, and
+        the boot sector loads KERNEL.SYS flat at 0060:0000 and jumps to offset
+        0. An expanded kernel therefore needs a kernel BUILT without -UPX
+        (upstream FDOS/kernel), not an unpacking step here -- so KERNEL.SYS is
+        left packed, loudly, and this docstring exists so the next reader does
+        not spend the same evening on it.
+    """
+    if not is_upx_packed(data):
+        return data, "not packed"
+    upx = upx_binary()
+    if not upx:
+        raise UpxUnavailable(
+            f"{name} is UPX-packed and no `upx` was found on PATH -- install it "
+            f"(apt install upx-ucl) or pass --no-expand-system to ship the "
+            f"packed file, costing the guest ~1.87 M instructions per boot and "
+            f"a pool page for every page it unpacks into")
+
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="mkdosdisk-upx-") as tmp:
+        tmpd = Path(tmp)
+        src, dst = tmpd / name, tmpd / (name + ".expanded")
+
+        def attempt(blob: bytes) -> bytes | None:
+            src.write_bytes(blob)
+            if dst.exists():
+                dst.unlink()
+            r = subprocess.run([upx, "-d", str(src), "-o", str(dst)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not dst.exists():
+                return None
+            return dst.read_bytes()
+
+        out = attempt(data)
+        note = "upx -d"
+        if out is None:
+            raise UpxUnavailable(
+                f"{name} carries a UPX header but {upx} will not expand it")
+
+    # Positive checks, because "upx exited 0" is not the claim being made. The
+    # output has to be BIGGER and it has to be no longer packed; a same-size or
+    # still-packed result means the file was passed through, not expanded.
+    if len(out) <= len(data):
+        raise UpxUnavailable(f"{name}: expansion did not grow the file "
+                             f"({len(data)} -> {len(out)})")
+    if is_upx_packed(out):
+        raise UpxUnavailable(f"{name}: still UPX-packed after expansion")
+    return out, f"{note}: {len(data)} -> {len(out)} B"
+
+
+def maybe_expand(name: str, data: bytes) -> bytes:
+    """Apply expand_upx() to a system file, honouring --no-expand-system.
+
+    A file that is not packed passes through silently; one that IS packed and is
+    left packed says so, because shipping a packed system file is a decision
+    with a cost and it should never happen quietly.
+    """
+    if name.upper() not in EXPANDABLE_SYSTEM_FILES:
+        return data
+    if not EXPAND_SYSTEM:
+        if is_upx_packed(data):
+            print(f"note: {name} left UPX-packed (--no-expand-system)",
+                  file=sys.stderr)
+        return data
+    try:
+        out, note = expand_upx(name, data)
+    except UpxUnavailable as e:
+        if not upx_binary():
+            raise            # no upx at all is a build error, not a shrug
+        # A packed file UPX declines (KERNEL.SYS) is not a reason to refuse to
+        # build an image -- but it IS a cost, so it is stated every time rather
+        # than swallowed.
+        print(f"note: {name} left UPX-packed -- {e}", file=sys.stderr)
+        return data
+    if note != "not packed":
+        print(f"expanded {name}: {note}", file=sys.stderr)
+    return out
+
+
 class DosSource:
     """A bootable DOS to build images from: a boot sector plus system files.
 
@@ -1240,6 +1402,8 @@ class FreeDosSource(DosSource):
                 continue
             if name == "CONFIG.SYS":
                 content = patch_config(content, self.dos_high, self.ems)
+            else:
+                content = maybe_expand(name, content)
             out.append((name, content, ATTR_ARCHIVE))
         if self.dos_high:
             out.append((XMSHOOK_NAME, xmshook_bytes(), ATTR_ARCHIVE))
@@ -1315,9 +1479,15 @@ class MsDosSource(DosSource):
             # These two, in this order, are what the boot sector name-checks at
             # root entries 0 and 1. Writing them first also makes them
             # contiguous, which MSLOAD needs.
-            ("IO.SYS", boot.read("IO.SYS"), ATTR_SYSTEM_FILE),
-            ("MSDOS.SYS", boot.read("MSDOS.SYS"), ATTR_SYSTEM_FILE),
-            ("COMMAND.COM", boot.read("COMMAND.COM"), ATTR_ARCHIVE),
+            # (maybe_expand is a no-op on all three -- Microsoft shipped them
+            # uncompressed -- but it is applied rather than assumed, so a
+            # different MS-DOS build that did arrive packed is still handled.)
+            ("IO.SYS", maybe_expand("IO.SYS", boot.read("IO.SYS")),
+             ATTR_SYSTEM_FILE),
+            ("MSDOS.SYS", maybe_expand("MSDOS.SYS", boot.read("MSDOS.SYS")),
+             ATTR_SYSTEM_FILE),
+            ("COMMAND.COM", maybe_expand("COMMAND.COM", boot.read("COMMAND.COM")),
+             ATTR_ARCHIVE),
             ("CONFIG.SYS",
              msdos_config_sys(self.dos_high, self.ems).encode("latin1"),
              ATTR_ARCHIVE),
@@ -2151,16 +2321,27 @@ def main() -> int:
                              "'DEVICE=C:\\WINDOWS\\IFSHLP.SYS'. The payload's own "
                              "CONFIG.SYS is never used -- the generated one wins -- "
                              "so this is the only way to give a guest a driver line.")
+    parser.add_argument("--no-expand-system", action="store_true",
+                        help="Ship the DOS system files exactly as the source "
+                             "has them, UPX-packed. The default is to expand "
+                             "them: FreeDOS's KERNEL.SYS and COMMAND.COM unpack "
+                             "themselves on EVERY boot, which costs ~1.87 M "
+                             "guest instructions and -- the real cost -- turns "
+                             "every page they occupy into a dirty COW page the "
+                             "~700 KB pool has to fund, where an expanded file "
+                             "read off disk unmodified can be elided to NOR for "
+                             "free. Costs ~110 KB of image.")
     parser.add_argument("--list-template", "--list-source", dest="list_template",
                         action="store_true",
                         help="List what the selected DOS source contains, and exit")
     args = parser.parse_args()
 
-    global COW_PAGES_OVERRIDE, EMIT_META, CONFIG_EXTRA, SKIP_BOOT_KEYS
+    global COW_PAGES_OVERRIDE, EMIT_META, CONFIG_EXTRA, SKIP_BOOT_KEYS, EXPAND_SYSTEM
     COW_PAGES_OVERRIDE = args.cow_pages
     EMIT_META = not args.no_meta
     CONFIG_EXTRA = list(args.config_line or [])
     SKIP_BOOT_KEYS = args.skip_boot_keys
+    EXPAND_SYSTEM = not args.no_expand_system
 
     system = args.system or ("msdos" if args.media is not None else "freedos")
 
