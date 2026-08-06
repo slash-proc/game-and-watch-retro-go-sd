@@ -1,5 +1,18 @@
 # MS-DOS core (8086tiny) — porting notes
 
+## Start here — four documents, in this order
+
+| | |
+|---|---|
+| **[`external/8086tiny/docs/glossary.md`](../../../../external/8086tiny/docs/glossary.md)** | Every term this port uses oddly, plus **every `DOS_*` build flag with its default and where it is set**. One line each, alphabetical, built to grep. Start here if a word or a flag is unfamiliar. |
+| **[`external/8086tiny/docs/traps.md`](../../../../external/8086tiny/docs/traps.md)** | Things that have already cost real time. Its **READ-THIS-FIRST family index** and **retraction ledger** are the two highest-value pages in the project: the index names the bug shapes that keep recurring, and the ledger lists claims that were disproved but survived in prose long enough to send later work down the wrong path. |
+| **[`docs/device-development.md`](../../../../docs/device-development.md)** | What bank, what parameters, gwemu's SD-card behaviour, and how to boot straight into a game unattended. |
+| [`external/8086tiny/docs/games/00-title-survey.md`](../../../../external/8086tiny/docs/games/00-title-survey.md) | Title by title: does it run, and if not, the verbatim error and its classification. |
+
+The rest of the design documentation is in the submodule and is more current than
+this file — see "Where the documentation lives" below. **This file is a summary
+and a list of traps, nothing more.**
+
 ## RULE 0 — EVERY AGENT GETS ITS OWN WORKTREE. NO EXCEPTIONS.
 
 Spawn every subagent with `isolation: "worktree"`. An agent in the shared
@@ -160,7 +173,23 @@ game can use the feature.** Write the guest-side test — code running inside a
 *packaged image* — and make its negative control fail in the exact state the
 shipped images were in. `test286/runemsdisk.sh` is the model.
 
-## AFTER ANY `.dsk` REGENERATION, RUN `tools_machkb.sh`.
+## ~~AFTER ANY `.dsk` REGENERATION, RUN `tools_machkb.sh`.~~ — SUPERSEDED, DO NOT DO THIS
+
+> **`tools_machkb.sh` is VESTIGIAL. Do not run it after a repack, or at all.**
+> `mach_kb`-based pool sizing was **deleted** along with the reclaim arena and
+> `DOS_MEM_TRIM`; the pool is registered at run time and nothing reads `mach_kb`.
+> See [`docs/glossary.md`](../../../../external/8086tiny/docs/glossary.md) and the
+> retraction ledger in
+> [`docs/traps.md`](../../../../external/8086tiny/docs/traps.md).
+>
+> The historical text is kept below because the *shape* of the failure is still
+> instructive — a repack silently zeroing a value that nothing validates — and
+> that shape now applies to the three sidecars (`.dosmeta` regenerated,
+> `.dosset` persisted, `.cfg` never overwritten). Getting those lifetimes
+> backwards is the live version of this trap.
+
+<details>
+<summary>Historical (arena era, no longer applicable)</summary>
 
 `tools/mkdosdisk.py` writes a fresh `.dosmeta` beside every image it packs. It
 computes `pages_cold` itself but **cannot know `mach_kb`** — that comes from a
@@ -176,7 +205,8 @@ its image was not rebuilt.
     sh external/8086tiny/tools_machkb.sh
 
 The values are the `safe` column of `docs/memory/26-machine-size-behavioural.md`.
-**That doc is the derivation and the script is the application — edit together.**
+
+</details>
 
 ## RUNNING GWEMU: TWO TRAPS THAT LOOK LIKE FIRMWARE BUGS
 
