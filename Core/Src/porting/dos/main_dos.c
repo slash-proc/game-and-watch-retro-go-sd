@@ -26,6 +26,7 @@
 #include "dos_xipsm.h"   /* the .xipimg state machine (external/8086tiny) */
 #include "dos_fbs.h"     /* the FAST-BOOT SNAPSHOT container (external/8086tiny) */
 #include "dos_perf.h"    /* bucketed cycle accounting, OFF by default (external/8086tiny) */
+#include "dos_blk.h"     /* the composite block device (external/8086tiny) */
 /* PER-TITLE USER SETTINGS, and note that this is NOT dos_meta.h above it. That
  * one is packaging-time CONTENT about a title, keyed on the .dsk's bytes and
  * correctly invalidated when the image is rebuilt; this one is what the USER
@@ -743,6 +744,47 @@ static int dos_sm_make_path(const char *dsk_path)
     strcpy(dos_sm_path, "/saves/dos/");
     memcpy(dos_sm_path + 11, base, n);
     strcpy(dos_sm_path + 11 + n, ".xipimg");
+    return 0;
+}
+
+/* "/roms/dos/KEEN4.dsk" -> "/saves/dos/KEEN4.ovl", the composite block device's
+ * writable sector overlay. Same directory and the same reasoning as the .xipimg
+ * above: /saves is the writable half, /roms is not.
+ *
+ * WHY THE OVERLAY IS A SAVE AND NOT A SCRATCH FILE. It holds the guest's save
+ * games. docs/storage/09-composite-block-device.md, decision 1: games write save
+ * files and their own configuration into their own directory, so a read-only
+ * .dsk needs a writable layer whatever else is true, and losing one silently is
+ * the worst failure this subsystem can produce.
+ *
+ * NOTE THE OPEN MODE IS STILL "w+b" (dos_blk_init), i.e. the overlay is
+ * TRUNCATED at each launch and saves do not yet survive a relaunch. That is
+ * honest and deliberate for this step: reloading an overlay means validating it
+ * against the payload it was taken from, and a stale overlay applied to a
+ * repacked .dsk is silent corruption of exactly the kind .dosmeta's content key
+ * exists to prevent. The key to validate against now exists (the payload is
+ * immutable, so it means what it says); wiring it is the next step and is
+ * called out in the doc rather than half-done here. */
+static char dos_ovl_path[64];
+
+static int dos_ovl_make_path(const char *dsk_path)
+{
+    const char *base = dsk_path, *p, *dot;
+    size_t n;
+
+    for (p = dsk_path; *p; p++)
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    dot = 0;
+    for (p = base; *p; p++)
+        if (*p == '.')
+            dot = p;
+    n = dot ? (size_t)(dot - base) : strlen(base);
+    if (n == 0 || n + sizeof("/saves/dos/.ovl") >= sizeof dos_ovl_path)
+        return -1;
+    strcpy(dos_ovl_path, "/saves/dos/");
+    memcpy(dos_ovl_path + 11, base, n);
+    strcpy(dos_ovl_path + 11 + n, ".ovl");
     return 0;
 }
 
@@ -1616,6 +1658,45 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
         return;
     }
 
+    /* ---- THE COMPOSITE BLOCK DEVICE ---------------------------------------
+     *
+     * docs/storage/09-composite-block-device.md. Mount the .dsk READ-ONLY behind
+     * a write-through sector overlay, and regenerate CONFIG.SYS into that
+     * overlay from the settings.
+     *
+     * HERE, AND THE POSITION IS THE DESIGN. dos_cpu_init() has just opened the
+     * disks and read the decode tables out of the BIOS blob, and has not run a
+     * single guest instruction. dos_blk_install() BORROWS the handle
+     * dos_cpu_init() opened rather than opening the image a second time -- which
+     * is the whole reason the fopen budget does not move -- so it cannot run
+     * earlier; and CONFIG.SYS must be generated before the guest can read it, so
+     * it cannot run later.
+     *
+     * THE fopen BUDGET, COUNTED. MAX_OPEN_FILES is 8 (Core/Src/syscalls.c:51)
+     * and running out fails SILENTLY -- every other fopen() in the firmware
+     * returns NULL and callers read it as "asset missing", which once rendered
+     * the whole UI as diamonds with nothing logged. Before: disk[0] or disk[1]
+     * (the image), disk[2] (the BIOS blob) and the shared pagefile = 3 in this
+     * configuration, 4 when both disk slots are used. After: the same handles
+     * plus ONE for the overlay = 4. The payload is not reopened and the floppy
+     * slot is unchanged, so this adds exactly one handle and leaves four spare.
+     *
+     * FAILURE IS NOT FATAL AND IS NOT SILENT. dos_blk_install() returning
+     * non-zero leaves dos_blk_dev NULL, which is the plain disk[] path that has
+     * shipped; it is reported on one line either way, because "the composite
+     * quietly did not install" and "the composite installed and did nothing" are
+     * otherwise the same observation. */
+    if (dos_ovl_make_path(ACTIVE_FILE->path) != 0) {
+        printf("DOS: BLK overlay path too long for %s - running without a "
+               "writable layer\n", ACTIVE_FILE->path);
+    } else if (dos_blk_install(dos_disk_index, dos_ovl_path) != 0) {
+        printf("DOS: BLK install failed for slot %d - the .dsk is writable "
+               "again and CONFIG.SYS is the packed one\n", dos_disk_index);
+    } else {
+        printf("DOS: BLK composite on slot %d, overlay %s\n",
+               dos_disk_index, dos_ovl_path);
+    }
+
     /* FAST-BOOT SNAPSHOT, and AFTER dos_cpu_init() is the whole design: init
      * has opened the disks, loaded the BIOS blob and built the decode tables --
      * all of which a restore needs and none of which a snapshot carries -- and
@@ -1922,6 +2003,14 @@ void app_main_dos(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
      * number that decides whether the pool was big enough. */
     dos_cow_log("final");
     dos_xipsm_report();
+    /* FLUSH THE OVERLAY. This covers the guest-halt exit only -- the pause menu
+     * does not come through here, which is why dos_blk.c ALSO flushes every
+     * DOS_BLK_SYNC_WRITES page writes rather than relying on a teardown that a
+     * player may never reach. The overlay stream is unbuffered (setvbuf
+     * _IONBF), so a guest write is already in FatFS by the time this runs; what
+     * the flush commits is the directory entry. */
+    dos_blk_sync(dos_blk_instance());
+    dos_blk_report(dos_blk_instance(), "final");
     /* The pagefile is scratch and can be megabytes. Deleting it here covers the
      * guest-halt exit; the "w+b" truncation in dos_pgf_open() covers every
      * other way out of this core (the pause menu does not come through here),
