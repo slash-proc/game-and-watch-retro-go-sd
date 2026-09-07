@@ -17,13 +17,15 @@
  *   8+header_length  payload: code_size bytes linked at __RAM_EMU_START__
  *                    (entry trampoline at payload offset 0). Firmware zeroes
  *                    bss_size bytes after the payload.
+ *                    If flags & GWHB_FLAG_ITCM_SEGMENT: followed by
+ *                    itcm_code_size bytes loaded to __ITCM_CORE_START__.
  *
  * Legacy (pre-meta) binaries used a fixed 64-byte header with entry at
  * offset 64 and no BSS assist. The loader still accepts them when
  * header_length == 0 (see run_gwhb_homebrew()).
  *
- * Assets that do not fit in RAM_EMU (zelda3.ro, *_assets.dat, …) stay as
- * sibling files on the SD card; the homebrew loads them via the ABI.
+ * Assets that do not fit in RAM_EMU (e.g. large .ro / *_assets.dat sidecars)
+ * stay as sibling files on the SD card; the homebrew loads them via the ABI.
  */
 #pragma once
 
@@ -47,7 +49,7 @@ typedef struct {
     uint32_t required_abi_version;
     uint32_t required_abi_min_size;
 
-    uint32_t flags; /* reserved; 0 today */
+    uint32_t flags; /* GWHB_FLAG_* ; 0 if none */
 
     /* RAM_EMU segment 0: payload bytes after the header envelope, then BSS. */
     uint32_t code_size;
@@ -71,10 +73,17 @@ typedef struct {
     uint8_t version_patch;
     uint8_t reserved0;
 
+    /* When GWHB_FLAG_ITCM_SEGMENT is set: little-endian u32 itcm_code_size,
+     * u32 itcm_bss_size at reserved[0..7]. File payload is then
+     * code_size (RAM_EMU) + itcm_code_size bytes; firmware loads the ITCM
+     * trailer to __ITCM_CORE_START__ (same as CORE multi-segment). */
     uint8_t reserved[32];
 } gwhb_meta_t;
 
 _Static_assert(sizeof(gwhb_meta_t) == 96, "gwhb_meta_t must be exactly 96 bytes");
+
+/* Optional ITCM hot-code trailer after the RAM_EMU payload. */
+#define GWHB_FLAG_ITCM_SEGMENT 0x1u
 
 #ifdef __cplusplus
 }

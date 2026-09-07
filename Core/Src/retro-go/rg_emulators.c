@@ -18,7 +18,8 @@
 #include "rom_manager.h"
 #include "gw_lcd.h"
 #include "main.h"
-/* Per-system porting headers (main_gb_tgbdual.h, main_wsv.h, main_gba.h, ...)
+/* Per-system porting headers (legacy in-tree overlays; dynamic cores
+ * carry their own entry and do not include firmware porting headers)
  * were removed here while migrating those emulators to standalone
  * cores/<system>/ builds — rg_emulators.c no longer calls their app_main_*
  * entry points directly (see emulators_scan_cores() / run_dynamic_core()). */
@@ -1479,6 +1480,49 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
     /* Seed ram_malloc past code+bss, same as run_dynamic_core(). */
     ram_start = (uint32_t)(base + meta.code_size + meta.bss_size);
 
+    /* Optional ITCM trailer (GWHB_FLAG_ITCM_SEGMENT): same load+reserve
+     * path as CORE multi-segment ITCM — homebrew must not self-copy. */
+    if (meta.flags & GWHB_FLAG_ITCM_SEGMENT) {
+        uint32_t itcm_code_size, itcm_bss_size;
+        memcpy(&itcm_code_size, &meta.reserved[0], 4);
+        memcpy(&itcm_bss_size, &meta.reserved[4], 4);
+
+        uint32_t itcm_max = (uint32_t)&__ITCM_CORE_LENGTH__;
+        uint8_t *itcm_base = (uint8_t *)&__ITCM_CORE_START__;
+        if (itcm_code_size == 0
+            || (uint64_t)itcm_code_size + itcm_bss_size > itcm_max) {
+            printf("GWHB: itcm code=%lu bss=%lu max=%lu\n",
+                   (unsigned long)itcm_code_size,
+                   (unsigned long)itcm_bss_size,
+                   (unsigned long)itcm_max);
+            show_homebrew_error_screen("ITCM segment too big");
+            return;
+        }
+
+        size_t itcm_loaded = rg_storage_copy_file_range_to_ram(
+            (char *)path, itcm_base,
+            payload_off + meta.code_size, itcm_code_size, NULL);
+        if (itcm_loaded != itcm_code_size) {
+            printf("GWHB: ITCM loaded %u, expected %lu\n",
+                   (unsigned)itcm_loaded, (unsigned long)itcm_code_size);
+            show_homebrew_error_screen("ITCM SD read failed");
+            return;
+        }
+
+        memset(itcm_base + itcm_code_size, 0, itcm_bss_size);
+        SCB_CleanDCache_by_Addr((uint32_t *)itcm_base, (int32_t)itcm_code_size);
+        SCB_InvalidateICache();
+
+        /* itc_init() already ran in the launcher; reserve so itc_* never
+         * overwrite hot code (same as run_dynamic_core). */
+        void *reserved = itc_malloc(itcm_code_size + itcm_bss_size);
+        if (reserved != (void *)itcm_base) {
+            printf("GWHB: ITCM reserve failed (%p)\n", reserved);
+            show_homebrew_error_screen("ITCM reserve failed");
+            return;
+        }
+    }
+
     g_running_core_version[0] = meta.version_major;
     g_running_core_version[1] = meta.version_minor;
     g_running_core_version[2] = meta.version_patch;
@@ -1807,7 +1851,7 @@ static void run_dynamic_core(const char *core_path, uint8_t load_state, uint8_t 
             /* Seed the shared RAM_EMU bump pool (ram_start/ram_malloc, see
              * gw_malloc.c) to right past this segment's own code+bss, same
              * value each core used to have to compute itself as
-             * &__CORE_BSS_END__ (see e.g. main_wsv.c) — this
+             * &__CORE_BSS_END__ (see standalone core entry) — this
              * firmware-side metadata already carries the exact code_size +
              * bss_size pack_core.py measured off that same symbol, so doing
              * it once here removes the need for every core's own main_*.c
@@ -1816,7 +1860,7 @@ static void run_dynamic_core(const char *core_path, uint8_t load_state, uint8_t 
              * ram_get_free_size() are already valid the moment the entry
              * trampoline is jumped to below, including during a C++ core's
              * global constructors (gw_core_entry.S's .init_array loop runs
-             * before CORE_ENTRY, e.g. cores/gb_tgbdual's operator new). */
+             * before CORE_ENTRY, e.g. a C++ core's operator new). */
             ram_start = (uint32_t)(base + seg->code_size + seg->bss_size);
         } else if (seg->region == GNW_CORE_REGION_ITCM) {
             /* Reserve the span in the ITCM bump so later itc_* allocs
@@ -2068,9 +2112,9 @@ void emulators_init()
     /* ★ Favorites must be the FIRST tab (index 0), before every system tab. */
     rg_favorites_register_tab();
 
-    /* Every classic emulator (gb, gba, nes, sms family, msx, genesis, pce,
-     * wsv, atari family, tama, pkmini, amstrad, gw) and the legacy
-     * zelda3/smw/celeste "homebrew" used to be registered here via
+    /* Every classic emulator (gb, gba, nes, sms family, genesis, pce,
+     * wsv, atari family, tama, pkmini, amstrad, gw, msx) and the legacy
+     * zelda3/smw/celeste (and other GWHB homebrews) used to be registered here via
      * add_emulator(...) with compile-time logos/extensions/dirname. They
      * are being migrated to standalone cores/<system>/ builds, discovered
      * dynamically at boot from /cores/*.bin (see emulators_scan_cores(),

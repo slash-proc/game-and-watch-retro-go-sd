@@ -11,7 +11,10 @@ File layout (little-endian):
     offset 6   header_length   u16  == sizeof(gwhb_meta_t) + cover_size
     offset 8   gwhb_meta_t
     ...        optional cover JPEG
-    8+header_length  code payload (RAM_EMU, entry at offset 0)
+    8+header_length  code payload:
+                       RAM_EMU code_size bytes (entry at offset 0)
+                       [optional] ITCM itcm_code_size bytes when
+                       flags & GWHB_FLAG_ITCM_SEGMENT
 
 Usage:
 
@@ -28,11 +31,13 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 GWHB_MAGIC = b"GWHB"
 GWHB_HEADER_MIN_SIZE = 8
 GWHB_META_VERSION = 1
+GWHB_FLAG_ITCM_SEGMENT = 0x1
 COVER_SIZE_MAX = 10 * 1024  # must match COVER_SIZE in gui.c
 # Must match COVER_MAX_WIDTH/HEIGHT in Core/Src/retro-go/gui.c (HW JPEG scratch).
 COVER_MAX_WIDTH = 186
@@ -42,6 +47,61 @@ COVER_MAX_HEIGHT = 100
 META_STRUCT_FORMAT = "<IIIIIII32sBBBB32s"
 META_STRUCT_SIZE = struct.calcsize(META_STRUCT_FORMAT)
 assert META_STRUCT_SIZE == 96, META_STRUCT_SIZE
+
+
+def objcopy_tool_from_nm(nm_tool: str) -> str:
+    nm_tool = str(nm_tool)
+    if nm_tool.endswith("nm"):
+        return nm_tool[:-2] + "objcopy"
+    return "arm-none-eabi-objcopy"
+
+
+def extract_section_bytes(objcopy: str, elf_path: Path, section: str, expected_size: int) -> bytes:
+    if expected_size == 0:
+        return b""
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        subprocess.run(
+            [objcopy, "-O", "binary", f"--only-section={section}", str(elf_path), str(tmp_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        data = tmp_path.read_bytes()
+    except subprocess.CalledProcessError as e:
+        sys.exit(
+            f"error: objcopy failed extracting {section} from {elf_path}: "
+            f"{e.stderr or e.stdout or e}"
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    if len(data) != expected_size:
+        sys.exit(
+            f"error: section {section} extracted as {len(data)} bytes, "
+            f"expected code_size={expected_size}"
+        )
+    return data
+
+
+def discover_itcm(symbols: dict[str, int], elf_path: Path, objcopy: str) -> tuple[int, int, bytes] | None:
+    """Return (code_size, bss_size, payload) if .core_itcm symbols exist."""
+    needed = ("__ITCM_CORE_START__", "__CORE_ITCM_CODE_END__", "__CORE_ITCM_BSS_END__")
+    if not all(name in symbols for name in needed):
+        return None
+    start = symbols["__ITCM_CORE_START__"]
+    code_end = symbols["__CORE_ITCM_CODE_END__"]
+    bss_end = symbols["__CORE_ITCM_BSS_END__"]
+    code_size = code_end - start
+    bss_size = bss_end - code_end
+    if code_size < 0 or bss_size < 0:
+        sys.exit(
+            f"error: ITCM segment negative size (code={code_size}, bss={bss_size})"
+        )
+    if code_size == 0:
+        return None
+    payload = extract_section_bytes(objcopy, elf_path, ".core_itcm", code_size)
+    return code_size, bss_size, payload
 
 
 def parse_version(spec: str) -> tuple[int, int, int]:
@@ -233,11 +293,20 @@ def main() -> None:
 
     ver_maj, ver_min, ver_pat = parse_version(args.version)
 
+    flags = args.flags
+    reserved = bytearray(32)
+    itcm_payload = b""
+    itcm_info = discover_itcm(symbols, args.elf, objcopy_tool_from_nm(args.nm))
+    if itcm_info is not None:
+        itcm_code_size, itcm_bss_size, itcm_payload = itcm_info
+        flags |= GWHB_FLAG_ITCM_SEGMENT
+        struct.pack_into("<II", reserved, 0, itcm_code_size, itcm_bss_size)
+
     meta = struct.pack(
         META_STRUCT_FORMAT,
         required_abi_version,
         required_abi_min_size,
-        args.flags,
+        flags,
         code_size,
         bss_size,
         cover_offset,
@@ -247,7 +316,7 @@ def main() -> None:
         ver_min,
         ver_pat,
         0,
-        b"\0" * 32,
+        bytes(reserved),
     )
     assert len(meta) == META_STRUCT_SIZE
 
@@ -257,6 +326,7 @@ def main() -> None:
         + meta
         + cover
         + payload
+        + itcm_payload
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +335,11 @@ def main() -> None:
     print(f"pack_homebrew: wrote {args.out} ({len(envelope)} bytes)")
     print(f"  name={args.name!r} version={ver_maj}.{ver_min}.{ver_pat}")
     print(f"  code={code_size}B bss={bss_size}B cover={cover_size}B")
+    if itcm_info is not None:
+        print(
+            f"  itcm_code={itcm_info[0]}B itcm_bss={itcm_info[1]}B "
+            f"(flags=0x{flags:x})"
+        )
     print(
         f"  required_abi_version={required_abi_version} "
         f"required_abi_min_size={required_abi_min_size}"
