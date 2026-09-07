@@ -40,6 +40,10 @@
 #define CORE_HEADER_MIN_SIZE 8u
 
 static bool gwhb_probe(const char *path, gwhb_meta_t *meta, uint16_t *header_length);
+static uint8_t *dynamic_core_region_base(uint32_t region, uint32_t *out_max_len);
+static bool load_gnw_segments(const char *path, uint32_t file_offset,
+                              const gnw_core_segment_t *segments, uint32_t count,
+                              uint8_t **out_entry_base);
 
 static const char *get_extension(const char *filename);
 
@@ -534,13 +538,13 @@ static bool emulator_add_rom_file(retro_emulator_t *emu, const char *path,
     slot->cover_bin_offset = 0;
     slot->cover_bin_size = 0;
 #endif
-    /* GWHB v1: prefer display_name from the header; note cover_bin_* for
+    /* GWHB: prefer display_name from the header; note cover_bin_* for
      * metadata only — coverflow still prefers /covers/homebrew/<stem>.img
      * over the embedded JPEG (see get_coverfile in gui.c). */
     if (emu->dirname[0] && strcmp(emu->dirname, "homebrew") == 0) {
         gwhb_meta_t hb;
         uint16_t hb_len = 0;
-        if (gwhb_probe(path, &hb, &hb_len) && hb_len != 0) {
+        if (gwhb_probe(path, &hb, &hb_len)) {
             if (hb.display_name[0]) {
                 strncpy(slot->name, hb.display_name, sizeof(slot->name) - 1);
                 slot->name[sizeof(slot->name) - 1] = '\0';
@@ -1310,10 +1314,8 @@ extern LTDC_HandleTypeDef hltdc;
  * /homebrews/ and it runs, as long as it starts with a GWHB container
  * (see gwhb.h).
  *
- * v1 meta: firmware loads only the code payload into RAM_EMU, zeroes BSS,
- * and jumps to payload offset 0. Legacy (header_length == 0): whole file
- * was copied into RAM_EMU with entry at offset 64 (binary zeroes its own
- * BSS).
+ * Same multi-segment load path as CORE (load_gnw_segments): segments[0]
+ * is always RAM_EMU (entry at offset 0); optional ITCM / RAM_UC follow.
  *
  * Trust model: the file is loaded, unauthenticated, from an SD card, so
  * every firmware-side check below is defensive: refuse rather than jump
@@ -1334,10 +1336,30 @@ static void show_homebrew_error_screen(const char *reason)
   (void)odroid_overlay_dialog("Homebrew", choices, 2, NULL, 0);
 }
 
-/* Read GWHB envelope + meta from `path`. Returns true on a recognizable
- * GWHB file (v1 or legacy). On v1 success, *meta is filled and
- * *header_length is the on-disk header_length field. Legacy: *header_length
- * is 0 and *meta is left untouched. */
+/* Read GWHB envelope + meta from `path`. On success *meta is filled and
+ * *header_length is the on-disk header_length field (covers may trail meta).
+ */
+static bool gwhb_segments_ok(const gwhb_meta_t *meta)
+{
+    if (meta->segments_count < 1 || meta->segments_count > GNW_CORE_MAX_SEGMENTS)
+        return false;
+    if (meta->segments[0].region != GNW_CORE_REGION_RAM_EMU)
+        return false;
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < meta->segments_count; i++) {
+        uint32_t region = meta->segments[i].region;
+        if (region != GNW_CORE_REGION_RAM_EMU &&
+            region != GNW_CORE_REGION_ITCM &&
+            region != GNW_CORE_REGION_RAM_UC)
+            return false;
+        uint32_t bit = 1u << region;
+        if (seen & bit)
+            return false;
+        seen |= bit;
+    }
+    return true;
+}
+
 static bool gwhb_probe(const char *path, gwhb_meta_t *meta, uint16_t *header_length)
 {
     FILE *f = fopen(path, "rb");
@@ -1361,15 +1383,6 @@ static bool gwhb_probe(const char *path, gwhb_meta_t *meta, uint16_t *header_len
     memcpy(&version, envelope + 4, 2);
     memcpy(&length, envelope + 6, 2);
 
-    /* Legacy fixed 64-byte header: required_abi was a u32 at offset 4, so
-     * reading as CORE-style envelope yields header_length == 0. */
-    if (length == 0) {
-        fclose(f);
-        if (header_length)
-            *header_length = 0;
-        return true;
-    }
-
     if (version != GWHB_META_VERSION || length < sizeof(gwhb_meta_t)) {
         fclose(f);
         return false;
@@ -1382,6 +1395,8 @@ static bool gwhb_probe(const char *path, gwhb_meta_t *meta, uint16_t *header_len
     fclose(f);
 
     meta->display_name[sizeof(meta->display_name) - 1] = '\0';
+    if (!gwhb_segments_ok(meta))
+        return false;
     if (header_length)
         *header_length = length;
     return true;
@@ -1410,39 +1425,6 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
         return;
     }
 
-    const uint32_t ram_emu_len =
-        ((uint32_t)&__RAM_EMU_END__) - (uint32_t)&__RAM_EMU_START__;
-    uint8_t *base = (uint8_t *)&__RAM_EMU_START__;
-
-    if (header_length == 0) {
-        /* Legacy: whole file already must fit in RAM_EMU; entry at +64. */
-        size_t copied = rg_storage_copy_file_to_ram_bounded(
-            (char *)path, base, 0, ram_emu_len, NULL);
-        if (copied < GWHB_LEGACY_HEADER_SIZE) {
-            show_homebrew_error_screen("Legacy header too small");
-            return;
-        }
-
-        /* Re-read ABI fields from the legacy header layout at RAM. */
-        uint32_t required_abi, required_min;
-        memcpy(&required_abi, base + 4, 4);
-        memcpy(&required_min, base + 8, 4);
-        if (!gwhb_abi_ok(required_abi, required_min)) {
-            printf("GWHB legacy: ABI %lu/%lu, firmware %u/%lu\n",
-                   (unsigned long)required_abi, (unsigned long)required_min,
-                   (unsigned)GW_FIRMWARE_ABI_VERSION,
-                   (unsigned long)g_firmware_abi.size);
-            show_homebrew_error_screen("ABI mismatch — reflash FW");
-            return;
-        }
-
-        SCB_CleanDCache_by_Addr((uint32_t *)base, copied);
-        SCB_InvalidateICache();
-        ((void (*)(uint8_t, uint8_t, int8_t))(((uintptr_t)base + GWHB_LEGACY_HEADER_SIZE) | 1))
-            (load_state, start_paused, save_slot);
-        return;
-    }
-
     if (!gwhb_abi_ok(meta.required_abi_version, meta.required_abi_min_size)) {
         printf("GWHB: ABI req %lu/%lu, firmware %u/%lu\n",
                (unsigned long)meta.required_abi_version,
@@ -1453,74 +1435,12 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
         return;
     }
 
-    if (meta.code_size == 0
-        || (uint64_t)meta.code_size + meta.bss_size > ram_emu_len) {
-        printf("GWHB: code=%lu bss=%lu ram_emu=%lu\n",
-               (unsigned long)meta.code_size, (unsigned long)meta.bss_size,
-               (unsigned long)ram_emu_len);
-        show_homebrew_error_screen("Homebrew too big for RAM");
-        return;
-    }
-
+    uint8_t *entry_base = NULL;
     uint32_t payload_off = GWHB_HEADER_MIN_SIZE + (uint32_t)header_length;
-    size_t loaded = rg_storage_copy_file_range_to_ram(
-        (char *)path, base, payload_off, meta.code_size, NULL);
-    if (loaded != meta.code_size) {
-        printf("GWHB: loaded %u, expected %lu (off=%lu path=%s)\n",
-               (unsigned)loaded, (unsigned long)meta.code_size,
-               (unsigned long)payload_off, path);
-        show_homebrew_error_screen("SD read failed — re-copy .bin");
+    if (!load_gnw_segments(path, payload_off, meta.segments, meta.segments_count,
+                           &entry_base) || entry_base == NULL) {
+        show_homebrew_error_screen("Load failed — check segments");
         return;
-    }
-
-    memset(base + meta.code_size, 0, meta.bss_size);
-    SCB_CleanDCache_by_Addr((uint32_t *)base, meta.code_size);
-    SCB_InvalidateICache();
-
-    /* Seed ram_malloc past code+bss, same as run_dynamic_core(). */
-    ram_start = (uint32_t)(base + meta.code_size + meta.bss_size);
-
-    /* Optional ITCM trailer (GWHB_FLAG_ITCM_SEGMENT): same load+reserve
-     * path as CORE multi-segment ITCM — homebrew must not self-copy. */
-    if (meta.flags & GWHB_FLAG_ITCM_SEGMENT) {
-        uint32_t itcm_code_size, itcm_bss_size;
-        memcpy(&itcm_code_size, &meta.reserved[0], 4);
-        memcpy(&itcm_bss_size, &meta.reserved[4], 4);
-
-        uint32_t itcm_max = (uint32_t)&__ITCM_CORE_LENGTH__;
-        uint8_t *itcm_base = (uint8_t *)&__ITCM_CORE_START__;
-        if (itcm_code_size == 0
-            || (uint64_t)itcm_code_size + itcm_bss_size > itcm_max) {
-            printf("GWHB: itcm code=%lu bss=%lu max=%lu\n",
-                   (unsigned long)itcm_code_size,
-                   (unsigned long)itcm_bss_size,
-                   (unsigned long)itcm_max);
-            show_homebrew_error_screen("ITCM segment too big");
-            return;
-        }
-
-        size_t itcm_loaded = rg_storage_copy_file_range_to_ram(
-            (char *)path, itcm_base,
-            payload_off + meta.code_size, itcm_code_size, NULL);
-        if (itcm_loaded != itcm_code_size) {
-            printf("GWHB: ITCM loaded %u, expected %lu\n",
-                   (unsigned)itcm_loaded, (unsigned long)itcm_code_size);
-            show_homebrew_error_screen("ITCM SD read failed");
-            return;
-        }
-
-        memset(itcm_base + itcm_code_size, 0, itcm_bss_size);
-        SCB_CleanDCache_by_Addr((uint32_t *)itcm_base, (int32_t)itcm_code_size);
-        SCB_InvalidateICache();
-
-        /* itc_init() already ran in the launcher; reserve so itc_* never
-         * overwrite hot code (same as run_dynamic_core). */
-        void *reserved = itc_malloc(itcm_code_size + itcm_bss_size);
-        if (reserved != (void *)itcm_base) {
-            printf("GWHB: ITCM reserve failed (%p)\n", reserved);
-            show_homebrew_error_screen("ITCM reserve failed");
-            return;
-        }
     }
 
     g_running_core_version[0] = meta.version_major;
@@ -1535,7 +1455,7 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
     strncpy(g_running_core_path, path, sizeof(g_running_core_path) - 1);
     g_running_core_path[sizeof(g_running_core_path) - 1] = '\0';
 
-    ((void (*)(uint8_t, uint8_t, int8_t))((uintptr_t)base | 1))
+    ((void (*)(uint8_t, uint8_t, int8_t))((uintptr_t)entry_base | 1))
         (load_state, start_paused, save_slot);
 }
 
@@ -1767,6 +1687,74 @@ static uint8_t *dynamic_core_region_base(uint32_t region, uint32_t *out_max_len)
     }
 }
 
+/* Shared CORE / GWHB multi-segment load: copy each segment's code into its
+ * fixed region, zero BSS, seed ram_start from segment 0, reserve ITCM /
+ * RAM_UC spans. Returns false on any failure (*out_entry_base undefined). */
+static bool load_gnw_segments(const char *path, uint32_t file_offset,
+                              const gnw_core_segment_t *segments, uint32_t count,
+                              uint8_t **out_entry_base)
+{
+    uint8_t *entry_base = NULL;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (segments[i].region == GNW_CORE_REGION_RAM_UC) {
+            lcd_setup_framebuffers(LCD_MODE_LUT8);
+            break;
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const gnw_core_segment_t *seg = &segments[i];
+        uint32_t region_len = 0;
+        uint8_t *base = dynamic_core_region_base(seg->region, &region_len);
+
+        /* region_len == 0, not !base: ITCM's legitimate base address is
+         * 0x00000000 (Cortex-M7 maps ITCM at address 0), numerically
+         * identical to the NULL sentinel dynamic_core_region_base() returns
+         * for an actually-unsupported region. */
+        if (region_len == 0 || (uint64_t)seg->code_size + seg->bss_size > region_len) {
+            printf("GNW seg[%lu]: region=%lu code=%lu bss=%lu max=%lu\n",
+                   (unsigned long)i, (unsigned long)seg->region,
+                   (unsigned long)seg->code_size, (unsigned long)seg->bss_size,
+                   (unsigned long)region_len);
+            return false;
+        }
+
+        size_t loaded = seg->code_size
+            ? rg_storage_copy_file_range_to_ram((char *)path, base, file_offset, seg->code_size, NULL)
+            : 0;
+        if (seg->code_size && loaded != seg->code_size) {
+            printf("GNW seg[%lu]: SD read %u, expected %lu (off=%lu)\n",
+                   (unsigned long)i, (unsigned)loaded,
+                   (unsigned long)seg->code_size, (unsigned long)file_offset);
+            return false;
+        }
+
+        memset(base + seg->code_size, 0, seg->bss_size);
+        SCB_CleanDCache_by_Addr((uint32_t *)base, (int32_t)seg->code_size);
+        SCB_InvalidateICache();
+
+        if (i == 0) {
+            entry_base = base;
+            ram_start = (uint32_t)(base + seg->code_size + seg->bss_size);
+        } else if (seg->region == GNW_CORE_REGION_ITCM) {
+            void *reserved = itc_malloc(seg->code_size + seg->bss_size);
+            if (reserved != base) {
+                printf("GNW: ITCM reserve failed (%p vs %p)\n", reserved, base);
+                return false;
+            }
+        } else if (seg->region == GNW_CORE_REGION_RAM_UC) {
+            lcd_claim_bonus_pool((size_t)seg->code_size + seg->bss_size);
+        }
+
+        file_offset += seg->code_size;
+    }
+
+    if (out_entry_base)
+        *out_entry_base = entry_base;
+    return entry_base != NULL;
+}
+
 /* Re-probes `core_path`'s gnw_core_meta_t at launch time (cheap header-only
  * read, done instead of caching code/bss sizes in retro_emulator_t — see
  * rg_emulators.h) to get the live segment list. For each segment: resolves
@@ -1805,76 +1793,10 @@ static void run_dynamic_core(const char *core_path, uint8_t load_state, uint8_t 
 
     uint32_t file_offset = CORE_HEADER_MIN_SIZE + (uint32_t)header_length;
 
-    /* LUT8 must be live before any RAM_UC memcpy: in RGB565 the 150 KiB
-     * window is the second framebuffer (uncached, scanned by LTDC). */
-    for (uint32_t i = 0; i < meta.segments_count; i++) {
-        if (meta.segments[i].region == GNW_CORE_REGION_RAM_UC) {
-            lcd_setup_framebuffers(LCD_MODE_LUT8);
-            break;
-        }
-    }
-
-    for (uint32_t i = 0; i < meta.segments_count; i++) {
-        const gnw_core_segment_t *seg = &meta.segments[i];
-        uint32_t region_len = 0;
-        uint8_t *base = dynamic_core_region_base(seg->region, &region_len);
-
-        /* region_len == 0, not !base: ITCM's legitimate base address is
-         * 0x00000000 (Cortex-M7 maps ITCM at address 0), numerically
-         * identical to the NULL sentinel dynamic_core_region_base() returns
-         * for an actually-unsupported region — a base-pointer check here
-         * would reject every valid ITCM segment (which is every core built
-         * with CORE_EXTRA_SEGMENTS=itcm:...) as "too big"
-         * and show the corrupted-installation screen. region_len is always
-         * a nonzero constant for RAM_EMU/ITCM/RAM_UC and is explicitly
-         * zeroed only in the `default:` case, so it's an unambiguous
-         * invalid-region sentinel. */
-        if (region_len == 0 || (uint64_t)seg->code_size + seg->bss_size > region_len) {
-            show_corrupted_installation_screen();
-            return;
-        }
-
-        size_t loaded = seg->code_size
-            ? rg_storage_copy_file_range_to_ram((char *)core_path, base, file_offset, seg->code_size, NULL)
-            : 0;
-        if (seg->code_size && loaded != seg->code_size) {
-            show_corrupted_installation_screen();
-            return;
-        }
-
-        memset(base + seg->code_size, 0, seg->bss_size);
-        SCB_CleanDCache_by_Addr((uint32_t *)base, seg->code_size);
-        SCB_InvalidateICache();
-
-        if (i == 0) {
-            entry_base = base;
-            /* Seed the shared RAM_EMU bump pool (ram_start/ram_malloc, see
-             * gw_malloc.c) to right past this segment's own code+bss, same
-             * value each core used to have to compute itself as
-             * &__CORE_BSS_END__ (see standalone core entry) — this
-             * firmware-side metadata already carries the exact code_size +
-             * bss_size pack_core.py measured off that same symbol, so doing
-             * it once here removes the need for every core's own main_*.c
-             * to remember to set it, and — unlike a core doing it lazily on
-             * its first ROM-data callback — guarantees ram_malloc()/
-             * ram_get_free_size() are already valid the moment the entry
-             * trampoline is jumped to below, including during a C++ core's
-             * global constructors (gw_core_entry.S's .init_array loop runs
-             * before CORE_ENTRY, e.g. a C++ core's operator new). */
-            ram_start = (uint32_t)(base + seg->code_size + seg->bss_size);
-        } else if (seg->region == GNW_CORE_REGION_ITCM) {
-            /* Reserve the span in the ITCM bump so later itc_* allocs
-             * start past the loaded code+bss. */
-            void *reserved = itc_malloc(seg->code_size + seg->bss_size);
-            if (reserved != base) {
-                show_corrupted_installation_screen();
-                return;
-            }
-        } else if (seg->region == GNW_CORE_REGION_RAM_UC) {
-            lcd_claim_bonus_pool((size_t)seg->code_size + seg->bss_size);
-        }
-
-        file_offset += seg->code_size;
+    if (!load_gnw_segments(core_path, file_offset, meta.segments, meta.segments_count,
+                           &entry_base)) {
+        show_corrupted_installation_screen();
+        return;
     }
 
     ((void (*)(uint8_t, uint8_t, int8_t))((uintptr_t)entry_base | 1))(load_state, start_paused, save_slot);

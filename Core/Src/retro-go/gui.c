@@ -793,7 +793,7 @@ static uint8_t *get_coverfile(char *rom_path)
         file = fopen(coverpath, "rb");
     }
 
-    /* GWHB v1: JPEG embedded in the .bin — only if no on-disk cover. */
+    /* GWHB: JPEG embedded in the .bin — only if no on-disk cover. */
     if (!file && rom_path && strstr(rom_path, "/homebrews/")) {
         free(coverpath);
         coverpath = NULL;
