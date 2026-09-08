@@ -1477,7 +1477,9 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
  * per-system run_internal_emu() but with metadata read from the file
  * instead of compile-time linker symbols. */
 
-#if SD_CARD == 1
+/* gnw_core_probe() is used by run_dynamic_core() in both storage variants, so it
+ * sits outside the SD_CARD guard below; only the launcher-side core scanning
+ * (add_emulator_dynamic/cores_set_fingerprint/emulators_scan_cores) is SD-only. */
 
 /* Reads only the CORE header + gnw_core_meta_t (not the payload) from
  * `path`. Returns true and fills *out_meta on success, and *out_header_length
@@ -1552,6 +1554,8 @@ done:
         *out_header_length = header_length;
     return ok;
 }
+
+#if SD_CARD == 1
 
 /* Registers one launcher tab per system described in `meta` (up to
  * GNW_CORE_MAX_SYSTEMS), all sharing the same core_path — this is how one
