@@ -37,10 +37,12 @@ extern "C" {
 #define RG_INSTALL_STORAGE_FLASH 0u
 #define RG_INSTALL_STORAGE_SD    1u
 
-/* Version string field width. GIT_TAG is stored with its "Retro-Go SD " display
- * prefix removed, so this holds the tag a release is named after ("v2.0.0") and
- * a development describe ("v1.4.1-117-gcae346199+") with room to spare. */
-#define RG_INSTALL_TAG_MAX 32
+/* Version string field width. GIT_TAG is stored verbatim — prefix included — so
+ * this field byte-compares against the release manifest's gitTag with no
+ * normalisation on either side. The full display string is 34 characters today
+ * ("Retro-Go SD v1.4.1-117-gcae346199+"); 48 leaves room for a longer describe
+ * suffix without silently truncating the identity of the running build. */
+#define RG_INSTALL_TAG_MAX 48
 
 #pragma pack(push, 1)
 typedef struct {

@@ -104,11 +104,19 @@ typedef struct {
     uint32_t abi_size;
     uint16_t core_meta_version;
     uint16_t reserved2;
-    char     git_tag[32];
+    char     git_tag[48];
     uint32_t installed_at;      /* unix */
     uint32_t crc32;
 } rg_install_file_t;
 ```
+
+`git_tag` holds `GIT_TAG` verbatim, display prefix included
+(`"Retro-Go SD v2.0.0"`), and the manifest's `firmware.gitTag` is read out of the
+same baked string, so the two byte-compare with no normalisation on either side.
+It is provenance and version comparison only — nothing gates on it. The core
+git-tag check that once existed is gone (`CORE_HEADER_MAGIC_INTERNAL` is defined
+and unused in `rg_emulators.c`); compatibility rests entirely on `providesAbi`
+versus a core's `required_abi_version` / `required_abi_min_size`.
 
 The firmware compares this against its own build at boot. On mismatch, missing
 file, or bad CRC it rewrites the file **and deletes

@@ -20,11 +20,6 @@
  * can see; it cannot see a firmware change that leaves the base where it was. */
 #define RG_INSTALL_FLASH_CACHE ODROID_BASE_PATH_SAVES "/flashcachedata.bin"
 
-/* GIT_TAG is a display string, "Retro-Go SD v1.2.3". Everything that identifies
- * a release is the part after that, and it is what the release manifest calls
- * gitTag, so store that and leave the prefix to the UI. */
-#define GIT_TAG_DISPLAY_PREFIX "Retro-Go SD "
-
 static void install_fill(rg_install_file_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -38,10 +33,9 @@ static void install_fill(rg_install_file_t *out)
     out->abi_size          = g_firmware_abi.size;
     out->core_meta_version = GNW_CORE_META_VERSION;
 
-    const char *tag = GIT_TAG;
-    if (strncmp(tag, GIT_TAG_DISPLAY_PREFIX, strlen(GIT_TAG_DISPLAY_PREFIX)) == 0)
-        tag += strlen(GIT_TAG_DISPLAY_PREFIX);
-    strncpy(out->git_tag, tag, sizeof(out->git_tag) - 1);
+    /* Verbatim, prefix and all — this is the string a tool compares against the
+     * manifest to decide whether the installed firmware is the one it expects. */
+    strncpy(out->git_tag, GIT_TAG, sizeof(out->git_tag) - 1);
     out->git_tag[sizeof(out->git_tag) - 1] = '\0';
 }
 
