@@ -263,7 +263,6 @@ extern int     __popcountsi2(unsigned);
  * no references to the symbol. Plugins reach it via the fixed address
  * macro, not by symbol name.
  */
-__attribute__((section(".firmware_abi"), used))
 /* sd_io_set_poll() lives in gw_sdcard.c, which is only compiled for SD_CARD=1
  * (it needs FatFs). The ABI table's layout must be identical in both storage
  * variants — a core checks required_abi_min_size against
@@ -275,6 +274,7 @@ __attribute__((section(".firmware_abi"), used))
 static void gw_abi_sd_io_set_poll(void (*fn)(void)) { (void)fn; }
 #endif
 
+__attribute__((section(".firmware_abi"), used))
 const gw_firmware_abi_t g_firmware_abi = {
     .version = GW_FIRMWARE_ABI_VERSION,
     .size    = sizeof(gw_firmware_abi_t),

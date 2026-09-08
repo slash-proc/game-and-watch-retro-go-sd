@@ -78,8 +78,10 @@ CONTENT_DIRS = ("fonts", "lang", "bios")
 # GIT_TAG is baked as the string literal "Retro-Go SD <describe>" (see
 # scripts/update_gittag.sh). This is the same pattern the web builder scans a
 # device's flash for, so reading it here means the manifest and a device scan
-# agree by construction.
-GITTAG_RE = re.compile(rb"Retro-Go SD ((?:v[0-9][\w.+\-]*|NOTAG))\x00")
+# agree by construction. The whole string is captured, prefix included: the
+# firmware stores it verbatim in /data/INSTALL (rg_install.c), so a tool can
+# byte-compare the two with no normalisation on either side.
+GITTAG_RE = re.compile(rb"(Retro-Go SD (?:v[0-9][\w.+\-]*|NOTAG))\x00")
 
 # Feature flags that change what a user gets, mapped to the capability names an
 # installer shows. Derived from the build flags rather than hand-written, so the
@@ -339,9 +341,17 @@ def pack_build(build, tag, out_dir):
             "an SD build must ship the image the on-device updater looks for"
         )
 
+    # create_sd_data copies the intflash image to update_bank<n>.bin, so the two
+    # are usually the same bytes. Store them once and let sdUpdate point at the
+    # image's entry — a ~239 KB image is over a third of the SD bundle, and a zip
+    # holding it twice buys nothing. If they ever diverge, both are stored.
+    image_sha = sha256_file(build["image"])
+    sd_update_sha = sha256_file(sd_update_path) if sd_update_path else None
+    sd_update_shared = storage == "sd" and sd_update_sha == image_sha
+
     with zipfile.ZipFile(bundle_path, "w") as zf:
         add_file(zf, build["image"], image_arc)
-        if storage == "sd":
+        if storage == "sd" and not sd_update_shared:
             add_file(zf, sd_update_path, sd_update_name)
         for full, arc, _install, _lang in content:
             add_file(zf, full, arc)
@@ -370,7 +380,7 @@ def pack_build(build, tag, out_dir):
         },
         "image": {
             "bytes": os.path.getsize(build["image"]),
-            "sha256": sha256_file(build["image"]),
+            "sha256": image_sha,
             "path": image_arc,
         },
     }
@@ -378,8 +388,9 @@ def pack_build(build, tag, out_dir):
     if storage == "sd":
         entry["sdUpdate"] = {
             "bytes": os.path.getsize(sd_update_path),
-            "sha256": sha256_file(sd_update_path),
-            "path": sd_update_name,
+            "sha256": sd_update_sha,
+            # Points at the image's entry when the two are the same bytes.
+            "path": image_arc if sd_update_shared else sd_update_name,
             # The only place a filename is load-bearing: the on-device updater
             # matches these exact names (firmware_update.c:20,24).
             "filename": sd_update_name,
