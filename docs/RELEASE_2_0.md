@@ -3,6 +3,10 @@
 Design notes for the 2.0 release format consumed by browser installers
 (gnw-web-builder). Companion to [CURATED_PROJECTS.md](CURATED_PROJECTS.md).
 
+**Implementing an installer? Read [FIRMWARE_DIST.md](FIRMWARE_DIST.md)** — the
+contract: field references, the install algorithm, and the binary layouts. This
+file is the argument behind it, and records what was deliberately left out.
+
 Cores and homebrew are decoupled: they are separate projects publishing under
 the [GWRG distribution spec](https://github.com/slash-proc/gwrg-dist-spec) and
 bound to this firmware only by the firmware ABI. **No cores ship with the
