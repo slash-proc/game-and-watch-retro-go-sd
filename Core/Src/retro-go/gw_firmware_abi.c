@@ -264,6 +264,17 @@ extern int     __popcountsi2(unsigned);
  * macro, not by symbol name.
  */
 __attribute__((section(".firmware_abi"), used))
+/* sd_io_set_poll() lives in gw_sdcard.c, which is only compiled for SD_CARD=1
+ * (it needs FatFs). The ABI table's layout must be identical in both storage
+ * variants — a core checks required_abi_min_size against
+ * sizeof(gw_firmware_abi_t) — so the slot cannot be #if'd out. Flash builds get
+ * a no-op instead: there is no SD controller to poll. */
+#if SD_CARD == 1
+#define gw_abi_sd_io_set_poll sd_io_set_poll
+#else
+static void gw_abi_sd_io_set_poll(void (*fn)(void)) { (void)fn; }
+#endif
+
 const gw_firmware_abi_t g_firmware_abi = {
     .version = GW_FIRMWARE_ABI_VERSION,
     .size    = sizeof(gw_firmware_abi_t),
@@ -539,7 +550,7 @@ const gw_firmware_abi_t g_firmware_abi = {
     .curr_colors_ptr             = (void **)&curr_colors,
 
     /* v2 append: HW-SPI SD DMA wait poll (video PCM feed) */
-    .sd_io_set_poll              = sd_io_set_poll,
+    .sd_io_set_poll              = gw_abi_sd_io_set_poll,
 
     /* v2 append: file-manager homebrew */
     .rg_storage_scandir          = rg_storage_scandir,
