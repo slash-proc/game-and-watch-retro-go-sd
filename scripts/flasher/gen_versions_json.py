@@ -50,9 +50,35 @@ def main():
         if not os.path.isfile(manifest_path):
             skipped.append(tag)
             continue
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
-        fw = manifest["firmware"]
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except json.JSONDecodeError as exc:
+            print(f"{tag}: manifest.json is not valid JSON ({exc}); skipping",
+                  file=sys.stderr)
+            skipped.append(tag)
+            continue
+
+        # Releases predating this format published a manifest.json of their own
+        # (the old pack_bundle.py shape: id/ref/sha/blobs). It is a real file with
+        # a real name and the mirror downloads it happily, so recognising 2.0 by
+        # its shape is the only thing separating the two. A tag we cannot read is
+        # dropped from the index rather than failing the whole deploy — one stale
+        # release must not be able to take the mirror down with it.
+        fw = manifest.get("firmware")
+        if manifest.get("schemaVersion") != SCHEMA_VERSION or not isinstance(fw, dict):
+            print(f"{tag}: manifest.json is not a schemaVersion {SCHEMA_VERSION} "
+                  f"firmware manifest; not indexing", file=sys.stderr)
+            skipped.append(tag)
+            continue
+
+        missing = [k for k in ("gitTag", "providesAbi", "coreMetaVersion")
+                   if k not in fw]
+        if missing:
+            print(f"{tag}: manifest.json firmware{{}} lacks {', '.join(missing)}; "
+                  "not indexing", file=sys.stderr)
+            skipped.append(tag)
+            continue
         versions.append(
             {
                 "tag": tag,
