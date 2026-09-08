@@ -312,8 +312,21 @@ jobs:
               rm -rf "$dest"
               continue
             fi
-            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
-              --dir "$dest" --pattern '*.zip' --clobber
+            # A manifest.json is not enough. The old web-artifacts POC published
+            # one too, with a completely different shape (id/ref/sha/blobs), and it
+            # downloads exactly like ours. Check the shape before mirroring, or the
+            # deploy carries a directory no installer can read.
+            if ! python3 -c "import json,sys; m=json.load(open(sys.argv[1])); sys.exit(0 if m.get('schemaVersion')==1 and isinstance(m.get('firmware'),dict) else 1)" "$dest/manifest.json"; then
+              echo "$tag: manifest.json predates the 2.0 format; not mirroring"
+              rm -rf "$dest"
+              continue
+            fi
+            if ! gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                 --dir "$dest" --pattern '*.zip' --clobber; then
+              echo "$tag: manifest.json present but no zips; not mirroring"
+              rm -rf "$dest"
+              continue
+            fi
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
               --dir "$dest" --pattern 'projects.json' --clobber || true
           done < _tags.txt
