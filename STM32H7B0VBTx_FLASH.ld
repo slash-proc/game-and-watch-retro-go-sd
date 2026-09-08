@@ -70,9 +70,22 @@ _Min_Stack_Size = 20 * 1024 - _Stack_Redzone_Size;
 __NULLPTR_LENGTH__  = 0x0;
 __ITCMRAM_LENGTH__  = 64K;
 __DTCMRAM_LENGTH__  = 128K;
-__RAM_UC_LENGTH__   = 300K;
+/* __RAM_UC_LENGTH__ / __RAM_EMU_LENGTH__ / __RAM_START__ / __RAM_EMU_START__ /
+ * __RAM_EMU_END__ come from ld/gnw_ram_emu.ld, shared with every standalone
+ * core's linker script so the VMA a core is built for can never drift from
+ * where the firmware actually loads it (see run_dynamic_core()). The values
+ * are identical to the ones this file used to hand-roll; taking them from the
+ * shared file is what stops flash and SD firmware loading the same
+ * /cores/*.bin at different addresses. */
+INCLUDE ld/gnw_ram_emu.ld
+/* __ITCM_CORE_START__/__ITCM_CORE_LENGTH__ come from ld/gnw_itcm_core.ld
+ * (shared with cores that place hot code in ITCM). */
+INCLUDE ld/gnw_itcm_core.ld
+/* __RAM_UC_CORE_* (LUT8 LCD-bonus window) from ld/gnw_ram_uc_core.ld. */
+INCLUDE ld/gnw_ram_uc_core.ld
+/* Legacy zero-length region: the MEMORY block's RAM entry and the ._ram
+ * NOLOAD section that targets it still reference these. */
 __RAM_CORE_LENGTH__ = 0K;
-__RAM_EMU_LENGTH__  = 1024K - __RAM_UC_LENGTH__ - __RAM_CORE_LENGTH__;
 __RAM_FCEUMM_MAPPER_LENGTH__ = 48K; /* Current FCEUMM mapper code */
 __AHBRAM_LENGTH__   = 128K;
 __AHBRAM_PERSISTENT_RESERVE__ = 8K; /* MPU non-cacheable: boot_magic/logbuf + remote-input */
@@ -84,16 +97,11 @@ __EXTFLASH_OFFSET__ = DEFINED(__EXTFLASH_OFFSET__) ? __EXTFLASH_OFFSET__ : 0;
 __EXTFLASH_BASE__ = 0x90000000;  /* Beginning of addressable extflash addresses */
 __EXTFLASH_START__ = __EXTFLASH_BASE__ + __EXTFLASH_OFFSET__;  /* Beginning of where we're going to store emulator and rom data */
 
-__RAM_START__       = 0x24000000;
 __RAM_UC_START__    = __RAM_START__;
-__RAM_CORE_START__  = __RAM_START__ + __RAM_UC_LENGTH__;
-__RAM_EMU_START__   = __RAM_CORE_START__ + __RAM_CORE_LENGTH__;
+__RAM_CORE_START__  = __RAM_EMU_START__;
 __RAM_FCEUMM_START__ = __RAM_EMU_START__ + __RAM_FCEUMM_MAPPER_LENGTH__;
 
-__RAM_EMU_END__     = __RAM_EMU_START__ + __RAM_EMU_LENGTH__;
 __RAM_END__         = __RAM_START__ + 1024K;
-
-INCLUDE ld/gnw_ram_uc_core.ld
 
 /****
  * External Flash Layout
@@ -171,6 +179,13 @@ SECTIONS
     __itcram_hot_end__ = .;
     __itcram_end__ = .;
   } >ITCMRAM
+
+  /* Same guard as STM32H7B0VBTx_SDCARD.ld: a core's fixed ITCM segment starts
+   * at __ITCM_CORE_START__ (0), which is only safe while the firmware itself
+   * places nothing in ITCM. Fail the build loudly rather than silently
+   * corrupting a loaded core's ITCM segment. */
+  ASSERT(__ITCM_CORE_START__ == __itcram_hot_start__,
+         "Error: ld/gnw_itcm_core.ld's __ITCM_CORE_START__ no longer matches __itcram_hot_start__ — a core's fixed ITCM segment would overlap firmware-resident ITCM data")
 
   /* LCD framebuffer pool (300 KiB). RGB565 fills it with two 150 KiB
    * framebuffers. LUT8 shrinks that footprint to 150 KiB; the upper
@@ -267,312 +282,17 @@ SECTIONS
     KEEP(*(.sdcard_logo))
   } > CORES
 
-
-
-  .overlay_tgb __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_tgb_start__ = .;
-    __init_array_tgb_start__ = .;
-    KEEP(build/tgbdual/*.o(.init_array*))
-    __init_array_tgb_end__ = .;
-    build/tgbdual/*.o (.data .data* .text .text* .text.* .rodata .rodata* .ARM.extab.text.* .ARM.exidx.text.* )
-    . = ALIGN(4);
-    _OVERLAY_TGB_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_TGB_LOAD_START = LOADADDR(.overlay_tgb);
-  _OVERLAY_TGB_SIZE = SIZEOF(.overlay_tgb);
-
-  .overlay_tgb_bss _OVERLAY_TGB_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_TGB_BSS_START = .;
-    build/tgbdual/*.o (COMMON)
-    . = ALIGN(4);
-    build/tgbdual/*.o (.bss .bss*)
-    _OVERLAY_TGB_BSS_END = .;
-    __ram_emu_tgb_end__ = .;
-    ASSERT(ABSOLUTE(_OVERLAY_TGB_BSS_END) < __RAM_EMU_END__, "Error: TGB BSS overflow");
-  }
-  _OVERLAY_TGB_BSS_SIZE = SIZEOF(.overlay_tgb_bss);
-
-
-
-  .overlay_msx __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_msx_start__ = .;
-    build/msx/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_MSX_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_MSX_LOAD_START = LOADADDR(.overlay_msx);
-  _OVERLAY_MSX_SIZE = SIZEOF(.overlay_msx);
-  .overlay_msx_bss _OVERLAY_MSX_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_MSX_BSS_START = .;
-    build/msx/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/msx/*.o (COMMON)
-    _MSX_ROM_UNPACK_BUFFER = .;
-    __ram_emu_msx_end__ = .;
-    _OVERLAY_MSX_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_MSX_BSS_END) < __RAM_EMU_END__, "Error: MSX BSS overflow");
-  }
-  _OVERLAY_MSX_BSS_SIZE = SIZEOF(.overlay_msx_bss);
-  _MSX_ROM_UNPACK_BUFFER_SIZE = __RAM_EMU_START__ + __RAM_EMU_LENGTH__ - _MSX_ROM_UNPACK_BUFFER;
-
-  .overlay_wsv __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_wsv_start__ = .;
-    build/wsv/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_WSV_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_WSV_LOAD_START = LOADADDR(.overlay_wsv);
-  _OVERLAY_WSV_SIZE = SIZEOF(.overlay_wsv);
-  .overlay_wsv_bss _OVERLAY_WSV_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_WSV_BSS_START = .;
-    build/wsv/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/wsv/*.o (COMMON)
-    __ram_emu_wsv_end__ = .;
-    _OVERLAY_WSV_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_WSV_BSS_END) < __RAM_EMU_END__, "Error: WSV BSS overflow");
-  }
-  _OVERLAY_WSV_BSS_SIZE = SIZEOF(.overlay_wsv_bss);
-
-  .overlay_gw __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_gw_start__ = .;
-    build/gw/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_GW_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_GW_LOAD_START = LOADADDR(.overlay_gw);
-  _OVERLAY_GW_SIZE = SIZEOF(.overlay_gw);
-
-  .overlay_gw_bss _OVERLAY_GW_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_GW_BSS_START = .;
-    build/gw/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/gw/*.o (COMMON)
-    __ram_emu_gw_end__ = .;
-    _OVERLAY_GW_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_GW_BSS_END) < __RAM_EMU_END__, "Error: GW BSS overflow");
-  }
-  _OVERLAY_GW_BSS_SIZE = SIZEOF(.overlay_gw_bss);
-
-.overlay_a2600 __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_a2600_start__ = .;
-    __init_array_a2600_start__ = .;
-    KEEP(build/a2600/*.o(.init_array*))
-    __init_array_a2600_end__ = .;
-    build/a2600/*.o (.data .data* .text .text* .rodata .rodata* .ARM.extab.text.* .ARM.exidx.text.*)
-    . = ALIGN(4);
-    _OVERLAY_A2600_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_A2600_LOAD_START = LOADADDR(.overlay_a2600);
-  _OVERLAY_A2600_SIZE = SIZEOF(.overlay_a2600);
-
-  .overlay_a2600_bss _OVERLAY_A2600_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_A2600_BSS_START = .;
-    build/a2600/*.o (COMMON)
-    . = ALIGN(4);
-    build/a2600/*.o (.bss .bss*)
-    _OVERLAY_A2600_BSS_END = .;
-    __ram_emu_a2600_end__ = .;
-    ASSERT(ABSOLUTE(_OVERLAY_A2600_BSS_END) < __RAM_EMU_END__, "Error: A2600 BSS overflow");
-  }
-  _OVERLAY_A2600_BSS_SIZE = SIZEOF(.overlay_a2600_bss);
-
-  .overlay_a7800 __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_a7800_start__ = .;
-    build/a7800/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_A7800_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_A7800_LOAD_START = LOADADDR(.overlay_a7800);
-  _OVERLAY_A7800_SIZE = SIZEOF(.overlay_a7800);
-
-  .overlay_a7800_bss _OVERLAY_A7800_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_A7800_BSS_START = .;
-    build/a7800/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/a7800/*.o (COMMON)
-    __ram_emu_a7800_end__ = .;
-    _OVERLAY_A7800_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_A7800_BSS_END) < __RAM_EMU_END__, "Error: A7800 BSS overflow");
-  }
-  _OVERLAY_A7800_BSS_SIZE = SIZEOF(.overlay_a7800_bss);
-
-  .overlay_amstrad __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_amstrad_start__ = .;
-    build/amstrad/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_AMSTRAD_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_AMSTRAD_LOAD_START = LOADADDR(.overlay_amstrad);
-  _OVERLAY_AMSTRAD_SIZE = SIZEOF(.overlay_amstrad);
-
-  .overlay_amstrad_bss _OVERLAY_AMSTRAD_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_AMSTRAD_BSS_START = .;
-    build/amstrad/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/amstrad/*.o (COMMON)
-    __ram_emu_amstrad_end__ = .;
-    _OVERLAY_AMSTRAD_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_AMSTRAD_BSS_END) < __RAM_EMU_END__, "Error: AMSTRAD BSS overflow");
-  }
-  _OVERLAY_AMSTRAD_BSS_SIZE = SIZEOF(.overlay_amstrad_bss);
-
-  .overlay_zelda3 __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_zelda3_start__ = .;
-    _ZELDA3_MAIN_CODE_START = .;
-    build/zelda3/main_zelda3.o (.data .data* .text .text* .rodata .rodata*)
-    _ZELDA3_MAIN_CODE_END = .;
-    build/zelda3/*.o (.data .data* .text .text* .noreloc)
-    . = ALIGN(4);
-    _OVERLAY_ZELDA3_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_ZELDA3_LOAD_START = LOADADDR(.overlay_zelda3);
-  _OVERLAY_ZELDA3_SIZE = SIZEOF(.overlay_zelda3);
-
-  .overlay_zelda3_bss _OVERLAY_ZELDA3_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_ZELDA3_BSS_START = .;
-    build/zelda3/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/zelda3/*.o (COMMON)
-    __ram_emu_zelda3_end__ = .;
-    _OVERLAY_ZELDA3_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_ZELDA3_BSS_END) < __RAM_EMU_END__, "Error: ZELDA3 BSS overflow");
-  }
-  _OVERLAY_ZELDA3_BSS_SIZE = SIZEOF(.overlay_zelda3_bss);
-
-  .rodata_zelda3 :
-  {
-    . = ALIGN(4);
-    __rodata_zelda3_start__ = .;
-    build/zelda3/*.o (.rodata .rodata*)
-    __rodata_zelda3_end__ = .;
-  } > RODATA
-
-  .overlay_smw __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_smw_start__ = .;
-    build/smw/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_SMW_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_SMW_LOAD_START = LOADADDR(.overlay_smw);
-  _OVERLAY_SMW_SIZE = SIZEOF(.overlay_smw);
-
-  .overlay_smw_bss _OVERLAY_SMW_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_SMW_BSS_START = .;
-    build/smw/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/smw/*.o (COMMON)
-    __ram_emu_smw_end__ = .;
-    _OVERLAY_SMW_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_SMW_BSS_END) < __RAM_EMU_END__, "Error: SMW BSS overflow");
-  }
-  _OVERLAY_SMW_BSS_SIZE = SIZEOF(.overlay_smw_bss);
-
-  .overlay_videopac __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_videopac_start__ = .;
-    build/videopac/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_VIDEOPAC_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_VIDEOPAC_LOAD_START = LOADADDR(.overlay_videopac);
-  _OVERLAY_VIDEOPAC_SIZE = SIZEOF(.overlay_videopac);
-
-  .overlay_videopac_bss _OVERLAY_VIDEOPAC_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_VIDEOPAC_BSS_START = .;
-    build/videopac/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/videopac/*.o (COMMON)
-    __ram_emu_videopac_end__ = .;
-    _OVERLAY_VIDEOPAC_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_VIDEOPAC_BSS_END) < __RAM_EMU_END__, "Error: VIDEOPAC BSS overflow");
-  }
-  _OVERLAY_VIDEOPAC_BSS_SIZE = SIZEOF(.overlay_videopac_bss);
-
-  .overlay_celeste __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_celeste_start__ = .;
-    build/celeste/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_CELESTE_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_CELESTE_LOAD_START = LOADADDR(.overlay_celeste);
-  _OVERLAY_CELESTE_SIZE = SIZEOF(.overlay_celeste);
-
-  .overlay_celeste_bss _OVERLAY_CELESTE_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_CELESTE_BSS_START = .;
-    build/celeste/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/celeste/*.o (COMMON)
-    __ram_emu_celeste_end__ = .;
-    _OVERLAY_CELESTE_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_CELESTE_BSS_END) < __RAM_EMU_END__, "Error: CELESTE BSS overflow");
-  }
-  _OVERLAY_CELESTE_BSS_SIZE = SIZEOF(.overlay_celeste_bss);
-
-  .overlay_tama __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_tama_start__ = .;
-    build/tama/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_TAMA_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_TAMA_LOAD_START = LOADADDR(.overlay_tama);
-  _OVERLAY_TAMA_SIZE = SIZEOF(.overlay_tama);
-
-  .overlay_tama_bss _OVERLAY_TAMA_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_TAMA_BSS_START = .;
-    build/tama/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/tama/*.o (COMMON)
-    __ram_emu_tama_end__ = .;
-    _OVERLAY_TAMA_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_TAMA_BSS_END) < __RAM_EMU_END__, "Error: TAMA BSS overflow");
-  }
-  _OVERLAY_TAMA_BSS_SIZE = SIZEOF(.overlay_tama_bss);
-
-  .overlay_pkmini __RAM_EMU_START__ : {
-    . = ALIGN(4);
-    __ram_emu_pkmini_start__ = .;
-    build/pkmini/*.o (.data .data* .text .text* .rodata .rodata*)
-    . = ALIGN(4);
-    _OVERLAY_PKMINI_LOAD_END = .;
-  } AT > CORES
-  _OVERLAY_PKMINI_LOAD_START = LOADADDR(.overlay_pkmini);
-  _OVERLAY_PKMINI_SIZE = SIZEOF(.overlay_pkmini);
-
-  .overlay_pkmini_bss _OVERLAY_PKMINI_LOAD_END : {
-    . = ALIGN(4);
-    _OVERLAY_PKMINI_BSS_START = .;
-    build/pkmini/*.o (.bss .bss*)
-    . = ALIGN(4);
-    build/pkmini/*.o (COMMON)
-    __ram_emu_pkmini_end__ = .;
-    _OVERLAY_PKMINI_BSS_END = .;
-    ASSERT(ABSOLUTE(_OVERLAY_PKMINI_BSS_END) < __RAM_EMU_END__, "Error: PKMINI BSS overflow");
-  }
-  _OVERLAY_PKMINI_BSS_SIZE = SIZEOF(.overlay_pkmini_bss);
+  /* Every classic emulator's .overlay_<system>/.overlay_<system>_bss RAM
+   * overlay (tgb, msx, wsv, gw, a2600, a7800, amstrad, videopac, celeste,
+   * tama, pkmini, zelda3/rodata_zelda3, smw) has been removed while
+   * migrating those systems to standalone cores/<system>/ builds loaded
+   * from /cores/*.bin at runtime. They all shared the same
+   * __RAM_EMU_START__ VMA (only one core is ever resident at a time), so
+   * removing them is safe; re-adding one is a copy of an old git revision
+   * of this file, not a from-scratch design. The LUT8 core window
+   * (__RAM_UC_CORE_START__, ld/gnw_ram_uc_core.ld) and the graphics/font
+   * sections are untouched. Mirrors the same removal already done in
+   * STM32H7B0VBTx_SDCARD.ld. */
 
   ._ram (NOLOAD) :
   {
