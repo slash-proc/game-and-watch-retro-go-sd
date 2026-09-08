@@ -1171,7 +1171,12 @@ ifneq ($(SINGLE_FONT),1)
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_unbalanced $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_unbalanced.bin
 endif
 
-	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank2.bin
+# Name the SD update image after the bank it was actually linked for. The
+# on-device updater flashes /update_bank1.bin into bank 1 and /update_bank2.bin
+# into bank 2 independently (external/firmware_update/Core/Src/firmware_update.c:330-349),
+# so writing a bank-1 image under the bank-2 name hands the updater a blob linked
+# for the wrong address.
+	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank$(INTFLASH_BANK).bin
 	@$(MAKE) --no-print-directory $(UNICODE_FONT_BINS)
 	@$(MAKE) --no-print-directory $(LANG_BINS)
 	@touch $@
