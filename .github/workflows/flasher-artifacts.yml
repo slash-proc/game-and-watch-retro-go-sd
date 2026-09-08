@@ -129,7 +129,7 @@ jobs:
           # each keeping its OWN content, which makes the mix-up structurally impossible.
           # Do not "optimise" this back into shared content without re-checking the
           # cores for foreign-bank pointers first.
-          FLAGS="SD_CARD=${{ matrix.sd_card }} COVERFLOW=1 CHEAT_CODES=1 MAX_CHEAT_CODES=13 SCREENSHOTS=1 SHARED_HIBERNATE_SAVESTATE=1 DISABLE_SPLASH_SCREEN=1 ZH_CN=1 ZH_TW=1 KO_KR=1 JA_JP=1"
+          FLAGS="SD_CARD=${{ matrix.sd_card }} COVERFLOW=1 CHEAT_CODES=1 MAX_CHEAT_CODES=13 ENABLE_SCREENSHOT=1 SHARED_HIBERNATE_SAVESTATE=1 DISABLE_SPLASH_SCREEN=1 ZH_CN=1 ZH_TW=1 KO_KR=1 JA_JP=1"
           # Every job extracts its own sd_content (see above).
           TARGETS="create_sd_data build/gw_retro_go_intflash.bin"
           docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/opt/workdir" \
