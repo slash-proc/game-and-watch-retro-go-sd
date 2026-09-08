@@ -45,15 +45,20 @@ blobs are therefore per-build.
 Eight per release: one install zip and one debug zip per build.
 
 ```
-retro-go-sd-<tag>-{sd,flash}-bank{1,2}.zip         ~370 KB  image + content
-retro-go-sd-<tag>-{sd,flash}-bank{1,2}-debug.zip   ~6 MB    ELF
+retro-go-sd-<tag>-{sd,flash}-bank{1,2}.zip         ~490 KB  image + content
+retro-go-sd-<tag>-{sd,flash}-bank{1,2}-debug.zip   ~1.5 MB  ELF
 ```
 
 Each install zip is self-contained — its intflash image, its `lang/` blobs and a
 copy of `fonts/` and `bios/logo.bin` (84 KB duplicated four times, not worth
-deduplicating). The ELFs are split out because an unstripped ELF is 25.9 MB
-today; four of them across five retained versions would spend half the Pages
-budget on debug symbols nobody downloads.
+deduplicating). The image itself *is* deduplicated: `create_sd_data` copies it to
+`update_bank<n>.bin`, so the two are the same bytes and the zip stores one entry
+that `sdUpdate` points at — a third of the bundle, saved for free.
+
+The ELFs are split out. They are ~1.5 MB now that no core links into the
+firmware, but an unstripped ELF was 25.9 MB before decoupling and nothing stops
+it growing again; debug symbols nobody downloads should not sit in the install
+path or the Pages budget either way.
 
 `manifest.json`, `versions.json` and `projects.json` stay unzipped beside the
 bundles so a version picker reads metadata without fetching an archive.
@@ -80,11 +85,10 @@ never released.
 An earlier draft mirrored the make variables into the manifest. Nearly all of
 it was redundant (`bank` / `intflashBank` / `intflashAddr` are one fact) or
 unactionable (`compress`, `codepage`, `singleFont`, `msxUseBank2`). Only what
-changes installer behaviour is recorded: `storage`, `bank`, `intflashAddr`,
-`littlefsBlockSize`, extflash/filesystem geometry for builds without a
-superblock, `sharedHibernateSavestate` (save compatibility), and the UI
-capability flags. Provenance is the literal make command line as one opaque
-`buildFlags` string that nothing parses.
+changes installer behaviour is recorded: `storage`, `bank`, `littlefsBlockSize`,
+`sharedHibernateSavestate` (save compatibility, carried in `capabilities[]`) and
+the other UI capability flags. Provenance is the literal make command line as one
+opaque `buildFlags` string that nothing parses.
 
 Likewise dropped: `intflashAddr` (derivable from `bank`), `requiresBootloader`
 (implied by `bank: 2`), `label` (rendered from `storage` + `bank`), and
