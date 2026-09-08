@@ -24,27 +24,19 @@ on:
         default: sylverb/retro-go-sd-builder:v1.5
         type: string
   push:
+    # A release comes from a tag. A branch push only builds — it proves the four
+    # variants still compile and pack, and stops there: no release, no Pages
+    # deploy. Publishing from "whichever commit last touched Core/" would mint
+    # releases nobody asked for and race the mirror against itself.
+    tags: ['v*']
     branches: [web-builder-flash]
-    # Broad on purpose: an enumerated list of individual firmware files (an earlier
-    # version of this filter) silently misses any file it doesn't name — that's exactly
-    # how a real regression (Core/Src/gw_flash_alloc.c, not in the old list) shipped
-    # without a rebuild ever firing on the push that fixed it. Any file under Core/,
-    # Drivers/, or external/ can affect the built images, so they're covered wholesale;
-    # add build-config/linker/script files individually.
-    paths:
-      - '.github/workflows/flasher-artifacts.yml'
-      - 'scripts/**'
-      - 'docs/CURATED_PROJECTS.md'
-      - 'Core/**'
-      - 'Drivers/**'
-      - 'external/**'
-      - 'Makefile'
-      - 'Makefile.common'
-      - 'STM32H7B0VBTx_FLASH.ld'
-      - 'STM32H7B0VBTx_SDCARD.ld'
-      - 'startup_stm32h7b0xx.s'
-      - 'choices.yaml'
-      - 'firmware_helper.py'
+    # No paths filter. It would apply to the tag push as well, and a tag pointing
+    # at a commit that is already on the remote arrives as a push event with no
+    # commits — nothing for a path filter to match, so the release would silently
+    # never run. A branch push to web-builder-flash therefore always builds; that
+    # branch does not move often enough for the wasted runs to matter, and a
+    # release that quietly does not happen is far more expensive than a spare
+    # build.
 
 permissions:
   contents: read
@@ -147,6 +139,7 @@ jobs:
 
   publish:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the release and upload assets
@@ -186,11 +179,16 @@ jobs:
         id: pack
         run: |
           set -euo pipefail
-          # --exclude '*-g*': without this, each release is tagged with its own describe
-          # output (also "vX.Y.Z-N-gHASH"), so the next build finds THIS build's tag as
-          # "nearest" and compounds another suffix onto it — ever-growing version strings.
-          # See scripts/update_gittag.sh, which excludes them the same way.
-          TAG="$(git describe --tags --always --match 'v*' --exclude '*-g*')"
+          # The tag that triggered this run IS the release. Deriving one with
+          # git describe instead would mint "vX.Y.Z-N-gHASH" release tags that
+          # nobody created, and each would then be found as the "nearest" tag by
+          # the next build and compounded further.
+          #
+          # This is not the same string as the firmware's baked GIT_TAG, which is
+          # still a describe (see scripts/update_gittag.sh) and is published
+          # separately as manifest.firmware.gitTag. One names the release, the
+          # other identifies the exact build inside it.
+          TAG="${GITHUB_REF_NAME}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           python3 scripts/gen_projects_json.py --output _release/projects.json
@@ -257,6 +255,7 @@ jobs:
   # file that was never published.
   pages:
     needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
