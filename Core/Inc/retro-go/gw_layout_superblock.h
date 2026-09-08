@@ -1,8 +1,14 @@
 /*
- * Layout superblock — a tiny, magic-located struct compiled into any FrogFS
- * firmware (SD_CARD=0; bank-agnostic — present in bank-1 and bank-2 builds) that
- * makes the FrogFS asset location (and optional extflash geometry) patchable in a
- * prebuilt binary, so ONE binary serves any extflash offset/size.
+ * Layout superblock — a tiny, magic-located struct compiled into every firmware
+ * build (both SD_CARD values, both intflash banks) that makes the FrogFS asset
+ * location and the extflash geometry patchable in a prebuilt binary, so ONE
+ * binary serves any extflash offset/size.
+ *
+ * It started as a FrogFS-only (SD_CARD=0) mechanism, which is what the field
+ * names still say. SD_CARD=1 builds now use it too: the extflash ROM cache takes
+ * its size and reserved-bottom from here as well, so a host can relocate the
+ * cache the same way it relocates FrogFS (Core/Src/gw_flash_alloc.c — note the
+ * SD_CARD-scoped accessors there, which is where the two paths still differ).
  *
  * A plain `make` build bakes frogfs_offset from the linker's __EXTFLASH_OFFSET__
  * and leaves crc32 = 0 → the firmware's CRC check fails and it falls back to the
