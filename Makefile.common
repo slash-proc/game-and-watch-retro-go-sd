@@ -872,10 +872,18 @@ FORCE:
 Core/Inc/gittag.h: FORCE | $(BUILD_DIR)
 	$(V)./scripts/update_gittag.sh $@
 
-$(BUILD_DIR)/core/error_screens.o: Core/Inc/gittag.h
-$(BUILD_DIR)/core/main.o: Core/Inc/gittag.h
-$(BUILD_DIR)/core/rg_main.o: Core/Inc/gittag.h
-$(BUILD_DIR)/core/rg_emulators.o: Core/Inc/gittag.h
+# gittag.h is generated, so anything that includes it must wait for it to exist.
+# This list used to be written by hand and silently went stale: rg_install.c and
+# gw_littlefs.c both started including the header without being added, and every
+# local build still passed because Core/Inc/gittag.h was already lying around from
+# an earlier run. Only a clean checkout — CI — actually races, and it failed at
+# rg_install.o while the generator was still queued behind it.
+#
+# Derived by grep instead, so adding the include is enough and there is no second
+# place to remember. update_gittag.sh only rewrites the header when the tag really
+# changes, so this does not drag a rebuild along behind it.
+GITTAG_SOURCES := $(shell grep -l '"gittag.h"' $(C_SOURCES) 2>/dev/null)
+$(addprefix $(BUILD_DIR)/core/,$(notdir $(GITTAG_SOURCES:.c=.o))): Core/Inc/gittag.h
 
 # Run parse_roms.py to generate information about the roms
 $(BUILD_DIR)/rom_files.txt: FORCE | $(BUILD_DIR)
