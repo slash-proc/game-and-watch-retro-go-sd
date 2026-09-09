@@ -49,6 +49,11 @@ ROW_RE = re.compile(r"^\|(.+)\|\s*$")
 # Values arrive as `code` spans in the markdown; strip the backticks.
 CODE_RE = re.compile(r"^`(.+)`$")
 
+# The project cell is a linked slug: [`nes-fceu`](https://github.com/owner/name).
+# The link is the only place the repository is named — there is no separate Repo
+# column — so a row that is not a link is malformed rather than merely unlinked.
+LINK_RE = re.compile(r"^\[`([^`]+)`\]\(https://github\.com/([^)\s]+)\)$")
+
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
@@ -109,9 +114,14 @@ def parse(text):
                 f"line {lineno}: expected at least 3 columns, got {len(cells)}: {line!r}"
             )
 
-        project = _unwrap_code(cells[0], "project", lineno)
+        link = LINK_RE.match(cells[0])
+        if not link:
+            raise Malformed(
+                f"line {lineno}: project cell {cells[0]!r} is not a linked slug "
+                "of the form [`slug`](https://github.com/owner/name)"
+            )
+        project, repo = link.group(1), link.group(2).rstrip("/")
         title = cells[1].strip()
-        repo = _unwrap_code(cells[-1], "repo", lineno)
 
         if not PROJECT_RE.match(project):
             raise Malformed(
