@@ -1607,13 +1607,20 @@ flash_saves_restore:
 ifeq ($(SD_CARD),0)
 GWEMU_PREREQS := $(BUILD_DIR)/$(TARGET)_intflash.bin $(FROGFS_IMAGE) $(LITTLEFS_IMAGE)
 GWEMU_STAMP   := $(BUILD_DIR)/extflash.bin
+# gwemu's extflash device is a fixed 64MB regardless of the part a build targets,
+# so the backing file has to be 64MB or QEMU refuses it outright ("backing store
+# size ... is too small for 'size' option 0x4000000"). Sizing it to EXTFLASH_END
+# instead meant gwemu could not boot any SD_CARD=0 build whose extflash was
+# smaller than 64MB -- i.e. every one of them, the 1MB mario default included.
+# What has to match hardware is where FrogFS and LittleFS sit, not the total; the
+# firmware never reads past its own configured size, so the tail is just unused.
 define GWEMU_MEDIA_PREP
 if [ $$(( $(EXTFLASH_OFFSET) % 4096 )) -ne 0 ] || [ $$(( $(FILESYSTEM_FLASH_OFFSET) % 4096 )) -ne 0 ]; then \
 	echo "ERROR: EXTFLASH_OFFSET ($(EXTFLASH_OFFSET)) and FILESYSTEM_FLASH_OFFSET ($(FILESYSTEM_FLASH_OFFSET)) must be 4096-aligned"; \
 	exit 1; \
 fi; \
-echo "Creating $$(( $(EXTFLASH_END) / 1048576 ))MB external flash image (matching hardware layout)..."; \
-dd if=/dev/zero of=$(BUILD_DIR)/extflash.bin bs=1M count=$$(( $(EXTFLASH_END) / 1048576 )) 2>/dev/null; \
+echo "Creating 64MB external flash image (content at hardware offsets)..."; \
+dd if=/dev/zero of=$(BUILD_DIR)/extflash.bin bs=1M count=64 2>/dev/null; \
 echo "  FrogFS   -> offset $(EXTFLASH_OFFSET)"; \
 dd if=$(FROGFS_IMAGE) of=$(BUILD_DIR)/extflash.bin bs=4096 seek=$$(( $(EXTFLASH_OFFSET) / 4096 )) conv=notrunc 2>/dev/null; \
 echo "  LittleFS -> offset $(FILESYSTEM_FLASH_OFFSET)"; \
