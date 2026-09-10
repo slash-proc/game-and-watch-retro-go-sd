@@ -1360,11 +1360,22 @@ static bool gwhb_segments_ok(const gwhb_meta_t *meta)
     return true;
 }
 
+/* Set when gwhb_probe() could not open the file at all, as opposed to opening it
+ * and finding something that is not a GWHB container. Reporting both as "Not a
+ * GWHB .bin" sent a real bug the wrong way for a while: on SD_CARD=0 the launcher
+ * listed a homebrew that fopen() could not open, because directory listing comes
+ * from FrogFS while _open() routed /homebrews to LittleFS (see syscalls.c). */
+static bool gwhb_probe_open_failed;
+
 static bool gwhb_probe(const char *path, gwhb_meta_t *meta, uint16_t *header_length)
 {
+    gwhb_probe_open_failed = false;
+
     FILE *f = fopen(path, "rb");
-    if (!f)
+    if (!f) {
+        gwhb_probe_open_failed = true;
         return false;
+    }
 
     uint8_t envelope[GWHB_HEADER_MIN_SIZE];
     if (fread(envelope, 1, sizeof(envelope), f) != sizeof(envelope)) {
@@ -1420,8 +1431,10 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
     uint16_t header_length = 0;
 
     if (!gwhb_probe(path, &meta, &header_length)) {
-        printf("GWHB: probe failed for '%s'\n", path);
-        show_homebrew_error_screen("Not a GWHB .bin");
+        printf("GWHB: probe failed for '%s' (%s)\n", path,
+               gwhb_probe_open_failed ? "cannot open" : "not a GWHB container");
+        show_homebrew_error_screen(gwhb_probe_open_failed ? "Cannot open file"
+                                                          : "Not a GWHB .bin");
         return;
     }
 
