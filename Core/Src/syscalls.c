@@ -429,15 +429,24 @@ static bool path_has_prefix_dir(const char *path, const char *dir)
     return strncmp(path, dir, len) == 0 && (path[len] == '\0' || path[len] == '/');
 }
 
-static bool is_cores_pico8_ro_frogfs_path(const char *path)
-{
-    if (!path)
-        return false;
-    if (path[0] == '/')
-        path++;
-    return strcmp(path, "cores/pico8.ro") == 0;
-}
-
+/* Which directories a flash build reads out of the packed FrogFS image rather
+ * than LittleFS. Everything the installer bakes in belongs here.
+ *
+ * Directory listing does NOT consult this: rg_frogfs.c's f_opendir/f_readdir
+ * serve any path from FrogFS. So a directory missing from this list still shows
+ * its contents in the launcher, and only fails when something opens a file --
+ * which is how homebrew presented as "Not a GWHB .bin" (fopen returned NULL and
+ * the probe could not tell that apart from bad magic).
+ *
+ * "homebrews" and "cores" were both missing. Only cores/pico8.ro was routed,
+ * via a strcmp special case -- someone hit exactly this for PICO-8 and patched
+ * the one path instead of the category. The prefix covers it now.
+ *
+ * FrogFS is read-only, so anything listed here can only be installed by the
+ * builder, never at runtime. That already matches the firmware: nothing writes
+ * under these paths, and the file manager's delete entry is #if'd out for
+ * SD_CARD=0 with the comment "Can't delete file on FrogFS". Saves and settings
+ * live under /data, which stays on LittleFS and stays writable. */
 static bool is_frogfs_path(const char *path)
 {
     return path_has_prefix_dir(path, "roms") ||
@@ -445,7 +454,8 @@ static bool is_frogfs_path(const char *path)
            path_has_prefix_dir(path, "bios") ||
            path_has_prefix_dir(path, "fonts") ||
            path_has_prefix_dir(path, "font") ||
-           is_cores_pico8_ro_frogfs_path(path);
+           path_has_prefix_dir(path, "homebrews") ||
+           path_has_prefix_dir(path, "cores");
 }
 
 static const char *normalize_frogfs_path(const char *name, char *buffer, size_t buffer_size)
