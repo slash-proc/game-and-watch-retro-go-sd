@@ -1680,28 +1680,28 @@ static void add_emulator_dynamic(const gnw_core_meta_t *meta, const char *core_p
  * unchanged (e.g. delete one core and add another). */
 static uint32_t cores_set_fingerprint(int *out_systems)
 {
-    DIR dir;
-    FILINFO fno;
     gnw_core_meta_t meta;
     char path[128];
+    char name[CORES_DIR_NAME_MAX];
+    bool is_dir;
     uint32_t fp = 0;
     int total = 0;
     int files = 0;
 
-    if (f_opendir(&dir, "/cores") != FR_OK) {
+    if (!cores_dir_open()) {
         if (out_systems)
             *out_systems = 0;
         return 0;
     }
 
-    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0) {
-        if (fno.fattrib & AM_DIR)
+    while (cores_dir_next(name, sizeof(name), &is_dir)) {
+        if (is_dir)
             continue;
-        const char *ext = get_extension(fno.fname);
+        const char *ext = get_extension(name);
         if (!ext || strcasecmp(ext, "bin") != 0)
             continue;
 
-        snprintf(path, sizeof(path), "/cores/%s", fno.fname);
+        snprintf(path, sizeof(path), "/cores/%s", name);
         if (!gnw_core_probe(path, &meta, NULL))
             continue;
 
@@ -1712,7 +1712,7 @@ static uint32_t cores_set_fingerprint(int *out_systems)
         files++;
     }
 
-    f_closedir(&dir);
+    cores_dir_close();
     fp = crc32_le(fp, (const unsigned char *)&files, sizeof(files));
     if (out_systems)
         *out_systems = total;
@@ -2085,11 +2085,9 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
 #endif
 }
 
-#if SD_CARD == 1
 /* Fingerprint of /cores from the last clean emulators_init(). Wake compares
  * a fresh cores_set_fingerprint(); mismatch → reboot. */
 static uint32_t cores_set_fp_at_boot;
-#endif
 
 void emulators_init()
 {
