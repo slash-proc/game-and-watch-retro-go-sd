@@ -1463,24 +1463,28 @@ ifneq ($(strip $(CORE_BINS)),)
 endif
 .PHONY: stage_dropins
 
-# gen_frogfs_image.py defaults to bios/covers/fonts/roms. The firmware also reads
-# /homebrews and /cores out of FrogFS (is_frogfs_path, Core/Src/syscalls.c), so
-# they have to be named explicitly or a flash build lists content it cannot open.
+# gen_frogfs_image.py defaults to bios/covers/fonts/roms. /homebrews has to be
+# named explicitly too: the firmware reads it from FrogFS (is_frogfs_path in
+# Core/Src/syscalls.c) and without it a flash build lists homebrew it cannot open.
+#
+# /cores is deliberately NOT here. A core's .bin is read into RAM, so it belongs
+# in the writable LittleFS partition; only a mapped sidecar such as pico8.ro
+# needs FrogFS, and FROGFS_PICO8_FLAGS below places that one file.
 FROGFS_INCLUDE_FLAGS := --include bios --include covers --include fonts --include roms \
-	--include homebrews --include cores
+	--include homebrews
 
 # SD_CARD=0: pico8.ro is packed in FrogFS (post-patched for XiP); do not duplicate from GNW ZIP on LittleFS.
 FROGFS_PICO8_FLAGS := $(if $(filter 0,$(SD_CARD)),\
 	--bundle-pico8-ro-in-frogfs --extflash-base 0x90000000 --extflash-offset $(EXTFLASH_OFFSET),)
 LITTLEFS_OMIT_PICO8_RO := $(if $(filter 0,$(SD_CARD)),--omit-pico8-ro-from-gnw-zip,)
 
-# gen_littlefs_image.py defaults to packing only "cores". On SD_CARD=0 the
-# firmware reads /cores from FrogFS instead, which left LittleFS with no input
-# directory at all -- "No LittleFS input directories found", a hard build failure
-# for build/littlefs.bin on this branch. LittleFS carries the content the
-# firmware does NOT route to FrogFS: /lang (see is_frogfs_path, which lists
-# fonts but not lang) plus the writable trees created at runtime.
-LITTLEFS_INCLUDE_FLAGS := $(if $(filter 0,$(SD_CARD)),--include lang,--include cores)
+# LittleFS carries what FrogFS cannot: the RAM-loaded core binaries, and /lang,
+# which is routed to neither image today (is_frogfs_path lists fonts but not
+# lang) and so reached no filesystem at all on a flash build -- every non-English
+# UI silently fell back to the baked-in en_us. Packing it here makes it
+# reachable, since anything not matched by is_frogfs_path falls through to
+# LittleFS.
+LITTLEFS_INCLUDE_FLAGS := $(if $(filter 0,$(SD_CARD)),--include cores --include lang,--include cores)
 
 # SD_CARD=0: optional FrogFS ROM LZMA pack (scripts/rom_frogfs_lzma.py); align with COMPRESS=lzma.
 FROGFS_ROM_LZMA_FLAGS := $(if $(filter 0,$(SD_CARD)),$(if $(filter-out 0,$(COMPRESS)),--rom-compression $(COMPRESS),),)
