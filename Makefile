@@ -29,7 +29,6 @@ Core/Src/bilinear.c \
 Core/Src/cpp_init_array.c \
 Core/Src/gw_buttons.c \
 Core/Src/gw_lcd.c \
-Core/Src/gw_sync_debug.c \
 Core/Src/gw_audio.c \
 Core/Src/gw_malloc.c \
 Core/Src/gw_flash.c \
