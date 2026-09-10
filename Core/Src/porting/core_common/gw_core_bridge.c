@@ -15,7 +15,7 @@
  *   - __aeabi_ldivmod / __aeabi_uldivmod: return a {quot,rem} pair in
  *     r0-r3 per AAPCS, which a plain C function pointer can't express.
  *     ldivmod_quot/ldivmod_rem (and the u* variants) ARE in the ABI for
- *     when this is needed — see docs/PICO8_EXTERNAL_MODULE.md.
+ *     when this is needed.
  * If a core's link fails with "undefined reference to __aeabi_*", that
  * core is the first to need the above.
  *
@@ -919,7 +919,7 @@ int core_sscanf(const char *str, const char *fmt, ...)
 }
 
 /* ====================================================================
- * v2 append: TGB Dual (Game Boy / Game Boy Color, C++) porting surface
+ * v2 append: palette settings (external GB/GBC and others)
  * ==================================================================== */
 int32_t core_odroid_settings_Palette_get(void) { return gw_firmware_abi()->odroid_settings_Palette_get(); }
 void    core_odroid_settings_Palette_set(int32_t value) { gw_firmware_abi()->odroid_settings_Palette_set(value); }
@@ -1081,8 +1081,8 @@ rg_stat_t core_rg_storage_stat(const char *path)
 {
     return gw_firmware_abi()->rg_storage_stat(path);
 }
-/* PokeMini (TARGET_GNW) calls rg_storage_exists for optional BIOS load.
- * Compose from rg_storage_stat — no ABI append. */
+/* External cores (e.g. PokeMini) call rg_storage_exists for optional BIOS
+ * load. Compose from rg_storage_stat — no ABI append. */
 bool core_rg_storage_exists(const char *path)
 {
     return gw_firmware_abi()->rg_storage_stat(path).exists;
@@ -1097,14 +1097,14 @@ const char *core_rg_basename(const char *path)
 }
 
 /* ====================================================================
- * LCD-Game-Emulator (Game & Watch handhelds): RTC write-back, LCD swap
- * poll, hardware JPEG (background images), LZ4/LZMA ROM unpack.
+ * LCD-Game-Emulator (external Game & Watch core): RTC write-back, LCD
+ * swap poll, hardware JPEG (background images), LZ4/LZMA ROM unpack.
  * odroid_system_switch_app was already on the ABI but missing a
- * trampoline — first consumer is main_gw.c on ROM-load failure.
+ * trampoline — first consumer is the GW core on ROM-load failure.
  *
  * JPEG: ABI exposes JPEG_DecodeToFrameInit/ToFrame/GetSize/DeInit
- * directly so external/LCD-Game-Emulator/src/gw_sys/gw_romloader.c is
- * unchanged (redefine-syms still maps those names → core_*).
+ * directly so the external core's gw_romloader.c is unchanged
+ * (redefine-syms still maps those names → core_*).
  * ==================================================================== */
 void core_GW_SetUnixTM(struct tm *tm) { gw_firmware_abi()->GW_SetUnixTM(tm); }
 uint32_t core_JPEG_DecodeToFrameInit(uint32_t JPEG_Buffer, uint32_t JPEG_Buffer_Size)

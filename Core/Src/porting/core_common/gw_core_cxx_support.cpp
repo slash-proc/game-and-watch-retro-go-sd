@@ -2,8 +2,7 @@
  * Shared C++ runtime support for standalone "core" binaries.
  *
  * Pulled in automatically by cores/_template/Makefile whenever a core sets
- * CORE_CXX_SOURCES (see that variable's doc comment) — cores/gb_tgbdual is
- * the first (and, as of this writing, only) consumer.
+ * CORE_CXX_SOURCES (see that variable's doc comment) — e.g. external Stella.
  *
  * A C++ core builds -nostdlib, no libstdc++ (see cores/_template/Makefile's
  * CXXFLAGS comment on -fno-exceptions/-fno-rtti/-fno-threadsafe-statics/
@@ -17,11 +16,9 @@
  *     heap_alloc_mem() below, a small allocator on top of the existing
  *     ram_malloc()/itc_malloc()/ahb_calloc() core_common trampolines.
  *     Behaviorally the same allocator as the (now unused, monolithic-build-
- *     only) Core/Src/heap.cpp: cores/gb_tgbdual/main_gb_tgbdual.cpp and
- *     every .cpp file under external/tgbdual-go/gb_core call these exact names directly
+ *     only) Core/Src/heap.cpp. C++ cores call these names directly
  *     (declared in Core/Inc/heap.hpp) — heap_itc_alloc(true) temporarily
- *     routes allocations through the 64KB ITC pool (used for GB WRAM/VRAM
- *     banking when cart SRAM mapping doesn't need it), falling back to the
+ *     routes allocations through the 64KB ITC pool, falling back to the
  *     shared RAM_EMU bump pool and then AHB SRAM when that's exhausted.
  *   - __cxa_pure_virtual: GCC always emits a reference to this in an
  *     abstract base class's vtable (for the pure-virtual slots), even
@@ -204,7 +201,7 @@ extern "C" int __cxa_atexit(void (*)(void *), void *, void *)
 }
 
 /* ====================================================================
- * Exception / unwind stubs for cores that link -lstdc++ (Stella).
+ * Exception / unwind stubs for cores that link -lstdc++ (e.g. Stella).
  *
  * Toolchain libstdc++.a is built WITH exceptions; even with our own
  * -fno-exceptions, string/length_error paths still reference the EH

@@ -3,15 +3,13 @@
 Guidance for porting a classic emulator ("core") to the dynamic, out-of-tree
 model instead of linking it into the main firmware ELF. Loaded by Cursor via
 `.cursor/rules/core_common.mdc` when editing files under `porting/core_common/`
-or `cores/`. See also `docs/PICO8_EXTERNAL_MODULE.md` — this SDK generalizes
-the exact trampoline/redefine-syms/entry-point pattern PICO-8 already used,
-so read that doc first if something here is under-explained.
+or `cores/`.
 
 ## Model
 
-Every classic core (Watara Supervision, and any future migration — gb/gbc,
-nes, sms/gg/sg/col, msx, pce, a2600, a7800, amstrad, tama, pkmini,
-gw, videopac, ...) used to be linked straight into `gw_retro_go.elf` via a
+Every classic core (gb/gbc, nes, sms/gg/sg/col, msx, pce, amstrad,
+Watara Supervision, ...) used to be linked straight into
+`gw_retro_go.elf` via a
 `.overlay_<system>` section with a compile-time dispatch table
 (`emu_dispatch_t` / `run_internal_emu`, removed — see
 `Core/Src/retro-go/rg_emulators.c` header comment above `emulator_start()`).
@@ -60,7 +58,8 @@ RAM_UC after the loaded code+bss is `lcd_get_bonus_pool()`.
 
 1. `cp -r cores/_template cores/<name>` is **not** how it works — the
    template is included, not copied. Instead create `cores/<name>/Makefile`
-   modeled on `cores/wsv/Makefile`: set `CORE_NAME`, `CORE_ENTRY` (must be a
+   modeled on `cores/_template/Makefile`'s documented variables: set
+   `CORE_NAME`, `CORE_ENTRY` (must be a
    real function symbol in your sources, the trampoline in
    `gw_core_entry.S` branches to it), `CORE_C_SOURCES` (repo-root-relative;
    every basename must be unique — objects land in one flat `build/` dir),
@@ -73,7 +72,7 @@ RAM_UC after the loaded code+bss is `lcd_get_bonus_pool()`.
    - For per-core option labels/values, use `gw_i18n()` tables
      (`gw_core_i18n.h`) + ABI `i18n_lang_code()` — do **not** reach into
      firmware `curr_lang` / `lang_t`. Keep tables in a dedicated
-     `<system>_i18n.c` (see MSX: `msx_i18n.c`). English row required;
+     `<system>_i18n.c`. English row required;
      other languages optional.
    - Replace any `odroid_settings_<Something>_set/get` wrapper with the
      generic `odroid_settings_app_int32_get/set("Name", ...)` already in the
@@ -95,11 +94,12 @@ RAM_UC after the loaded code+bss is `lcd_get_bonus_pool()`.
    commit history of this SDK (parse `CORE` + `gnw_core_meta_t`, assert
    `payload_offset == header_length + 8` and `file_size - payload_offset ==
    code_size`) if you change the packer or the struct layout.
-5. Wire into the top-level build (`Makefile.common`): add a
-   `cores_<name>` phony target + `$(CORES_DIR)/<name>.bin` rule (copy from
-   `cores/<name>.bin`) mirroring the `wsv` entries, list it as a
-   `$(SD_CONTENT_STAMP)` prerequisite, add one `sdpush` line in `flash_sd`,
-   and a `$(MAKE) -C cores/<name> clean` line in the top-level `clean`.
+5. Wire into the top-level build (`Makefile.common`) only if this firmware
+   tree still builds the core in-tree: add a `cores_<name>` phony target +
+   `$(CORES_DIR)/<name>.bin` rule, list it as a `$(SD_CONTENT_STAMP)`
+   prerequisite, add one `sdpush` line in `flash_sd`, and a
+   `$(MAKE) -C cores/<name> clean` line in the top-level `clean`. External
+   core repos skip this — drop `cores/<name>.bin` on the SD card instead.
 
 Footer logos: put dark-on-light PNG/BMP under `cores/<name>/assets/` and
 pass `--pad-logo` / `--header-logo` (or `pad_logo=` / `header_logo=` inside
@@ -128,14 +128,13 @@ plus up to 16 arbitrary `app_int32` user keys ≤11 chars), crc32. Cores keep
 using `odroid_settings_*` / `app_int32_*` — the bind in `emulator_start()`
 routes them into the active `.cfg`.
 
-Homebrew payloads and Zelda3/SMW assets live under **`/homebrews/`** (not
-`/roms/homebrew/`). Covers remain `/covers/homebrew/<stem>.img`. Project
-build trees still use `roms/homebrew/` for restool US ROM inputs.
+Homebrew payloads (GWHB `.bin` plus any sibling assets they load) live under
+**`/homebrews/`**. Covers remain `/covers/homebrew/<stem>.img`. Project trees
+may stage the same files under `roms/homebrew/` for FrogFS packing.
 
 ## Extending the ABI (Phase 1-equivalent)
 
-Follow the checklist already documented in `docs/PICO8_EXTERNAL_MODULE.md`
-("Maintenance Checklist"): append-only, never reorder/resize/remove a field.
+Append-only: never reorder/resize/remove a field once an ABI is released.
 
 1. `Core/Inc/retro-go/gw_firmware_abi.h` — add the function pointer at the
    **end** of `gw_firmware_abi_t` (inside `reserved[]`'s shrinking space if
@@ -160,11 +159,9 @@ slots (`GW_GetCurrent*`, `GW_GetUnixTM`, `mktime`) were dropped in favor of
 
 ## Shared globals: macros, not snapshots
 
-Unlike PICO-8's bridge (`p8_firmware_bridge.cpp`), which snapshots ABI
-pointers once at init because its overlay's BSS is guaranteed to land at a
-fixed address across builds, `core_common` exposes `common_emu_state`,
-`ACTIVE_FILE`, and `ram_start` as **macros** in `gw_core_bridge.h` that
-dereference the ABI pointer on every access:
+`core_common` exposes `common_emu_state`, `ACTIVE_FILE`, and `ram_start` as
+**macros** in `gw_core_bridge.h` that dereference the ABI pointer on every
+access:
 
 ```c
 #define common_emu_state (*(common_emu_state_t *)(gw_firmware_abi()->common_emu_state_ptr))
@@ -178,7 +175,7 @@ given core's own BSS layout — safer for a multi-core SDK where each core's
 firmware global read/written this way, add it here rather than inventing a
 per-core snapshot mechanism.
 
-## Gotchas hit while porting Watara Supervision (read before re-deriving these)
+## Gotchas hit while building the first standalone cores (read before re-deriving these)
 
 - **`objcopy --redefine-syms` fails on blank lines** in the mapping file
   ("missing new symbol name") — only `#` comments and `NAME NEW_NAME`

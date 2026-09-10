@@ -52,21 +52,7 @@ echo -e "dtcram\t$dtc_static static + $dtc_heap bump / $dtc_size"
 
 print_usage ram_uc   __RAM_UC_LENGTH__
 print_usage ram      __RAM_CORE_LENGTH__
-print_usage ram_emu_tgb __RAM_EMU_LENGTH__
-print_usage ram_emu_gw   __RAM_EMU_LENGTH__
-print_usage ram_emu_msx  __RAM_EMU_LENGTH__
-print_usage ram_emu_wsv  __RAM_EMU_LENGTH__
 print_usage ram_emu_md __RAM_EMU_LENGTH__
-print_usage ram_emu_a2600  __RAM_EMU_LENGTH__
-print_usage ram_emu_a7800  __RAM_EMU_LENGTH__
-print_usage ram_emu_amstrad  __RAM_EMU_LENGTH__
-print_usage ram_emu_zelda3  __RAM_EMU_LENGTH__
-print_simple_usage rodata_zelda3
-print_usage ram_emu_smw  __RAM_EMU_LENGTH__
-print_usage ram_emu_videopac  __RAM_EMU_LENGTH__
-print_usage ram_emu_celeste  __RAM_EMU_LENGTH__
-print_usage ram_emu_tama __RAM_EMU_LENGTH__
-print_usage ram_emu_pkmini __RAM_EMU_LENGTH__
 print_usage ahbram   __AHBRAM_LENGTH__
 print_usage flash    __FLASH_LENGTH__
 print_usage extflash __EXTFLASH_LENGTH__

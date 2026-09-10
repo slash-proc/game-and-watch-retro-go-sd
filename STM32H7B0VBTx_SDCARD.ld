@@ -122,9 +122,6 @@ MEMORY
   /* RODATA */
   RODATA   (x)   : ORIGIN = 0xCAFE0000,   LENGTH = 0xFFFFFFFF
 
-  /* PICO-8 code (sentinel address, patched to QSPI XIP at runtime) */
-  PICO8_CODE (x) : ORIGIN = 0xBEEF0000,   LENGTH = 512K
-
   /* External flash (QSPI XIP) — for ITCM hot code LMA */
   EXTFLASH   (xr) : ORIGIN = __EXTFLASH_START__, LENGTH = 32M
 }
@@ -251,9 +248,8 @@ SECTIONS
   } > CORES
 
   /* Every classic emulator's .overlay_<system>/.overlay_<system>_bss RAM
-   * overlay (nes_fceu, tgb, sms/coleco, pce[+itc], msx, wsv, gw,
-   * a2600, a7800, amstrad, zelda3/rodata_zelda3, smw, plus the whole
-   * GBA split-layout block below) has been removed while migrating those
+   * overlay (nes_fceu, sms/coleco, pce[+itc], plus the whole GBA
+   * split-layout block below) has been removed while migrating those
    * systems to standalone cores/<system>/ builds loaded from /cores/*.bin
    * at runtime (see "Cores externes avec ABI" plan). They all shared the
    * same __RAM_EMU_START__ VMA (only one core is ever resident at a
@@ -277,8 +273,7 @@ SECTIONS
   } >FLASH
 
   /* Firmware ABI table at a fixed offset from intflash start (0x400).
-     Plugins (runtime-loaded overlays like the separately-distributed
-     PICO-8 engine) resolve the absolute address at load time by reading
+     Standalone cores resolve the absolute address at load time by reading
      VTOR and adding GW_FIRMWARE_ABI_OFFSET. Works regardless of whether
      the firmware runs from bank 1 (0x08000000) or bank 2 (0x08100000).
      See Core/Inc/retro-go/gw_firmware_abi.h for the contract. */

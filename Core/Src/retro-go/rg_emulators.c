@@ -2034,37 +2034,23 @@ void emulators_init()
     /* ★ Favorites must be the FIRST tab (index 0), before every system tab. */
     rg_favorites_register_tab();
 
-    /* Every classic emulator (gb, gba, nes, sms family, genesis, pce,
-     * wsv, atari family, tama, pkmini, amstrad, gw, msx) and the legacy
-     * zelda3/smw/celeste (and other GWHB homebrews) used to be registered here via
-     * add_emulator(...) with compile-time logos/extensions/dirname. They
-     * are being migrated to standalone cores/<system>/ builds, discovered
-     * dynamically at boot from /cores/*.bin (see emulators_scan_cores(),
-     * "Cores externes avec ABI" plan). Until a system is migrated it has
-     * no tab at all. */
+    // Register Homebrew tab for homebrews in /homebrews/ folder
     add_emulator("Homebrew", "homebrew", "bin", RG_LOGO_EMPTY, RG_LOGO_HEADER_HOMEBREW);
 
-#if SD_CARD == 1
-    /* Migrated systems (Watara Supervision, ...) register themselves here
-     * by dropping a packaged .bin under /cores/ on the SD card — no
-     * firmware rebuild needed to add/update/remove one. Capacity was
-     * sized from cores_set_fingerprint() above so new cores are not dropped. */
+    /* Scan /cores for cores and register them */
     emulators_scan_cores();
     printf("CORE: %d system tab(s) (%d from /cores, capacity %d)\n",
            emulators_count, from_cores, emulators_capacity);
-#endif
 }
 
 void emulators_resync_after_wake(void)
 {
-#if SD_CARD == 1
     uint32_t now_fp = cores_set_fingerprint(NULL);
     if (now_fp != cores_set_fp_at_boot) {
         printf("CORE: /cores set changed (fp 0x%08lx → 0x%08lx), rebooting\n",
                (unsigned long)cores_set_fp_at_boot, (unsigned long)now_fp);
         HAL_NVIC_SystemReset();
     }
-#endif
 
     tab_t *tab = gui_get_current_tab();
     if (tab == NULL)

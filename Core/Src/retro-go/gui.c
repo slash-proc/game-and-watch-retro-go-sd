@@ -165,7 +165,7 @@ void gui_apply_colors_to_overlay_clut(void)
 {
     /* Don't gate on LCD mode — lcd_set_overlay_clut() stores the colors
      * for later if not yet in LUT8 (e.g. during early config load before
-     * PICO-8 has switched the LCD). */
+     * a LUT8 core has switched the LCD). */
     if (curr_colors == NULL) return;
     const uint16_t rgb565[4] = {
         curr_colors->bg_c, curr_colors->main_c,

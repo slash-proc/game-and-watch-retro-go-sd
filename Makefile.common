@@ -216,7 +216,6 @@ endif
 ifeq ($(CHEAT_CODES),1)
 	MAX_CHEAT_CODES ?= 13
 else
-	# blueMSX-go SlotManager.c (TARGET_GNW path) references MAX_CHEAT_CODES unconditionally.
 	MAX_CHEAT_CODES ?= 1
 endif
 
@@ -380,11 +379,6 @@ ifeq ($(COMPRESS),0)
 C_DEFS += -DGNW_DISABLE_COMPRESSION
 endif
 endif
-
-#######################################
-# MSX
-#######################################
-MSX_USE_BANK_2 ?= 0
 
 #######################################
 # cover flow
@@ -651,7 +645,6 @@ C_DEFS +=  \
 -DOFW_ADDRESS=$(OFW_ADDRESS) \
 -DBIG_BANK=$(BIG_BANK) \
 -DEXTFLASH_SIZE=$(EXTFLASH_SIZE) \
--DMSX_USE_BANK_2=$(MSX_USE_BANK_2) \
 -DOFF_SAVESTATE=$(OFF_SAVESTATE) \
 -DCODEPAGE=$(CODEPAGE) \
 -DUICODEPAGE=$(UICODEPAGE) \
@@ -679,18 +672,7 @@ C_DEFS +=  \
 -DCHEAT_CODES=$(CHEAT_CODES) \
 -DDISABLE_SPLASH_SCREEN=$(DISABLE_SPLASH_SCREEN) \
 -DENABLE_BOOT_OC=$(ENABLE_BOOT_OC) \
--DTARGET_GNW \
--DNO_EMBEDDED_SAMPLES \
--D__LIBRETRO__ \
--DZ80_CUSTOM_CONFIGURATION \
--DMSX_NO_ZIP \
--DMSX_NO_FILESYSTEM \
--DMSX_NO_MALLOC \
--DMAX_VIDEO_WIDTH_320 \
--DPIXEL_WIDTH=8 \
--DMSX_NO_STEREO \
--DVIDEO_RGB565 \
--DCELESTE_SLOW_CPU
+-DTARGET_GNW
 
 ifdef MAX_CHEAT_CODES
 C_DEFS += -DMAX_CHEAT_CODES=$(MAX_CHEAT_CODES)
@@ -774,13 +756,10 @@ CXXLIBS = -lstdc++
 LIBDIR +=
 LDFLAGS += $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) $(CXXLIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
 LDFLAGS += -Wl,--wrap=fflush
-# __overlay_pico8_vma intentionally lives inside the ._ram_uc VMA range (the
-# LUT8 "bonus pool" carved out of the framebuffer at runtime — see the
-# comment above it in the linker script, and RAM_EMU/CORES section removal
-# while migrating emulators to standalone cores/<system>/ builds); ld's
-# overlap check flags by-design overlaps like this depending on what else
-# happens to sort next to it in its internal address ordering. Disable the
-# check rather than depend on incidental section ordering to keep it quiet.
+# RAM_UC / RAM_EMU / ITCM core windows sit adjacent by design (see
+# ld/gnw_ram_uc_core.ld and the ._ram_uc comment in the linker script).
+# ld's overlap check can flag those intentional adjacencies depending on
+# section ordering — disable it rather than depend on incidental layout.
 LDFLAGS += -Wl,--no-check-sections
 
 # default action: build all (FrogFS has no gw_*_extflash.bin payload — flash frogfs.bin instead)
@@ -804,39 +783,13 @@ endif
 OBJECTS = $(addprefix $(BUILD_DIR)/core/,$(notdir $(C_SOURCES:.c=.o) $(SDK_C_SOURCES:.c=.o)))
 FATFS_OBJECTS = $(addprefix $(BUILD_DIR)/fatfs/,$(notdir $(FATFS_C_SOURCES:.c=.o)))
 TAMP_OBJECTS = $(addprefix $(BUILD_DIR)/tamp/,$(notdir $(TAMP_C_SOURCES:.c=.o)))
-TGBDUAL_OBJECTS = $(addprefix $(BUILD_DIR)/tgbdual/,$(notdir $(TGBDUAL_C_SOURCES:.c=.o)))
-GW_OBJECTS = $(addprefix $(BUILD_DIR)/gw/,$(notdir $(GW_C_SOURCES:.c=.o)))
-MSX_OBJECTS = $(addprefix $(BUILD_DIR)/msx/,$(notdir $(MSX_C_SOURCES:.c=.o)))
-WSV_OBJECTS = $(addprefix $(BUILD_DIR)/wsv/,$(notdir $(WSV_C_SOURCES:.c=.o)))
-A2600_OBJECTS = $(addprefix $(BUILD_DIR)/a2600/,$(notdir $(A2600_C_SOURCES:.c=.o)))
-A7800_OBJECTS = $(addprefix $(BUILD_DIR)/a7800/,$(notdir $(A7800_C_SOURCES:.c=.o)))
-AMSTRAD_OBJECTS = $(addprefix $(BUILD_DIR)/amstrad/,$(notdir $(AMSTRAD_C_SOURCES:.c=.o)))
-ZELDA3_OBJECTS = $(addprefix $(BUILD_DIR)/zelda3/,$(notdir $(ZELDA3_C_SOURCES:.c=.o)))
-SMW_OBJECTS = $(addprefix $(BUILD_DIR)/smw/,$(notdir $(SMW_C_SOURCES:.c=.o)))
-VIDEOPAC_OBJECTS = $(addprefix $(BUILD_DIR)/videopac/,$(notdir $(VIDEOPAC_C_SOURCES:.c=.o)))
-CELESTE_OBJECTS = $(addprefix $(BUILD_DIR)/celeste/,$(notdir $(CELESTE_C_SOURCES:.c=.o)))
-PICO8_ALL_SOURCES = $(PICO8_C_SOURCES) $(PICO8_CXX_SOURCES) $(PICO8_CXX_STUBS)
-PICO8_OBJECTS = $(addprefix $(BUILD_DIR)/pico8/,$(notdir $(patsubst %.cpp,%.o,$(patsubst %.c,%.o,$(PICO8_ALL_SOURCES)))))
-TAMA_OBJECTS = $(addprefix $(BUILD_DIR)/tama/,$(notdir $(TAMA_C_SOURCES:.c=.o)))
-PKMINI_OBJECTS = $(addprefix $(BUILD_DIR)/pkmini/,$(notdir $(PKMINI_C_SOURCES:.c=.o)))
 
-vpath %.c $(sort $(dir $(C_SOURCES) $(FATFS_C_SOURCES) $(TAMP_C_SOURCES) $(TGBDUAL_C_SOURCES) $(TGBDUAL_C_SOURCES) $(MSX_C_SOURCES) $(GW_C_SOURCES) $(WSV_C_SOURCES) $(A2600_C_SOURCES) $(A7800_C_SOURCES) $(AMSTRAD_C_SOURCES) $(ZELDA3_C_SOURCES) $(SMW_C_SOURCES) $(VIDEOPAC_C_SOURCES) $(CELESTE_C_SOURCES) $(TAMA_C_SOURCES) $(PKMINI_C_SOURCES) $(PICO8_C_SOURCES) $(SDK_C_SOURCES)))
-# Guard empty lists: vpath with empty path resets the pattern's search path.
-# The GPL stub build has no PICO8_CXX_SOURCES, so only emit these when non-empty.
-ifneq ($(strip $(PICO8_CXX_SOURCES)),)
-vpath %.c $(sort $(dir $(PICO8_CXX_SOURCES)))
-endif
-ifneq ($(strip $(PICO8_CXX_SOURCES) $(PICO8_CXX_STUBS)),)
-vpath %.cpp $(sort $(dir $(PICO8_CXX_SOURCES) $(PICO8_CXX_STUBS)))
-endif
+vpath %.c $(sort $(dir $(C_SOURCES) $(FATFS_C_SOURCES) $(TAMP_C_SOURCES) $(SDK_C_SOURCES)))
 
 # CXX
 CXX_OBJECTS =          $(addprefix $(BUILD_DIR)/core/,$(notdir $(CXX_SOURCES:.cpp=.o) ))
-TGBDUAL_CXX_OBJECTS = $(addprefix $(BUILD_DIR)/tgbdual/,$(notdir $(TGBDUAL_CXX_SOURCES:.cpp=.o)))
-A2600_CXX_OBJECTS = $(addprefix $(BUILD_DIR)/a2600/,$(notdir $(A2600_CXX_SOURCES:.cxx=.o)))
 
-vpath %.cpp $(sort $(dir $(CXX_SOURCES) $(TGBDUAL_CXX_SOURCES) ))
-vpath %.cxx $(sort $(dir $(A2600_CXX_SOURCES) ))
+vpath %.cpp $(sort $(dir $(CXX_SOURCES) ))
 
 # list of ASM program objects
 OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(SDK_ASM_SOURCES:.s=.o)))
@@ -926,9 +879,9 @@ $(BUILD_DIR)/memcpy-armv7m.o: Core/Src/memcpy-armv7m.s Makefile.common Makefile 
 	$(V)$(ECHO) [ AS ] $(notdir $<)
 	$(V)$(AS) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) $(FATFS_OBJECTS) $(TAMP_OBJECTS) $(A7800_OBJECTS) $(TGBDUAL_OBJECTS) $(MSX_OBJECTS) $(GW_OBJECTS) $(WSV_OBJECTS) $(AMSTRAD_OBJECTS) $(VIDEOPAC_OBJECTS) $(CELESTE_OBJECTS) $(CXX_OBJECTS) $(TGBDUAL_CXX_OBJECTS) $(A2600_OBJECTS) $(A2600_CXX_OBJECTS) $(ZELDA3_OBJECTS) $(SMW_OBJECTS) $(TAMA_OBJECTS) $(PKMINI_OBJECTS) $(PICO8_OBJECTS) Makefile.common Makefile $(LDSCRIPT)
+$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) $(FATFS_OBJECTS) $(TAMP_OBJECTS) $(CXX_OBJECTS) Makefile.common Makefile $(LDSCRIPT)
 	$(V)$(ECHO) [ LD ] $(notdir $@)
-	$(V)$(CC) $(OBJECTS) $(FATFS_OBJECTS) $(TAMP_OBJECTS) $(A7800_OBJECTS) $(TGBDUAL_OBJECTS) $(MSX_OBJECTS) $(GW_OBJECTS) $(WSV_OBJECTS) $(AMSTRAD_OBJECTS) $(VIDEOPAC_OBJECTS) $(CELESTE_OBJECTS) $(CXX_OBJECTS) $(TGBDUAL_CXX_OBJECTS) $(A2600_OBJECTS) $(A2600_CXX_OBJECTS) $(ZELDA3_OBJECTS) $(SMW_OBJECTS) $(TAMA_OBJECTS) $(PKMINI_OBJECTS) $(PICO8_OBJECTS) $(LDFLAGS) -o $@
+	$(V)$(CC) $(OBJECTS) $(FATFS_OBJECTS) $(TAMP_OBJECTS) $(CXX_OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/core/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) [ CC core ] $(notdir $<)
@@ -946,197 +899,13 @@ $(TAMP_OBJECTS): $(BUILD_DIR)/tamp/%.o: $(TAMP_DIR)tamp/%.c Makefile.common Make
 	$(V)$(CC) -c $(CFLAGS) $(TAMP_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/tamp/$(notdir $(<:.c=.lst)) $< -o $@
 endif
 
-$(BUILD_DIR)/tgbdual/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC GB TGB Dual ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(TGBDUAL_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/tgbdual/$(notdir $(<:.c=.lst)) $< -o $@
 
-$(BUILD_DIR)/msx/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC msx ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(MSX_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/msx/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/gw/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC gw ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(GW_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/gw/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/wsv/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC wsv ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(WSV_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/wsv/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/a7800/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC a7800 ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(A7800_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/a7800/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/a2600/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC a2600 ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(A2600_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/a2600/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/amstrad/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC amstrad CPC ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(AMSTRAD_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/amstrad/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/videopac/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC o2em ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(VIDEOPAC_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/videopac/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/celeste/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC celeste ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(CELESTE_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/celeste/$(notdir $(<:.c=.lst)) $< -o $@
-
-# PICO-8: ALL sources compiled as C++ (z8lua .c files require C++ for fix32.h)
-# Extra flags: -fno-exceptions since we don't use them.
-# NOTE: -flto and blanket -O3 overflow the linker memory sections on STM32.
-# Also: lvm.c (bytecode dispatch loop) MUST stay at -O2 — at -O3 the loop
-# inlines aggressively enough to exceed the Cortex-M7 16 KB I-cache, causing
-# branch-prediction misses and net SLOWDOWN. This is the known interpreter
-# dispatch pathology and is why LuaJIT/V8/etc all use -O2 for their dispatch
-# loops.
-# ltable.c has no dispatch loop and is safe to compile at -O3.
-# GPL stub: compiled as C++ (main_pico8_stub.c uses extern "C"), no objcopy rename needed.
-# The full engine build (closed repo) overrides these rules with its own Makefile
-# that includes the ABI redefine step.
-PICO8_EXTRA_FLAGS = -fno-exceptions
-
-$(BUILD_DIR)/pico8/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CXX pico8 ] $(notdir $<)
-	$(V)$(CXX) -c $(CXXFLAGS) $(PICO8_EXTRA_FLAGS) $(PICO8_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/pico8/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/tama/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC tama ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(TAMA_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/tama/$(notdir $(<:.c=.lst)) $< -o $@
-
-$(BUILD_DIR)/pkmini/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CC Pokemon Mini ] $(notdir $<)
-	$(V)$(CC) -c $(CFLAGS) $(PKMINI_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/pkmini/$(notdir $(<:.c=.lst)) $< -o $@
 
 # CXX
 $(BUILD_DIR)/core/%.o: %.cpp Makefile Makefile.common $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) [ CXX core ] $(notdir $<)
 	$(V)$(CXX) -c $(CXXFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/core/$(notdir $(<:.cpp=.lst)) $< -o $@
 
-$(BUILD_DIR)/tgbdual/%.o: %.cpp Makefile Makefile.common $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CXX GB TGB Dual ] $(notdir $<)
-	$(V)$(CXX) -c $(CXXFLAGS) $(TGBDUAL_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/tgbdual/$(notdir $(<:.cpp=.lst)) $< -o $@
-
-$(BUILD_DIR)/a2600/%.o: %.cxx Makefile Makefile.common $(SDK_HEADERS) | $(BUILD_DIR)
-	$(V)$(ECHO) [ CXX a2600 ] $(notdir $<)
-	$(V)$(CXX) -c $(CXXFLAGS) $(A2600_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/a2600/$(notdir $(<:.cxx=.lst)) $< -o $@
-
-# Zelda3 configuration
-
-# Limit to 30 fps for improved stability
-ZELDA3_LIMIT_30FPS ?= 1
-
-# Increase UI speed (item menu, etc.)
-ZELDA3_FASTER_UI ?= 1
-
-# Display battery indicator in item menu
-ZELDA3_BATTERY_INDICATOR ?= 1
-
-# Item switch on L/R. Also allows reordering of items in inventory by pressing Y+direction.
-# Hold X, L, or R inside of the item selection screen to assign items to those buttons.
-# If X is reassigned, Select opens the map. Push Select while paused to save or quit.
-# When L or R are assigned items, those buttons will no longer cycle items.
-ZELDA3_FEATURE_SWITCH_LR ?= 0
-# Allow turning while dashing
-ZELDA3_FEATURE_TURN_WHILE_DASHING ?= 0
-# Allow mirror to be used to warp to the Dark World
-ZELDA3_FEATURE_MIRROR_TO_DARK_WORLD ?= 0
-# Collect items (like hearts) with sword instead of having to touch them
-ZELDA3_FEATURE_COLLECT_ITEMS_WITH_SWORD ?= 0
-# Level 2-4 sword can be used to break pots
-ZELDA3_FEATURE_BREAK_POTS_WITH_SWORD ?= 0
-# Disable the low health beep
-ZELDA3_FEATURE_DISABLE_LOW_HEALTH_BEEP ?= 0
-# Avoid waiting too much at the start
-ZELDA3_FEATURE_SKIP_INTRO_ON_KEYPRESS ?= 1
-# Display max rupees/bombs/arrows with orange/yellow color
-ZELDA3_FEATURE_SHOW_MAX_ITEMS_IN_YELLOW ?= 0
-# Allows up to four bombs active at a time instead of two.
-ZELDA3_FEATURE_MORE_ACTIVE_BOMBS ?= 0
-# Can carry 9999 rupees instead of 999
-ZELDA3_FEATURE_CARRY_MORE_RUPEES ?= 0
-# Enable various zelda bug fixes
-ZELDA3_FEATURE_MISC_BUG_FIXES ?= 0
-# Allow bird travel to be cancelled by hitting the X key
-ZELDA3_FEATURE_CANCEL_BIRD_TRAVEL ?= 0
-# Enable some more advanced zelda bugfixes that change game behavior
-ZELDA3_FEATURE_GAME_CHANGING_BUG_FIXES ?= 0
-# Enable this to limit the ItemSwitchLR item cycling to the first 4 items.
-ZELDA3_FEATURE_SWITCH_LR_LIMIT ?= 0
-
-ZELDA3_FEATURES := 0
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_SWITCH_LR) << 1 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_TURN_WHILE_DASHING) << 2 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_MIRROR_TO_DARK_WORLD) << 3 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_COLLECT_ITEMS_WITH_SWORD) << 4 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_BREAK_POTS_WITH_SWORD) << 5 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_DISABLE_LOW_HEALTH_BEEP) << 6 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_SKIP_INTRO_ON_KEYPRESS) << 7 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_SHOW_MAX_ITEMS_IN_YELLOW) << 8 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_MORE_ACTIVE_BOMBS) << 9 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_CARRY_MORE_RUPEES) << 11 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_MISC_BUG_FIXES) << 12 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_CANCEL_BIRD_TRAVEL) << 13 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_GAME_CHANGING_BUG_FIXES) << 14 ))")
-ZELDA3_FEATURES := $(shell echo "$$(( $(ZELDA3_FEATURES) | $(ZELDA3_FEATURE_SWITCH_LR_LIMIT) << 15 ))")
-
-# C defines for zelda3
-C_DEFS_ZELDA3 =  \
--DHEADLESS \
--DLIMIT_30FPS=$(ZELDA3_LIMIT_30FPS) \
--DFEATURES=$(ZELDA3_FEATURES) \
--DFASTER_UI=$(ZELDA3_FASTER_UI) \
--DBATTERY_INDICATOR=$(ZELDA3_BATTERY_INDICATOR) \
-
-# function used to generate prerequisite rules for zelda3 objects
-define zelda3_obj_prereq_gen
-$$(BUILD_DIR)/zelda3/$(patsubst %.c,%.o,$(notdir $1)): $1 Makefile.common Makefile $$(SDK_HEADERS) | $$(BUILD_DIR)
-	$$(V)$$(ECHO) [ CC zelda3 ] $$(notdir $$<)
-	$$(V)$$(CC) -c $$(CFLAGS) $$(C_DEFS_ZELDA3) $$(ZELDA3_C_INCLUDES)-Wa,-a,-ad,-alms=$$(BUILD_DIR)/zelda3/$$(notdir $$(<:.c=.lst)) $$< -o $$@ \
-	-Wno-parentheses -Wno-unknown-pragmas -Wno-incompatible-pointer-types -Wno-unused-const-variable -Wno-strict-aliasing -Wno-comment -Wno-unused-function -Wno-stack-usage -Wno-int-in-bool-context -Wno-unused-variable -Wno-unused-but-set-variable
-	$$(V)$$(CP) --redefine-syms=zelda3_redefines $$@
-
-endef
-# note: the blank line above is intentional
-
-# generate all zelda3 object prerequisite rules
-$(eval $(foreach obj,$(ZELDA3_C_SOURCES),$(call zelda3_obj_prereq_gen,$(obj))))
-
-# SMW configuration
-
-# Limit to 30 fps for improved stability
-SMW_LIMIT_30FPS ?= 1
-
-# Save to SRAM after each beaten level (instead of saving after castle is beaten).
-# SRAM save remains valid/compatible with emulators.
-SMW_FEATURE_SAVE_AFTER_EACH_BEATEN_LEVEL ?= 0
-
-SMW_FEATURES := 0
-SMW_FEATURES := $(shell echo "$$(( $(SMW_FEATURES) | $(SMW_FEATURE_SAVE_AFTER_EACH_BEATEN_LEVEL) << 0 ))")
-
-# C defines for smw
-C_DEFS_SMW =  \
--DHEADLESS \
--DLIMIT_30FPS=$(SMW_LIMIT_30FPS) \
--DFEATURES=$(SMW_FEATURES) \
-
-# function used to generate prerequisite rules for smw objects
-define smw_obj_prereq_gen
-$$(BUILD_DIR)/smw/$(patsubst %.c,%.o,$(notdir $1)): $1 Makefile.common Makefile $$(SDK_HEADERS) | $$(BUILD_DIR)
-	$$(V)$$(ECHO) [ CC smw ] $$(notdir $$<)
-	$$(V)$$(CC) -c $$(CFLAGS) $$(C_DEFS_SMW) $$(SMW_C_INCLUDES) -Wa,-a,-ad,-alms=$$(BUILD_DIR)/smw/$$(notdir $$(<:.c=.lst)) $$< -o $$@ \
-	-Wno-parentheses -Wno-unknown-pragmas -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-const-variable -Wno-int-in-bool-context -Wno-unused-value -Wno-unused-function -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -Wno-format -Wno-array-bounds -Wno-strict-aliasing -Wno-maybe-uninitialized
-	$$(V)$$(CP) --redefine-syms=smw_redefines $$@
-
-endef
-# note: the blank line above is intentional
-
-# generate all smw object prerequisite rules
-$(eval $(foreach obj,$(SMW_C_SOURCES),$(call smw_obj_prereq_gen,$(obj))))
-
-external/smw/smw_assets.dat: roms/smw/smw.sfc | $(BUILD_DIR)
-	cp $< external/smw/assets/smw.sfc
-	$(MAKE) -C external/smw smw_assets.dat
 
 $(BUILD_DIR):
 	$(V)mkdir $@
@@ -1405,7 +1174,7 @@ FROGFS_ROM_LZMA_FLAGS := $(if $(filter 0,$(SD_CARD)),$(if $(filter-out 0,$(COMPR
 # so we pass --no-gencovers to gen_frogfs_image.py.
 FROGFS_COVERS_FLAGS := $(if $(filter 1,$(COVERFLOW)),--no-gencovers,--no-covers)
 
-$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py scripts/rom_frogfs_lzma.py scripts/frogfs_pico8_ro.py scripts/pico8_ro_build_patch.py scripts/pico8_gnw_cores.py scripts/sd_cores_pack.py external/zelda3/tables/restool.py external/smw/assets/restool.py $(FROGFS_DIR)/tools/mkfrogfs.py
+$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py scripts/rom_frogfs_lzma.py scripts/frogfs_pico8_ro.py scripts/pico8_ro_build_patch.py scripts/pico8_gnw_cores.py scripts/sd_cores_pack.py $(FROGFS_DIR)/tools/mkfrogfs.py
 	$(V)$(PYTHON3) scripts/gen_frogfs_image.py \
 		--sd-content $(SD_FOLDER) \
 		--output $@ \
@@ -1804,8 +1573,6 @@ help:
 	@echo "  GNW_TARGET          - Game & Watch target, Valid values {mario,zelda} (default=mario)"makefile.
 	@echo "  GAME_GENIE          - Set to 1 to enable game genie support (deprecated, use CHEAT_CODES instead)"
 	@echo "  CHEAT_CODES         - Set to 1 to enable cheat codes support (default=0)"
-	@echo "  MSX_USE_BANK_2      - Set to 1 to use Internal Bank 2 for MSX performance improvements."
-	@echo "                        Retro-Go must be in Bank 1."
 	@echo "  SHARED_HIBERNATE_SAVESTATE - Set to 1 to enable a separate savestate for off/on (default=0)"
 	@echo "  DISABLE_SPLASH_SCREEN - Set to 1 to disable the slash screen animation at startup (default=0)"
 	@echo ""
@@ -1823,7 +1590,6 @@ help:
 	@echo "  GNW_TARGET=$(GNW_TARGET)"
 	@echo "  CHEAT_CODES=$(CHEAT_CODES)"
 	@echo "  SD_SPI_CHECK_DATA_CRC=$(SD_SPI_CHECK_DATA_CRC)"
-	@echo "  MSX_USE_BANK_2=$(MSX_USE_BANK_2)"
 	@echo "  GCC_PATH=$(GCC_PATH)"
 	@echo "  PREFIX=$(PREFIX)"
 	@echo "  CODEPAGE=$(CODEPAGE)"

@@ -9,11 +9,10 @@ from __future__ import annotations
 import pathlib
 
 # UI logos: built to sd_content/bios/logo.bin (FrogFS /bios when SD_CARD=0, SD path /bios when SD_CARD=1).
-# pico8_stub.bin is omitted (placeholder; use real pico8.bin on FrogFS/SD or skip).
 ALWAYS_PACK_REL = frozenset()
 
 # Never copy these into LittleFS /cores (still produced under sd_content/cores for SD workflows).
-LITTLEFS_EXCLUDE_CORE_RELPATHS = frozenset({"pico8_stub.bin"})
+LITTLEFS_EXCLUDE_CORE_RELPATHS = frozenset()
 
 # roms/<dirname>/ → core blob(s) under sd_content/cores/
 _SYSTEM_CORE_RELFILES: dict[str, frozenset[str]] = {
@@ -33,10 +32,8 @@ _SYSTEM_CORE_RELFILES: dict[str, frozenset[str]] = {
     "lynx": frozenset({"lynx.bin"}),
     "a7800": frozenset({"a7800.bin"}),
     "amstrad": frozenset({"amstrad.bin"}),
-    "tama": frozenset({"tama.bin"}),
     "mini": frozenset({"pkmini.bin"}),
     "gba": frozenset({"gba.bin", "gba.xip"}),
-    "videopac": frozenset({"videopac.bin"}),
     "homebrew": frozenset(),
     "pico8": frozenset(),
 }

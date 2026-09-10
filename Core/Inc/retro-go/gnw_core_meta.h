@@ -73,9 +73,8 @@ typedef enum {
  * file into this region's fixed base address (see run_dynamic_core()),
  * followed by bss_size zeroed bytes. For ITCM segments, the firmware also
  * reserves code_size+bss_size via itc_malloc right after loading so the
- * core's later itc_* allocations never collide with the fixed segment —
- * see docs/PICO8_EXTERNAL_MODULE.md's "ITCM Back-Page Allocation". For
- * RAM_UC segments, the same span is carved out of lcd_get_bonus_pool()
+ * core's later itc_* allocations never collide with the fixed segment.
+ * For RAM_UC segments, the same span is carved out of lcd_get_bonus_pool()
  * via lcd_claim_bonus_pool(). */
 typedef struct {
     uint32_t region;    /* gnw_core_region_t */

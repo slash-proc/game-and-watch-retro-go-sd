@@ -176,7 +176,7 @@ cpumon_sleep core_cpumon_sleep
 strncat core_strncat
 sscanf core_sscanf
 odroid_settings_ActiveGameGenieCodes_is_enabled core_odroid_settings_ActiveGameGenieCodes_is_enabled
-# --- v2 append: TGB Dual (Game Boy / Game Boy Color, C++) porting surface ---
+# --- v2 append: palette settings (external GB/GBC and others) ---
 # NOTE: strtok is intentionally NOT here — gw_core_bridge.c defines a real
 # local implementation (static per-core state), same reasoning as
 # memcpy/memset/memmove above. NOTE: GW_GetUnixTM/mktime were dropped —
@@ -186,11 +186,11 @@ odroid_settings_Palette_set core_odroid_settings_Palette_set
 # --- Lynx (handy-go): fputs via fwrite/strlen; calloc via AHB (freeable) ---
 fputs core_fputs
 calloc core_calloc
-# --- Atari 2600 (Stella): atoi/strcasecmp composed from strtol/tolower ---
+# --- Atari 2600 (external Stella core): atoi/strcasecmp from strtol/tolower ---
 atoi core_atoi
 strcasecmp core_strcasecmp
 strncasecmp core_strncasecmp
-# --- libstdc++ support (cores/a2600): helpers also exported un-renamed ---
+# --- libstdc++ support (external C++ cores): helpers also exported un-renamed ---
 fputc core_fputc
 rewind core_rewind
 getenv core_getenv
@@ -212,7 +212,7 @@ rg_storage_exists core_rg_storage_exists
 rg_storage_get_adjacent_files core_rg_storage_get_adjacent_files
 rg_basename core_rg_basename
 audio_stop_playing core_audio_stop_playing
-# --- LCD-Game-Emulator (Game & Watch) ---
+# --- LCD-Game-Emulator (external Game & Watch core) ---
 GW_SetUnixTM core_GW_SetUnixTM
 lcd_is_swap_pending core_lcd_is_swap_pending
 JPEG_DecodeToFrameInit core_JPEG_DecodeToFrameInit
@@ -223,7 +223,7 @@ lzma_inflate core_lzma_inflate
 lz4_uncompress core_lz4_uncompress
 lz4_get_file_size core_lz4_get_file_size
 odroid_system_switch_app core_odroid_system_switch_app
-# --- Tamagotchi P1 ---
+# --- Frame pacing ---
 common_emu_frame_loop_reset core_common_emu_frame_loop_reset
 # --- GBA (gpSP) ---
 get_SystemCoreClock core_get_SystemCoreClock

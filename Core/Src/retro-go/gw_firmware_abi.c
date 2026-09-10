@@ -489,7 +489,7 @@ const gw_firmware_abi_t g_firmware_abi = {
     .dma_counter_ptr                 = &dma_counter,
     .common_emu_sound_dma_marker_ptr = &common_emu_sound_dma_marker,
 
-    /* TGB Dual (Game Boy / Game Boy Color) porting surface. */
+    /* Palette settings (external GB/GBC core and others). */
     .odroid_settings_Palette_get     = odroid_settings_Palette_get,
     .odroid_settings_Palette_set     = odroid_settings_Palette_set,
 
@@ -508,7 +508,7 @@ const gw_firmware_abi_t g_firmware_abi = {
     .rg_storage_get_adjacent_files = rg_storage_get_adjacent_files,
     .rg_basename                 = rg_basename,
 
-    /* v2 append: LCD-Game-Emulator (Game & Watch) */
+    /* v2 append: LCD-Game-Emulator (external Game & Watch core) */
     .GW_SetUnixTM                = GW_SetUnixTM,
     .JPEG_DecodeToFrameInit      = JPEG_DecodeToFrameInit,
     .JPEG_DecodeToFrame          = JPEG_DecodeToFrame,
@@ -518,7 +518,7 @@ const gw_firmware_abi_t g_firmware_abi = {
     .lz4_uncompress              = lz4_uncompress,
     .lz4_get_file_size           = lz4_get_file_size,
 
-    /* v2 append: Tamagotchi P1 */
+    /* v2 append: frame-pacing reset (kept for ABI compatibility) */
     .common_emu_frame_loop_reset = common_emu_frame_loop_reset,
 
     /* v2 append: GBA (gpSP) */

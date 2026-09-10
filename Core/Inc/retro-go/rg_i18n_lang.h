@@ -8,7 +8,7 @@ typedef struct
     const char *s_LangUI;
     const char *s_LangName;  //used for English name
     // Shared labels still used by firmware-resident overlays
-    // (zelda3/smw Reset; classic nofrendo Palette/Default). Per-core option
+    // (homebrew Reset; classic nofrendo Palette/Default). Per-core option
     // strings for standalone cores live in Core/Src/porting/<sys>/<sys>_i18n.c.
     const char *s_Reset;
     const char *s_Palette;
