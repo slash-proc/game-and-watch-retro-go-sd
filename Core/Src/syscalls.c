@@ -438,15 +438,29 @@ static bool path_has_prefix_dir(const char *path, const char *dir)
  * which is how homebrew presented as "Not a GWHB .bin" (fopen returned NULL and
  * the probe could not tell that apart from bad magic).
  *
- * "homebrews" and "cores" were both missing. Only cores/pico8.ro was routed,
- * via a strcmp special case -- someone hit exactly this for PICO-8 and patched
- * the one path instead of the category. The prefix covers it now.
+ * "homebrews" was missing, which is the bug above.
+ *
+ * "cores" is deliberately NOT here. Cores live in LittleFS on flash builds
+ * (gen_littlefs_image.py's DEFAULT_DIRS is ("cores",)); pico8.ro is the single
+ * exception, moved into FrogFS because it is executed in place -- see
+ * Makefile.common's --bundle-pico8-ro-in-frogfs paired with
+ * --omit-pico8-ro-from-gnw-zip. Routing the whole "cores" prefix here inverts
+ * that split and makes every other /cores/*.bin unopenable.
  *
  * FrogFS is read-only, so anything listed here can only be installed by the
  * builder, never at runtime. That already matches the firmware: nothing writes
  * under these paths, and the file manager's delete entry is #if'd out for
  * SD_CARD=0 with the comment "Can't delete file on FrogFS". Saves and settings
  * live under /data, which stays on LittleFS and stays writable. */
+static bool is_cores_pico8_ro_frogfs_path(const char *path)
+{
+    if (!path)
+        return false;
+    if (path[0] == '/')
+        path++;
+    return strcmp(path, "cores/pico8.ro") == 0;
+}
+
 static bool is_frogfs_path(const char *path)
 {
     return path_has_prefix_dir(path, "roms") ||
@@ -455,7 +469,7 @@ static bool is_frogfs_path(const char *path)
            path_has_prefix_dir(path, "fonts") ||
            path_has_prefix_dir(path, "font") ||
            path_has_prefix_dir(path, "homebrews") ||
-           path_has_prefix_dir(path, "cores");
+           is_cores_pico8_ro_frogfs_path(path);
 }
 
 static const char *normalize_frogfs_path(const char *name, char *buffer, size_t buffer_size)
