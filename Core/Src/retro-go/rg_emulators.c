@@ -9,6 +9,9 @@
 #include "gw_firmware_abi.h"
 #include "gwhb.h"
 #include "gnw_core_meta.h"
+#if SD_CARD == 0
+#include "gw_littlefs.h"   /* fs_dir_* — /cores lives in LittleFS on flash builds */
+#endif
 #include "rg_emulators.h"
 #include "rg_storage.h"
 #include "rg_i18n.h"
@@ -1492,7 +1495,7 @@ static void run_gwhb_homebrew(const char *path, uint8_t load_state, uint8_t star
 
 /* gnw_core_probe() is used by run_dynamic_core() in both storage variants, so it
  * sits outside the SD_CARD guard below; only the launcher-side core scanning
- * (add_emulator_dynamic/cores_set_fingerprint/emulators_scan_cores) is SD-only. */
+ * (add_emulator_dynamic/cores_set_fingerprint/emulators_scan_cores). */
 
 /* Reads only the CORE header + gnw_core_meta_t (not the payload) from
  * `path`. Returns true and fills *out_meta on success, and *out_header_length
@@ -1568,7 +1571,78 @@ done:
     return ok;
 }
 
+/* Core discovery runs in BOTH storage variants. It used to be SD-only, so a
+ * flash install never probed /cores at all -- no tab was registered and no
+ * core's games appeared, while homebrew still worked because that is a static
+ * add_emulator() call. Only the directory enumeration differs; see
+ * cores_dir_open()/cores_dir_next() below. */
+
+/* Enumerating /cores differs by storage variant, and only this differs -- the
+ * probe, the registration and the load path are shared.
+ *
+ * SD_CARD=1: one FatFs volume, so f_opendir/f_readdir.
+ *
+ * SD_CARD=0: cores are .bin files read into RAM, so they live in the writable
+ * LittleFS partition (gen_littlefs_image.py's DEFAULT_DIRS is ("cores",)). The
+ * f_opendir/f_readdir compiled into a flash build are rg_frogfs.c's and serve
+ * the read-only FrogFS image only, where /cores holds at most a mapped sidecar
+ * such as pico8.ro -- never a core. Enumerating with them found nothing and
+ * returned silently, which is why a flash install showed no core tabs at all.
+ *
+ * fs_dir_read() returns >0 while it yields an entry, 0 at end of directory. */
+#define CORES_DIR_NAME_MAX 128
+
 #if SD_CARD == 1
+
+static DIR s_cores_dir;
+
+static bool cores_dir_open(void)
+{
+    return f_opendir(&s_cores_dir, "/cores") == FR_OK;
+}
+
+static bool cores_dir_next(char *name, size_t name_size, bool *is_dir)
+{
+    FILINFO fno;
+    if (f_readdir(&s_cores_dir, &fno) != FR_OK || fno.fname[0] == 0)
+        return false;
+    snprintf(name, name_size, "%s", fno.fname);
+    *is_dir = (fno.fattrib & AM_DIR) != 0;
+    return true;
+}
+
+static void cores_dir_close(void)
+{
+    f_closedir(&s_cores_dir);
+}
+
+#else /* SD_CARD == 0 */
+
+/* gw_littlefs.c owns a two-slot dir table; slot 0 is free during the boot scan
+ * (the file manager, the only other user, cannot be open yet). */
+#define CORES_DIR_LFS_SLOT 0
+
+static bool cores_dir_open(void)
+{
+    return fs_dir_open(CORES_DIR_LFS_SLOT, "/cores") == 0;
+}
+
+static bool cores_dir_next(char *name, size_t name_size, bool *is_dir)
+{
+    fs_folder_entry entry;
+    if (fs_dir_read(CORES_DIR_LFS_SLOT, &entry) <= 0)
+        return false;
+    snprintf(name, name_size, "%s", entry.name);
+    *is_dir = entry.is_folder;
+    return true;
+}
+
+static void cores_dir_close(void)
+{
+    fs_dir_close(CORES_DIR_LFS_SLOT);
+}
+
+#endif
 
 /* Registers one launcher tab per system described in `meta` (up to
  * GNW_CORE_MAX_SYSTEMS), all sharing the same core_path — this is how one
@@ -1647,30 +1721,29 @@ static uint32_t cores_set_fingerprint(int *out_systems)
 
 static void emulators_scan_cores(void)
 {
-    DIR dir;
-    FILINFO fno;
     gnw_core_meta_t meta;
     char path[128];
+    char name[CORES_DIR_NAME_MAX];
+    bool is_dir;
 
-    if (f_opendir(&dir, "/cores") != FR_OK)
+    if (!cores_dir_open())
         return;
 
-    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0) {
-        if (fno.fattrib & AM_DIR)
+    while (cores_dir_next(name, sizeof(name), &is_dir)) {
+        if (is_dir)
             continue;
-        const char *ext = get_extension(fno.fname);
+        const char *ext = get_extension(name);
         if (!ext || strcasecmp(ext, "bin") != 0)
             continue;
 
-        snprintf(path, sizeof(path), "/cores/%s", fno.fname);
+        snprintf(path, sizeof(path), "/cores/%s", name);
         if (gnw_core_probe(path, &meta, NULL))
             add_emulator_dynamic(&meta, path);
     }
 
-    f_closedir(&dir);
+    cores_dir_close();
 }
 
-#endif /* SD_CARD == 1 */
 
 /* Resolves segment region `region` to its fixed base address + max usable
  * length (see gnw_core_region_t / ld/gnw_itcm_core.ld). Returns NULL (and
@@ -2021,9 +2094,7 @@ static uint32_t cores_set_fp_at_boot;
 void emulators_init()
 {
     int from_cores = 0;
-#if SD_CARD == 1
     cores_set_fp_at_boot = cores_set_fingerprint(&from_cores);
-#endif
     /* Exact fit: builtins + every system described by CORE headers on the
      * SD card. AHB/DTC are bump allocators (no realloc). If /cores changes
      * while asleep, emulators_resync_after_wake() reboots for a clean init. */
@@ -2054,7 +2125,10 @@ void emulators_init()
     // Register Homebrew tab for homebrews in /homebrews/ folder
     add_emulator("Homebrew", "homebrew", "bin", RG_LOGO_EMPTY, RG_LOGO_HEADER_HOMEBREW);
 
-    /* Scan /cores for cores and register them */
+    /* Migrated systems (Watara Supervision, ...) register themselves here by
+     * dropping a packaged .bin under /cores/ — on the SD card, or in the
+     * LittleFS partition of a flash install. Capacity was sized from
+     * cores_set_fingerprint() above so new cores are not dropped. */
     emulators_scan_cores();
     printf("CORE: %d system tab(s) (%d from /cores, capacity %d)\n",
            emulators_count, from_cores, emulators_capacity);
