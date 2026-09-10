@@ -1086,6 +1086,11 @@ LANG_BIN_NAMES += ja_jp
 endif
 LANG_BINS := $(addprefix $(LANG_DIR)/, $(addsuffix .bin, $(LANG_BIN_NAMES)))
 
+# Staging root for decoupled core/homebrew .bin files. CORES_DIR was referenced
+# here but never defined anywhere, so MAPPERS_DIR expanded to the absolute path
+# "/nes_fceumm_mappers" -- filesystem root, not the SD tree. Almost certainly lost
+# when cores were split out of this repo.
+CORES_DIR := $(SD_FOLDER)/cores
 MAPPERS_DIR := $(CORES_DIR)/nes_fceumm_mappers
 # Drop-in NES FCEUmm mapper pack (built by the external NES core project).
 # SD / LittleFS ships mappers.pak (+ ines_correct.bin); individual
@@ -1102,6 +1107,7 @@ create_sd_folders: | $(BUILD_DIR)
 	$(V)mkdir -p $(SD_FOLDER)
 	$(V)mkdir -p $(SD_FOLDER)/bios
 	$(V)mkdir -p $(HOMEBREWS_FOLDER)
+	$(V)mkdir -p $(CORES_DIR)
 	$(V)mkdir -p $(FONTS_DIR)
 	$(V)mkdir -p $(LANG_DIR)
 	$(V)mkdir -p $(RELEASE_FOLDER)
@@ -1187,12 +1193,63 @@ endif
 	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank$(INTFLASH_BANK).bin
 	@$(MAKE) --no-print-directory $(UNICODE_FONT_BINS)
 	@$(MAKE) --no-print-directory $(LANG_BINS)
+	@$(MAKE) --no-print-directory stage_dropins
 	@touch $@
+
+# Staging for decoupled cores and homebrew.
+#
+# Cores and homebrew are separate projects now; this repo builds none of them and
+# create_sd_data has nothing to put in sd_content/{cores,homebrews}. Without a
+# supported way to place a .bin there, the only way to test a flash build with
+# real content was to copy files in by hand, which tests media no user will ever
+# have. These variables are that supported way.
+#
+#   make ... HOMEBREW_BINS="path/to/Snake.bin path/to/OpenLara.bin"
+#   make ... CORE_BINS="path/to/wsv.bin"
+#
+# Whatever is listed is copied into sd_content/homebrews/ and sd_content/cores/
+# before the filesystem images are generated, so it reaches FrogFS on SD_CARD=0
+# and the SD content tree on SD_CARD=1 by exactly the same path a release does.
+# Both default to empty, which leaves the directories present but empty -- the
+# normal state for a firmware-only build.
+HOMEBREW_BINS ?=
+CORE_BINS ?=
+
+stage_dropins: | create_sd_folders
+ifneq ($(strip $(HOMEBREW_BINS)),)
+	$(V)for f in $(HOMEBREW_BINS); do \
+		[ -f "$$f" ] || { echo "HOMEBREW_BINS: no such file: $$f" >&2; exit 1; }; \
+		echo "[ STAGE ] homebrews/$$(basename $$f)"; \
+		cp -f "$$f" $(HOMEBREWS_FOLDER)/; \
+	done
+endif
+ifneq ($(strip $(CORE_BINS)),)
+	$(V)for f in $(CORE_BINS); do \
+		[ -f "$$f" ] || { echo "CORE_BINS: no such file: $$f" >&2; exit 1; }; \
+		echo "[ STAGE ] cores/$$(basename $$f)"; \
+		cp -f "$$f" $(CORES_DIR)/; \
+	done
+endif
+.PHONY: stage_dropins
+
+# gen_frogfs_image.py defaults to bios/covers/fonts/roms. The firmware also reads
+# /homebrews and /cores out of FrogFS (is_frogfs_path, Core/Src/syscalls.c), so
+# they have to be named explicitly or a flash build lists content it cannot open.
+FROGFS_INCLUDE_FLAGS := --include bios --include covers --include fonts --include roms \
+	--include homebrews --include cores
 
 # SD_CARD=0: pico8.ro is packed in FrogFS (post-patched for XiP); do not duplicate from GNW ZIP on LittleFS.
 FROGFS_PICO8_FLAGS := $(if $(filter 0,$(SD_CARD)),\
 	--bundle-pico8-ro-in-frogfs --extflash-base 0x90000000 --extflash-offset $(EXTFLASH_OFFSET),)
 LITTLEFS_OMIT_PICO8_RO := $(if $(filter 0,$(SD_CARD)),--omit-pico8-ro-from-gnw-zip,)
+
+# gen_littlefs_image.py defaults to packing only "cores". On SD_CARD=0 the
+# firmware reads /cores from FrogFS instead, which left LittleFS with no input
+# directory at all -- "No LittleFS input directories found", a hard build failure
+# for build/littlefs.bin on this branch. LittleFS carries the content the
+# firmware does NOT route to FrogFS: /lang (see is_frogfs_path, which lists
+# fonts but not lang) plus the writable trees created at runtime.
+LITTLEFS_INCLUDE_FLAGS := $(if $(filter 0,$(SD_CARD)),--include lang,--include cores)
 
 # SD_CARD=0: optional FrogFS ROM LZMA pack (scripts/rom_frogfs_lzma.py); align with COMPRESS=lzma.
 FROGFS_ROM_LZMA_FLAGS := $(if $(filter 0,$(SD_CARD)),$(if $(filter-out 0,$(COMPRESS)),--rom-compression $(COMPRESS),),)
@@ -1207,6 +1264,7 @@ $(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py scripts/rom_frogfs_l
 		--output $@ \
 		--build-dir $(FROGFS_BUILD_DIR) \
 		--reserve-size $(EXTFLASH_TOTAL_LENGTH) \
+		$(FROGFS_INCLUDE_FLAGS) \
 		$(FROGFS_PICO8_FLAGS) \
 		$(FROGFS_ROM_LZMA_FLAGS) \
 		$(FROGFS_COVERS_FLAGS)
@@ -1222,6 +1280,7 @@ $(LITTLEFS_IMAGE): create_sd_data scripts/gen_littlefs_image.py scripts/sd_cores
 		--size $(FILESYSTEM_SIZE) \
 		--block-size $(LITTLEFS_BLOCK_SIZE) \
 		--nes-mapper-bins-dir $(MAPPERS_BUILD_DIR) \
+		$(LITTLEFS_INCLUDE_FLAGS) \
 		$(LITTLEFS_OMIT_PICO8_RO)
 
 littlefs_image: $(LITTLEFS_IMAGE)
@@ -1596,6 +1655,11 @@ help:
 	@echo "                        With SD_CARD=0, covers are generated from roms/ and packed into FrogFS."
 	@echo "                        With SD_CARD=1, place covers on the SD card yourself (build does not generate them)."
 	@echo "  JPG_QUALITY         - Set convert cover art image jpg quality (default = 90); SD_CARD=0 only"
+	@echo "  HOMEBREW_BINS       - Space-separated .bin files to stage into sd_content/homebrews/."
+	@echo "                        Cores and homebrew are separate projects; this is how an externally"
+	@echo "                        built one reaches FrogFS (SD_CARD=0) or the SD tree (SD_CARD=1)."
+	@echo "                        e.g. HOMEBREW_BINS=\"../snake/Snake.bin ../doom/Doom.bin\""
+	@echo "  CORE_BINS           - Same, for .bin core packages staged into sd_content/cores/."
 	@echo "  ENABLE_SCREENSHOT   - Set to 1 to enable screenshot support (default enabled)"
 	@echo "  GNW_TARGET          - Game & Watch target, Valid values {mario,zelda} (default=mario)"makefile.
 	@echo "  GAME_GENIE          - Set to 1 to enable game genie support (deprecated, use CHEAT_CODES instead)"
