@@ -440,25 +440,38 @@ static bool path_has_prefix_dir(const char *path, const char *dir)
  *
  * "homebrews" was missing, which is the bug above.
  *
- * "cores" is deliberately NOT here. Cores live in LittleFS on flash builds
- * (gen_littlefs_image.py's DEFAULT_DIRS is ("cores",)); pico8.ro is the single
- * exception, moved into FrogFS because it is executed in place -- see
- * Makefile.common's --bundle-pico8-ro-in-frogfs paired with
- * --omit-pico8-ro-from-gnw-zip. Routing the whole "cores" prefix here inverts
- * that split and makes every other /cores/*.bin unopenable.
+ * "cores" is deliberately NOT a prefix here. A core's .bin is read into RAM and
+ * lives in LittleFS; only its mapped sidecars come from FrogFS, which
+ * is_mapped_core_sidecar() picks out by extension. Routing the whole prefix
+ * would make every /cores/*.bin unopenable.
  *
  * FrogFS is read-only, so anything listed here can only be installed by the
  * builder, never at runtime. That already matches the firmware: nothing writes
  * under these paths, and the file manager's delete entry is #if'd out for
  * SD_CARD=0 with the comment "Can't delete file on FrogFS". Saves and settings
  * live under /data, which stays on LittleFS and stays writable. */
-static bool is_cores_pico8_ro_frogfs_path(const char *path)
+/* A mapped (XiP) sidecar under /cores: executed or dereferenced in place out of
+ * the memory-mapped FrogFS image, rather than read into RAM like its sibling
+ * .bin. So one /cores directory spans both filesystems on a flash build -- the
+ * .bin from LittleFS, the sidecar from FrogFS.
+ *
+ * Selected by extension rather than by name. This used to be a strcmp against
+ * "cores/pico8.ro", which meant every new core shipping mapped data needed a
+ * firmware change; gba.xip would have been the second. .ro and .xip are the two
+ * extensions projects use for this (see "mapped"/"relocBase" in a project's
+ * distribution manifest). */
+static bool is_mapped_core_sidecar(const char *path)
 {
     if (!path)
         return false;
     if (path[0] == '/')
         path++;
-    return strcmp(path, "cores/pico8.ro") == 0;
+    if (!path_has_prefix_dir(path, "cores"))
+        return false;
+    const char *dot = strrchr(path, '.');
+    if (!dot)
+        return false;
+    return strcmp(dot, ".ro") == 0 || strcmp(dot, ".xip") == 0;
 }
 
 static bool is_frogfs_path(const char *path)
@@ -469,7 +482,7 @@ static bool is_frogfs_path(const char *path)
            path_has_prefix_dir(path, "fonts") ||
            path_has_prefix_dir(path, "font") ||
            path_has_prefix_dir(path, "homebrews") ||
-           is_cores_pico8_ro_frogfs_path(path);
+           is_mapped_core_sidecar(path);
 }
 
 static const char *normalize_frogfs_path(const char *name, char *buffer, size_t buffer_size)
