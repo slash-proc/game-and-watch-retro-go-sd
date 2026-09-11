@@ -1477,6 +1477,9 @@ define GWEMU_WRITE_BUILDINFO
 	echo "CHEAT_CODES               = $(CHEAT_CODES)"; \
 	echo "SHARED_HIBERNATE_SAVESTATE= $(SHARED_HIBERNATE_SAVESTATE)"; \
 	echo "DISABLE_SPLASH_SCREEN     = $(DISABLE_SPLASH_SCREEN)"; \
+	echo "HOMEBREW_BINS             = $(HOMEBREW_BINS)"; \
+	echo "CORE_BINS                 = $(CORE_BINS)"; \
+	echo "MAPPED_BINS               = $(MAPPED_BINS)"; \
 	echo "intflash.bin md5          = $$($(MD5SUM) $(BUILD_DIR)/$(TARGET)_intflash.bin 2>/dev/null | cut -d' ' -f1)"; \
 	for f in qemu_bank1.bin qemu_bank2.bin extflash.bin sdcard.img; do \
 		[ -f $(BUILD_DIR)/$$f ] && echo "$$f md5 = $$($(MD5SUM) $(BUILD_DIR)/$$f | cut -d' ' -f1)"; \
