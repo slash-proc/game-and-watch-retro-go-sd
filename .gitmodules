@@ -1,6 +1,6 @@
 [submodule "Core/Src/porting/lib/FatFs"]
 	path = Core/Src/porting/lib/FatFs
-	url = https://github.com/sylverb/FatFs.git
+	url = https://github.com/slash-proc/FatFs.git
 [submodule "external/firmware_update"]
 	path = external/firmware_update
 	url = https://github.com/sylverb/firmware_update
