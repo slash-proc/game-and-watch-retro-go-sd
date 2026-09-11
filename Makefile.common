@@ -1215,6 +1215,24 @@ endif
 HOMEBREW_BINS ?=
 CORE_BINS ?=
 
+# Mapped (XiP) sidecars: "<file>:<relocBase>", space-separated, repeatable.
+#
+#   make ... MAPPED_BINS="../gba-retro-go-sd/gba.xip:0xDEC00000"
+#
+# These do NOT go through stage_dropins, because they must not land in
+# sd_content/cores -- that tree becomes the LittleFS image, and a mapped blob
+# has to be contiguous and uncompressed in FrogFS instead. They are handed
+# straight to gen_frogfs_image.py, which stores them uncompressed under /cores
+# and relocates their sentinels to wherever the assembled image put them.
+# relocBase is the address the blob was linked at, published as "relocBase" in
+# the project's distribution manifest (gba.xip: 0xDEC00000, pico8.ro: 0xBEEF0000).
+#
+# On SD there is no split: the sidecar sits beside its .bin on the card and the
+# core relocates it itself while caching it into QSPI (flash_relocate_cb_t).
+MAPPED_BINS ?=
+FROGFS_MAPPED_FLAGS := $(foreach m,$(MAPPED_BINS),\
+	--mapped-artifact $(firstword $(subst :, ,$(m))):$(notdir $(firstword $(subst :, ,$(m)))):$(lastword $(subst :, ,$(m))))
+
 stage_dropins: | create_sd_folders
 ifneq ($(strip $(HOMEBREW_BINS)),)
 	$(V)for f in $(HOMEBREW_BINS); do \
@@ -1269,6 +1287,7 @@ $(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py scripts/rom_frogfs_l
 		--build-dir $(FROGFS_BUILD_DIR) \
 		--reserve-size $(EXTFLASH_TOTAL_LENGTH) \
 		$(FROGFS_INCLUDE_FLAGS) \
+		$(FROGFS_MAPPED_FLAGS) \
 		$(FROGFS_PICO8_FLAGS) \
 		$(FROGFS_ROM_LZMA_FLAGS) \
 		$(FROGFS_COVERS_FLAGS)
