@@ -242,7 +242,7 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
     if (!fs)
         return false;
 
-    const frogfs_entry_t *dir_entry = frogfs_get_entry(fs, path);
+    const frogfs_entry_t *dir_entry = rg_frogfs_lookup(path);
     if (!dir_entry || !frogfs_is_dir(dir_entry))
         return false;
 
@@ -264,23 +264,18 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
     {
         wdog_refresh();
 
-        char *name = frogfs_get_name(entry);
-        if (!name)
+        char name[RG_FROGFS_NAME_MAX];
+        if (!rg_frogfs_entry_name(entry, name, sizeof(name)))
             continue;
 
         if (name[0] == '.' && (!name[1] || name[1] == '.'))
-        {
-            free(name);
             continue;
-        }
 
         int written;
         if (strcmp(path, "/") == 0)
             written = snprintf(result->path, sizeof(result->path), "/%s", name);
         else
             written = snprintf(result->path, sizeof(result->path), "%s/%s", path, name);
-
-        free(name);
 
         if (written < 0 || (size_t)written >= sizeof(result->path))
         {
@@ -508,7 +503,7 @@ bool rg_storage_get_adjacent_files(const char *path, char *prev_path, char *next
     if (!fs)
         return false;
 
-    const frogfs_entry_t *dir_entry = frogfs_get_entry(fs, dir);
+    const frogfs_entry_t *dir_entry = rg_frogfs_lookup(dir);
     if (!dir_entry || !frogfs_is_dir(dir_entry))
         return false;
 
@@ -523,14 +518,12 @@ bool rg_storage_get_adjacent_files(const char *path, char *prev_path, char *next
         if (!frogfs_is_file(entry))
             continue;
 
-        char *name = frogfs_get_name(entry);
-        if (!name)
+        char name[RG_FROGFS_NAME_MAX];
+        if (!rg_frogfs_entry_name(entry, name, sizeof(name)))
             continue;
 
-        if (name[0] == '.') {
-            free(name);
+        if (name[0] == '.')
             continue;
-        }
 
         const char *file_ext = rg_extension(name);
         if (file_ext && strcasecmp(file_ext, ext) == 0) {
@@ -548,8 +541,6 @@ bool rg_storage_get_adjacent_files(const char *path, char *prev_path, char *next
                 }
             }
         }
-
-        free(name);
     }
 
     frogfs_closedir(dir_obj);
