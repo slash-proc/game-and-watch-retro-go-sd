@@ -529,7 +529,7 @@ int _open(const char *name, int flags, int mode)
             return -1;
         }
 
-        const frogfs_entry_t *entry = frogfs_get_entry(fs, frogfs_name);
+        const frogfs_entry_t *entry = rg_frogfs_lookup(frogfs_name);
         if (!entry || !frogfs_is_file(entry)) {
             errno = ENOENT;
             return -1;
@@ -727,7 +727,7 @@ int stat(const char *path, struct stat *st)
             return -1;
         }
 
-        const frogfs_entry_t *entry = frogfs_get_entry(fs, frogfs_path);
+        const frogfs_entry_t *entry = rg_frogfs_lookup(frogfs_path);
         if (!entry) {
             errno = ENOENT;
             return -1;
