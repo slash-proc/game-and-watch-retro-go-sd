@@ -2048,6 +2048,7 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
     systems = NULL;
     // some pointers were freed, set them to null
     rg_reset_logo_buffers();
+    gui_reset_list_buffers();
 
     // Refresh watchdog here in case previous actions did not refresh it
     wdog_refresh();
@@ -2082,6 +2083,7 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
 #if SD_CARD == 1
     // some pointers were freed, set them to null
     rg_reset_logo_buffers();
+    gui_reset_list_buffers();
 #endif
 }
 
