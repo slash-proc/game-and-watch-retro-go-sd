@@ -29,10 +29,10 @@ Each project slug links to its repository. CI derives the project's
 | [`lynx`](https://github.com/slash-proc/lynx-retro-go-sd) | Handy | Atari Lynx |
 | [`a2600`](https://github.com/slash-proc/stella2014-retro-go-sd) | Stella 2014 | Atari 2600 |
 | [`a7800`](https://github.com/slash-proc/prosystem-retro-go-sd) | ProSystem | Atari 7800 |
+| [`videopac`](https://github.com/slash-proc/o2em-retro-go-sd) | O2EM | Videopac, Magnavox Odyssey² |
 | [`wsv`](https://github.com/slash-proc/potator-retro-go-sd) | Potator | Watara Supervision |
 | [`amstrad`](https://github.com/slash-proc/caprice32-retro-go-sd) | Caprice32 | Amstrad CPC |
 | [`pkmini`](https://github.com/slash-proc/PokeMini-retro-go-sd) | PokeMini | Pokémon Mini |
-| [`tama`](https://github.com/slash-proc/tama-retro-go-sd) | TamaLIB | Tamagotchi |
 | [`gw`](https://github.com/slash-proc/LCD-Game-Emulator-retro-go-sd) | LCD Game Emulator | Game & Watch |
 | [`doom`](https://github.com/slash-proc/doom-retro-go-sd) | Doom | Doom I & II |
 
@@ -42,12 +42,16 @@ Each project slug links to its repository. CI derives the project's
 |---|---|---|
 | [`zelda3`](https://github.com/slash-proc/zelda3-retro-go-sd) | The Legend of Zelda: A Link to the Past | snes |
 | [`ccleste`](https://github.com/slash-proc/ccleste-retro-go-sd) | Celeste Classic | pico8 |
+| [`tama`](https://github.com/slash-proc/tama-retro-go-sd) | Tamagotchi P1 | tamagotchi |
+| [`openlara`](https://github.com/slash-proc/openlara-retro-go-sd) | Tomb Raider | dos |
 | [`music`](https://github.com/slash-proc/music-retro-go-sd) | Music | — |
 | [`snake`](https://github.com/slash-proc/snake-retro-go-sd) | Snake | — |
 | [`pong`](https://github.com/slash-proc/pong-retro-go-sd) | Pong | — |
+| [`cupcake`](https://github.com/slash-proc/cupcake-crisis-retro-go-sd) | Cupcake Crisis | — |
+| [`durak`](https://github.com/slash-proc/durak-retro-go-sd) | Duren | — |
+| [`smw`](https://github.com/slash-proc/smw-retro-go-sd) | Super Mario World | snes |
+| [`minesweeper`](https://github.com/slash-proc/mine-sweeper-retro-go-sd) | Mine Sweeper | — |
 
 ## Not listed
 
 - `pico8` — the PICO-8 core has no standalone project repository yet.
-- `smw` and `minesweeper` publish under the spec but are not part of this
-  working set; add them here once their origins are settled.
