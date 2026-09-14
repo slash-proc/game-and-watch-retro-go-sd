@@ -190,11 +190,14 @@ void lcd_init(SPI_HandleTypeDef *spi, LTDC_HandleTypeDef *ltdc, lcd_init_flags_t
 }
 
 void HAL_LTDC_ReloadEventCallback (LTDC_HandleTypeDef *hltdc) {
-  /* Address is already in the shadow CFBAR from lcd_swap()'s NoReload
-   * SetAddress — this interrupt means that shadow just became live, at
-   * the start of vblank. Applying CLUT here (not during active scan)
-   * keeps palette updates off the visible raster. */
-  (void)hltdc;
+  /* Same present path as main: after lcd_swap()'s VBR, point LTDC at the
+   * buffer that is *not* the current write target. CLUT flush stays here
+   * so palette updates land at vblank (LUT8), not mid-scan. */
+  if (active_framebuffer == 0) {
+    HAL_LTDC_SetAddress(hltdc, (uint32_t) fb2, 0);
+  } else {
+    HAL_LTDC_SetAddress(hltdc, (uint32_t) fb1, 0);
+  }
   if (clut_hw_dirty)
     clut_hw_flush();
 }
@@ -238,17 +241,10 @@ uint32_t lcd_get_pixel_position()
 
 void lcd_swap(void)
 {
-  /* Program the just-drawn buffer into the shadow CFBAR, then reload at
-   * vblank. HAL_LTDC_SetAddress() would SRCR-IMR from the reload ISR a
-   * few lines into the next frame (horizontal bar at the top of the
-   * panel). NoReload + VBR applies at the actual start of blanking.
-   *
-   * Flip active_framebuffer immediately so the next draw targets the
-   * other buffer, but that buffer is still scanned by LTDC until VBR
-   * clears — lcd_get_active_buffer() waits out the pending reload so
-   * callers never paint into the live front buffer. Emulation can still
-   * run between swap and the next get_active (async swap preserved). */
-  HAL_LTDC_SetAddress_NoReload(&hltdc, (uint32_t)lcd_get_active_buffer(), 0);
+  /* Main-branch present: arm VBR, then flip the CPU write index. The
+   * reload ISR programs CFBAR to the non-write buffer. Do not SetAddress
+   * here — that was the NoReload rewrite which made the new write buffer
+   * still be the live front buffer until VBR (green tear flashes). */
   HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING);
   active_framebuffer = active_framebuffer ? 0 : 1;
 }
@@ -368,10 +364,10 @@ void lcd_setup_framebuffers(lcd_mode_t mode)
   current_lcd_mode = mode;
   active_framebuffer = 0;
 
-  /* Display the empty back buffer so the first present can fill framebuffer1
-   * without tearing. lcd_swap() will point LTDC at the just-drawn buffer. */
+  /* Match main: display fb1 while active_framebuffer==0 writes fb1.
+   * lcd_swap() + ReloadEventCallback then point LTDC at the non-write buffer. */
   HAL_LTDC_SetPixelFormat(&hltdc, pixel_format, 0);
-  HAL_LTDC_SetAddress_NoReload(&hltdc, (uint32_t)framebuffer2, 0);
+  HAL_LTDC_SetAddress(&hltdc, (uint32_t)fb1, 0);
   if (mode == LCD_MODE_LUT8) {
     /* Theme colours were stored while the launcher was still RGB565 —
      * stamp them into the live CLUT now so the first core frame can
