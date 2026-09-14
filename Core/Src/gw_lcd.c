@@ -190,14 +190,11 @@ void lcd_init(SPI_HandleTypeDef *spi, LTDC_HandleTypeDef *ltdc, lcd_init_flags_t
 }
 
 void HAL_LTDC_ReloadEventCallback (LTDC_HandleTypeDef *hltdc) {
-  /* Same present path as main: after lcd_swap()'s VBR, point LTDC at the
-   * buffer that is *not* the current write target. CLUT flush stays here
-   * so palette updates land at vblank (LUT8), not mid-scan. */
-  if (active_framebuffer == 0) {
-    HAL_LTDC_SetAddress(hltdc, (uint32_t) fb2, 0);
-  } else {
-    HAL_LTDC_SetAddress(hltdc, (uint32_t) fb1, 0);
-  }
+  /* Address is already in the shadow CFBAR from lcd_swap()'s NoReload
+   * SetAddress — this interrupt means that shadow just became live, at
+   * the start of vblank. Applying CLUT here (not during active scan)
+   * keeps palette updates off the visible raster. */
+  (void)hltdc;
   if (clut_hw_dirty)
     clut_hw_flush();
 }
@@ -241,10 +238,48 @@ uint32_t lcd_get_pixel_position()
 
 void lcd_swap(void)
 {
-  /* Main-branch present: arm VBR, then flip the CPU write index. The
-   * reload ISR programs CFBAR to the non-write buffer. Do not SetAddress
-   * here — that was the NoReload rewrite which made the new write buffer
-   * still be the live front buffer until VBR (green tear flashes). */
+  /* Program the just-drawn buffer into the shadow CFBAR, then reload at
+   * vblank. An IMR reload here would apply a few lines into the next
+   * frame (horizontal bar at the top of the panel); VBR applies at the
+   * actual start of blanking.
+   *
+   * Flip active_framebuffer immediately so the next draw targets the
+   * other buffer, but that buffer is still scanned by LTDC until VBR
+   * clears — lcd_get_active_buffer() waits out the pending reload so
+   * callers never paint into the live front buffer. Emulation can still
+   * run between swap and the next get_active (async swap preserved).
+   *
+   * Write CFBAR directly rather than through HAL_LTDC_SetAddress_NoReload().
+   * That call routes into LTDC_SetConfig(), which reprograms ELEVEN layer
+   * registers although only the address changed -- and two of them are
+   * read-modify-writes that pass through ZERO:
+   *
+   *   stm32h7xx_hal_ltdc.c:2138   WHPCR &= ~(WHSTPOS | WHSPPOS);
+   *   stm32h7xx_hal_ltdc.c:2144   WVPCR &= ~(WVSTPOS | WVSPPOS);
+   *
+   * Those masks cover every non-reserved bit, so each register is briefly
+   * 0 -- a zero-width or zero-height window. If the LTDC latches its
+   * shadow registers inside one of those gaps (the VBR armed by the
+   * PREVIOUS swap), that frame scans out with a layer that supplies no
+   * pixels and the panel shows the layer default colour, which main.c
+   * sets to pure green. One frame, any core, load-independent.
+   *
+   * 1.x never hit it: its lcd_swap() only set SRCR and the address change
+   * happened inside the reload ISR, with no reload pending.
+   *
+   * Measured on device: holding WVPCR at zero for 262,144 cycles per swap
+   * gave 19, 28 and 46 latches per 600 frames with visible flashing, and
+   * zero once the reload could no longer be pending -- three paired runs.
+   * CFBAR is a plain write with no intermediate state, so the gap is gone
+   * rather than narrowed. It also stops LTDC_SetConfig() rewriting DCCR,
+   * WHPCR, PFCR and the rest on every single frame.
+   *
+   * Keep hltdc.LayerCfg[0] in step: any later HAL layer call (e.g.
+   * HAL_LTDC_SetPixelFormat in lcd_set_buffers) re-runs LTDC_SetConfig
+   * from that struct and would otherwise restore a stale address. */
+  uint32_t fb = (uint32_t)lcd_get_active_buffer();
+  hltdc.LayerCfg[0].FBStartAdress = fb;
+  LTDC_Layer1->CFBAR = fb;
   HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING);
   active_framebuffer = active_framebuffer ? 0 : 1;
 }
@@ -364,10 +399,10 @@ void lcd_setup_framebuffers(lcd_mode_t mode)
   current_lcd_mode = mode;
   active_framebuffer = 0;
 
-  /* Match main: display fb1 while active_framebuffer==0 writes fb1.
-   * lcd_swap() + ReloadEventCallback then point LTDC at the non-write buffer. */
+  /* Display the empty back buffer so the first present can fill framebuffer1
+   * without tearing. lcd_swap() will point LTDC at the just-drawn buffer. */
   HAL_LTDC_SetPixelFormat(&hltdc, pixel_format, 0);
-  HAL_LTDC_SetAddress(&hltdc, (uint32_t)fb1, 0);
+  HAL_LTDC_SetAddress_NoReload(&hltdc, (uint32_t)framebuffer2, 0);
   if (mode == LCD_MODE_LUT8) {
     /* Theme colours were stored while the launcher was still RGB565 —
      * stamp them into the live CLUT now so the first core frame can
