@@ -653,8 +653,16 @@ void lcd_convert_lut8_to_rgb565(const uint8_t *src, uint16_t *dst, size_t count,
 
 void lcd_set_clut(const uint32_t *clut, uint16_t count)
 {
+  uint8_t saved_depth;
+
   if (current_lcd_mode != LCD_MODE_LUT8 || clut == NULL || count == 0) return;
   if (count > LCD_CLUT_HW_MAX) count = LCD_CLUT_HW_MAX;
+
+  /* Preserve an open pause/HUD nest across the cart upload. Without this,
+   * a mid-menu lcd_set_clut(256) (e.g. NES palette change) zeroes depth,
+   * leaves chrome indices [64..] pointing at cart colours, and the menu
+   * goes white / wrong until the dialog is closed. */
+  saved_depth = overlay_clut_depth;
 
   for (uint16_t i = 0; i < count; i++)
     active_clut[i] = clut[i];
@@ -674,11 +682,13 @@ void lcd_set_clut(const uint32_t *clut, uint16_t count)
   /* Cache cart colours under the overlay window for begin()/end(). */
   clut_cache_cart_under_overlay();
 
-  /* Re-stamp overlay only when it sits past cart/twins (pico-8). Full
-   * 256-colour carts own every slot — permanent stamp corrupted PLAYPAL
-   * indices 64..; pause/HUD use lcd_overlay_clut_begin() instead. */
-  if (overlay_clut_count > 0 && !overlay_collides_with_cart())
+  /* Re-stamp overlay when it sits past cart/twins (pico-8), or when a
+   * dialog/HUD nest is still open over a full 256-colour cart. */
+  if (overlay_clut_count > 0 &&
+      (!overlay_collides_with_cart() || saved_depth > 0)) {
+    overlay_clut_depth = saved_depth;
     clut_apply_saved_overlay();
+  }
 
   clut_rebuild_darken_map();
   clut_push();
