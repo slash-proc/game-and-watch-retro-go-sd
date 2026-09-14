@@ -35,6 +35,11 @@ const char *i18n_lang_display_name(int idx);
  * cores via gw_firmware_abi_t.i18n_lang_code / gw_i18n(). */
 const char *i18n_lang_code(void);
 
+/* Reserve the AHB font-cache buffers if not already allocated.
+ * Call before launching a core/homebrew so resume-without-UI and
+ * launcher paths leave the same AHB footprint for the shared heap. */
+bool rg_i18n_ensure_font_cache(void);
+
 int i18n_get_text_height();
 
 int  i18n_get_text_width(const char *text);

@@ -1919,7 +1919,8 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
     }
     const char *dyn_core_path = dyn_core_path_buf[0] ? dyn_core_path_buf : NULL;
 
-    /* Per-core / per-homebrew settings: /data/<stem>.cfg before AHB wipe. */
+    /* Per-core / per-homebrew settings: /data/<stem>.cfg before DTCM/RAM_EMU
+     * pool rewind (AHB newlib heap is kept across core load). */
     {
         char stem[64];
         stem[0] = '\0';
@@ -1974,6 +1975,11 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
 
     // Refresh watchdog here in case previous actions did not refresh it
     wdog_refresh();
+
+    /* Pin firmware AHB font buffers before the core/homebrew runs so the
+     * shared newlib heap footprint does not depend on whether the launcher
+     * UI already drew text (resume-from-STANDBY skips that path). */
+    rg_i18n_ensure_font_cache();
 
     if (dyn_core_path) {
       run_dynamic_core(dyn_core_path, load_state, start_paused, save_slot);

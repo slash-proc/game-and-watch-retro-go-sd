@@ -215,21 +215,41 @@ static void invalidate_overlapping_entries(uint8_t *start_ptr, uint16_t length) 
     }
 }
 
-void init_font_cache() {
+void init_font_cache(void) {
+    if (font_cache == NULL || font_data_cache == NULL)
+        return;
     memset(font_cache, 0, CACHE_SIZE * sizeof(FontEntry));
     memset(font_data_cache, 0, FONT_CACHE_SIZE * sizeof(uint8_t));
     cache_index = 0;
     cache_data_index = 0;
 }
 
+bool rg_i18n_ensure_font_cache(void)
+{
+    if (font_cache != NULL && font_data_cache != NULL)
+        return true;
+
+    if (font_cache == NULL)
+        font_cache = (FontEntry *)ahb_malloc(CACHE_SIZE * sizeof(FontEntry));
+    if (font_data_cache == NULL)
+        font_data_cache = (uint8_t *)ahb_malloc(FONT_CACHE_SIZE * sizeof(uint8_t));
+
+    if (font_cache == NULL || font_data_cache == NULL) {
+        printf("rg_i18n: font cache AHB alloc failed (cache=%p data=%p free=%u)\n",
+               (void *)font_cache, (void *)font_data_cache,
+               (unsigned)ahb_get_free_size());
+        return false;
+    }
+
+    init_font_cache();
+    return true;
+}
+
 static FontEntry *get_font_data(uint32_t codepoint) {
     FILE *file;
 
-    if (font_cache == NULL) {
-        font_cache = (FontEntry *)ahb_malloc(CACHE_SIZE * sizeof(FontEntry));
-        font_data_cache = (uint8_t *)ahb_malloc(FONT_CACHE_SIZE * sizeof(uint8_t));
-        init_font_cache();
-    }
+    if (!rg_i18n_ensure_font_cache())
+        return &unknown_glyph_entry;
 
     for (int i = 0; i < CACHE_SIZE; i++) {
         if (font_cache[i].valid && font_cache[i].codepoint == codepoint) {
@@ -364,9 +384,11 @@ const int gui_font_count = FONT_COUNT;
 void set_font(uint8_t font_index) {
     if (font_index != curr_font) {
         curr_font = font_index;
-        memset(font_cache, 0, CACHE_SIZE * sizeof(FontEntry));
-        cache_index = 0;
-        cache_data_index = 0;
+        if (rg_i18n_ensure_font_cache()) {
+            memset(font_cache, 0, CACHE_SIZE * sizeof(FontEntry));
+            cache_index = 0;
+            cache_data_index = 0;
+        }
     }
 }
 
