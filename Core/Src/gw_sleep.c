@@ -54,6 +54,11 @@ static void SleepModeEnterAndResume(sleep_pre_wakeup_callback_t pre_wakeup_callb
 
   lcd_swap();
 
+  /* Keep the backlight dark until LTDC has scanned complete frames with the
+   * restored panel configuration and framebuffer. */
+  lcd_wait_for_vblank();
+  lcd_wait_for_vblank();
+
   // We want to keep this fade-in short because while it happens,
   // we can't do other things like restarting audio or SD...
   app_animate_lcd_brightness(0, odroid_display_get_backlight_raw(), 3);
