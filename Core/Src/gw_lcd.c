@@ -143,8 +143,8 @@ void lcd_init(SPI_HandleTypeDef *spi, LTDC_HandleTypeDef *ltdc, lcd_init_flags_t
    * the same race; only a full reboot eventually wins). */
   __HAL_LTDC_DISABLE(ltdc);
 
-  // LCD held out of reset while rails come up
-  gw_lcd_set_reset(0);
+  // Hold the active-low panel reset asserted throughout rail stabilization.
+  gw_lcd_set_reset(1);
 
   // Enable 3V3 then 1V8 with settle time (restored after 6a7f9f99 which
   // dropped these delays and made panel bring-up racy).
@@ -155,11 +155,9 @@ void lcd_init(SPI_HandleTypeDef *spi, LTDC_HandleTypeDef *ltdc, lcd_init_flags_t
   wdog_refresh();
 
   /* reset sequence */
-  gw_lcd_set_reset(0);
   HAL_Delay(1);
-  gw_lcd_set_reset(1);
-  HAL_Delay(20);
   gw_lcd_set_reset(0);
+  HAL_Delay(20);
   HAL_Delay(50);
   wdog_refresh();
 
