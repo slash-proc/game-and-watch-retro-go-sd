@@ -12,6 +12,8 @@
 #include "gittag.h"
 #include "gw_firmware_abi.h"
 #include "gnw_core_meta.h"
+#include "gw_layout_superblock.h"
+#include "gw_linker.h"
 
 /* The flash ROM cache. Keyed to the device UID and the flash write base
  * (Core/Src/gw_flash_alloc.c), so it survives a reboot but not a reflash that
@@ -31,6 +33,8 @@ static void install_fill(rg_install_file_t *out)
                                             : RG_INSTALL_STORAGE_FLASH;
     out->abi_version       = g_firmware_abi.version;
     out->abi_size          = g_firmware_abi.size;
+    out->superblock_offset = (uint32_t)((uintptr_t)&g_layout_superblock -
+                                        (uintptr_t)&__INTFLASH__);
     out->core_meta_version = GNW_CORE_META_VERSION;
 
     /* Verbatim, prefix and all — this is the string a tool compares against the
@@ -58,6 +62,7 @@ static bool install_matches(const rg_install_file_t *disk,
            disk->storage == want->storage &&
            disk->abi_version == want->abi_version &&
            disk->abi_size == want->abi_size &&
+           disk->superblock_offset == want->superblock_offset &&
            disk->core_meta_version == want->core_meta_version &&
            strncmp(disk->git_tag, want->git_tag, sizeof(disk->git_tag)) == 0;
 }

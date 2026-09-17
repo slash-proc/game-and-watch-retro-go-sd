@@ -110,6 +110,7 @@ typedef struct {
     uint8_t  reserved;
     uint32_t abi_version;
     uint32_t abi_size;
+    uint32_t superblock_offset; /* byte offset from this bank's intflash base */
     uint16_t core_meta_version;
     uint16_t reserved2;
     char     git_tag[48];
