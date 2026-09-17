@@ -53,6 +53,7 @@ typedef struct {
     uint8_t  reserved;
     uint32_t abi_version;       /* GW_FIRMWARE_ABI_VERSION */
     uint32_t abi_size;          /* sizeof(gw_firmware_abi_t) */
+    uint32_t superblock_offset; /* byte offset from this bank's intflash base */
     uint16_t core_meta_version; /* GNW_CORE_META_VERSION */
     uint16_t reserved2;
     char     git_tag[RG_INSTALL_TAG_MAX];
