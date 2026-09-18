@@ -269,9 +269,6 @@ jobs:
           prerelease: ${{ steps.pack.outputs.prerelease }}
           body_path: CHANGELOG.md
           files: |
-            _release/*.zip
-            _release/manifest.json
-            _release/projects.json
             _release/retro-go_update-bank1.bin
             _release/retro-go_update-bank2.bin
             debug-all-${{ github.ref_name }}.zip
