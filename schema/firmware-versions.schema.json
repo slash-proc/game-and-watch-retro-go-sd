@@ -45,6 +45,7 @@
         "gitTag",
         "providesAbi",
         "coreMetaVersion"
+        ,"updates"
       ],
       "additionalProperties": false,
       "properties": {
@@ -55,6 +56,15 @@
         "gitTag": { "type": "string", "minLength": 1, "maxLength": 47 },
         "providesAbi": { "$ref": "#/$defs/providesAbi" },
         "coreMetaVersion": { "type": "integer", "minimum": 1 }
+        ,"updates": {
+          "type": "object",
+          "required": ["bank1", "bank2"],
+          "additionalProperties": false,
+          "properties": {
+            "bank1": { "type": "string", "pattern": "^[^/][^:]*$" },
+            "bank2": { "type": "string", "pattern": "^[^/][^:]*$" }
+          }
+        }
       }
     }
   }

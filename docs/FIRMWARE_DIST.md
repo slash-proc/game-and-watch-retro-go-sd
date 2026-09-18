@@ -78,7 +78,11 @@ newest `retained` versions (5).
       "prerelease": false,
       "gitTag": "Retro-Go SD v1.4.1-124-g1dfd6f95b+",
       "providesAbi": { "version": 2, "size": 844 },
-      "coreMetaVersion": 3
+      "coreMetaVersion": 3,
+      "updates": {
+        "bank1": "v2.0.0/retro-go_update-bank1.bin",
+        "bank2": "v2.0.0/retro-go_update-bank2.bin"
+      }
     }
   ]
 }
