@@ -12,6 +12,7 @@
     "paths",
     "languages",
     "builds",
+    "updates",
     "builtAt"
   ],
   "additionalProperties": false,
@@ -42,6 +43,15 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/build" }
+    },
+    "updates": {
+      "type": "object",
+      "required": ["bank1", "bank2"],
+      "additionalProperties": false,
+      "properties": {
+        "bank1": { "$ref": "#/$defs/asset" },
+        "bank2": { "$ref": "#/$defs/asset" }
+      }
     },
     "builtAt": { "type": "string", "format": "date-time" },
     "projects": { "$ref": "#/$defs/asset" }
@@ -189,7 +199,6 @@
         "littlefsBlockSize",
         "buildFlags",
         "bundle",
-        "debug",
         "image",
         "content"
       ],
@@ -213,9 +222,7 @@
         "littlefsBlockSize": { "type": "integer", "minimum": 512 },
         "buildFlags": { "type": "string" },
         "bundle": { "$ref": "#/$defs/asset" },
-        "debug": { "$ref": "#/$defs/asset" },
         "image": { "$ref": "#/$defs/member" },
-        "sdUpdate": { "$ref": "#/$defs/sdUpdate" },
         "content": {
           "type": "array",
           "minItems": 1,
@@ -223,12 +230,6 @@
         }
       },
       "allOf": [
-        {
-          "description": "sdUpdate is required on SD builds and forbidden on flash builds.",
-          "if": { "properties": { "storage": { "const": "sd" } } },
-          "then": { "required": ["sdUpdate"] },
-          "else": { "not": { "required": ["sdUpdate"] } }
-        },
         {
           "description": "The build id must agree with storage and bank.",
           "if": { "properties": { "storage": { "const": "sd" } } },
