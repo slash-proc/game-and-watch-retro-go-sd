@@ -136,6 +136,7 @@ and duplicating them across five retained entries is drift with no reader.
 | `paths` | yes | Where things are installed on the device |
 | `languages` | yes | Every UI language this release offers |
 | `builds` | yes | One per storage × bank. Four today |
+| `updates` | yes | Bank-specific `retro-go_update` archives |
 | `builtAt` | yes | RFC 3339, when the release was packed |
 | `projects` | no | The curated list, published beside this manifest |
 
@@ -167,6 +168,22 @@ point is to describe what actually shipped.
 `coreMetaVersion` is the one value that is *not* recoverable from the binary —
 it exists only as a compile-time comparison — so it is read from
 `Core/Inc/retro-go/gnw_core_meta.h` at pack time.
+
+### `updates`
+
+The release-level updater assets are selected by target internal-flash bank:
+
+```json
+"updates": {
+  "bank1": { "bytes": 11000000, "sha256": "…", "url": "retro-go_update-bank1.bin" },
+  "bank2": { "bytes": 11000000, "sha256": "…", "url": "retro-go_update-bank2.bin" }
+}
+```
+
+Each archive contains the transient updater and a complete SD-card update tar.
+Retro-Go 2.0+ selects the matching filename at runtime. Older installations
+require renaming the selected file to `retro-go_update.bin` before copying it to
+the SD-card root.
 
 ### `paths`
 
@@ -212,12 +229,8 @@ build.
   "littlefsBlockSize": 4096,
   "buildFlags": "SD_CARD=1 … INTFLASH_BANK=2",
 
-  "bundle": { "bytes": 490467, "sha256": "af09decc…", "url": "retro-go-sd-v2.0.0-sd-bank2.zip" },
-  "debug":  { "bytes": 1509147, "sha256": "b9390080…", "url": "retro-go-sd-v2.0.0-sd-bank2-debug.zip" },
-
-  "image":    { "bytes": 239364, "sha256": "95bc847a…", "path": "gw_retro_go_intflash.bin" },
-  "sdUpdate": { "bytes": 239364, "sha256": "95bc847a…", "path": "gw_retro_go_intflash.bin",
-                "filename": "update_bank2.bin" },
+  "bundle": { "bytes": 2000000, "sha256": "af09decc…", "url": "retro-go-sd-v2.0.0-sd-bank2.zip" },
+  "image": { "bytes": 239364, "sha256": "95bc847a…", "path": "firmware/retro-go-intflash.bin" },
 
   "content": [
     { "path": "lang/fr_fr.bin", "install": "lang/fr_fr.bin", "language": "fr_fr",
@@ -235,9 +248,8 @@ build.
 | `littlefsBlockSize` | yes | Compile-time; the host must match it when building a filesystem image |
 | `buildFlags` | yes | The literal make command line. Provenance — do not parse it |
 | `bundle` | yes | The install zip |
-| `debug` | yes | The ELF zip. Never installed |
+| `debug` | — | Debug ELF is inside `bundle` at `debug/retro-go-debug.elf` |
 | `image` | yes | The intflash image, inside `bundle` |
-| `sdUpdate` | SD only | The image under the name the on-device updater looks for |
 | `content` | yes | Everything else that lands on the device |
 
 `bank` is the intflash link address — `1` is `0x08000000`, `2` is `0x08100000`.
@@ -264,30 +276,16 @@ Three different things, and mixing them up is the easiest mistake to make:
 | `path` | An entry **inside that build's `bundle` zip**. Read it out of the archive |
 | `install` | Where the file goes **on the device**, relative to the storage root |
 
-Only `bundle`, `debug` and the top-level `projects` use `url`. Everything else
+Only `bundle`, top-level `updates`, and top-level `projects` use `url`. Everything else
 lives inside a bundle and uses `path`. Only `content[]` has `install`.
 
 `install` is currently always equal to `path`, but they are separate fields
 because they answer separate questions, and an installer must use `install` to
 decide where a file lands.
 
-### `sdUpdate`, and the one load-bearing filename
-
-`sdUpdate` appears only on SD builds. A flash install has no card to write it
-to, and the schema rejects it there.
-
-`filename` is the exact name the on-device updater looks for —
-`update_bank1.bin` or `update_bank2.bin`, matched literally in
-`external/firmware_update/Core/Src/firmware_update.c:20,24`. This is the only
-place in the format where a filename is load-bearing rather than cosmetic;
-everywhere else the device finds files by directory and extension.
-
-`sdUpdate.path` may point at the **same zip entry as `image`**, and normally
-does: the build copies the intflash image to `update_bank<n>.bin`, so the two
-are the same bytes and the zip stores them once. When `path` matches
-`image.path`, extract that entry and write it under `sdUpdate.filename`. If the
-two ever diverge the zip carries both and `path` differs; handle it by reading
-`path`, not by assuming either case.
+The updater archive filenames are release-level assets, not build-level content.
+The internal tar still contains `update_bank1.bin` or `update_bank2.bin`, which
+the transient updater flashes into the corresponding bank.
 
 ## Choosing a build
 
@@ -316,7 +314,7 @@ Refuse rather than guess when:
 In order:
 
 1. **Fetch and verify.** Check `bundle.sha256` before opening the archive, then
-   every `image`, `sdUpdate` and `content[]` entry's `sha256` after extracting.
+   every `image` and `content[]` entry's `sha256` after extracting.
    Hashes are lowercase hex, over the raw file bytes.
 
 2. **Patch the layout superblock** in the intflash image with host-resolved
@@ -516,8 +514,8 @@ scripts/flasher/validate_release_json.py docs/examples
 Checks all three files against `schema/firmware-*.schema.json` (JSON Schema
 draft 2020-12), plus the cross-field rules a schema cannot express: build ids
 unique, `languages[]` agreeing with what the builds ship, no two files
-installing to the same path, `sdUpdate` sharing the image's zip entry only when
-it is the same bytes, and `versions.json` agreeing with the manifest.
+installing to the same path, updater assets agreeing between `manifest.json`
+and `versions.json`, and `versions.json` agreeing with the manifest.
 
 The schemas set `additionalProperties: false` throughout, so a field that was
 deliberately dropped cannot quietly return.

@@ -54,9 +54,10 @@ retro-go_update-bank2.bin                          SD updater for bank 2
 
 Each build zip is self-contained — its intflash image, debug ELF, `lang/` blobs and a
 copy of `fonts/` and `bios/logo.bin` (84 KB duplicated four times, not worth
-deduplicating). The image itself *is* deduplicated: `create_sd_data` copies it to
-`update_bank<n>.bin`, so the two are the same bytes and the zip stores one entry
-that `sdUpdate` points at — a third of the bundle, saved for free.
+deduplicating). The SD updater archives are assembled separately from the
+corresponding SD build content. Their internal tar contains `update_bank1.bin`
+or `update_bank2.bin`; the outer bank-specific filename is what Retro-Go 2.0
+uses to select the update safely.
 
 The ELFs are split out. They are ~1.5 MB now that no core links into the
 firmware, but an unstripped ELF was 25.9 MB before decoupling and nothing stops
@@ -95,8 +96,9 @@ opaque `buildFlags` string that nothing parses.
 
 Likewise dropped: `intflashAddr` (derivable from `bank`), `requiresBootloader`
 (implied by `bank: 2`), `label` (rendered from `storage` + `bank`), and
-`filename` everywhere except `sdUpdate`, where the on-device updater matches
-`update_bank1.bin` / `update_bank2.bin` exactly (`firmware_update.c:20,24`).
+`filename` everywhere except the bank-specific updater archives, where the
+on-device updater matches the internal `update_bank1.bin` /
+`update_bank2.bin` names exactly (`firmware_update.c:20,24`).
 
 ## `/data/INSTALL`
 
