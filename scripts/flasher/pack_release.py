@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Pack a Retro-Go SD 2.0 release: eight zips plus three JSON files.
+Pack a Retro-Go SD 2.0 release: four self-contained build zips plus JSON files
+and two bank-specific updater archives.
 
 See docs/RELEASE_2_0.md — this script implements the format described there.
 
@@ -12,7 +13,7 @@ needs (fonts, language blobs, the boot logo).
 Per build (storage x bank, four of them):
 
     retro-go-sd-<tag>-<storage>-bank<n>.zip         image + content, self-contained
-    retro-go-sd-<tag>-<storage>-bank<n>-debug.zip   the matching ELF
+    debug/retro-go-debug.elf                         inside each build zip
 
 Plus, unzipped so a version picker reads metadata without fetching an archive:
 
@@ -327,11 +328,9 @@ def pack_build(build, tag, out_dir):
     flags = parse_flags(build["flags"])
 
     bundle_name = f"{PROJECT}-{tag}-{bid}.zip"
-    debug_name = f"{PROJECT}-{tag}-{bid}-debug.zip"
     bundle_path = os.path.join(out_dir, bundle_name)
-    debug_path = os.path.join(out_dir, debug_name)
 
-    image_arc = "gw_retro_go_intflash.bin"
+    image_arc = "firmware/retro-go-intflash.bin"
     content = collect_content(build["content"], storage, bank)
     sd_update_path, sd_update_name = find_sd_update(build["content"], bank)
 
@@ -342,22 +341,19 @@ def pack_build(build, tag, out_dir):
         )
 
     # create_sd_data copies the intflash image to update_bank<n>.bin, so the two
-    # are usually the same bytes. Store them once and let sdUpdate point at the
-    # image's entry — a ~239 KB image is over a third of the SD bundle, and a zip
-    # holding it twice buys nothing. If they ever diverge, both are stored.
+    # are usually the same bytes. The bank-specific updater archive is published
+    # separately, so the duplicate update image is omitted from the build bundle.
     image_sha = sha256_file(build["image"])
     sd_update_sha = sha256_file(sd_update_path) if sd_update_path else None
     sd_update_shared = storage == "sd" and sd_update_sha == image_sha
 
     with zipfile.ZipFile(bundle_path, "w") as zf:
         add_file(zf, build["image"], image_arc)
+        add_file(zf, build["elf"], "debug/retro-go-debug.elf")
         if storage == "sd" and not sd_update_shared:
             add_file(zf, sd_update_path, sd_update_name)
         for full, arc, _install, _lang in content:
             add_file(zf, full, arc)
-
-    with zipfile.ZipFile(debug_path, "w") as zf:
-        add_file(zf, build["elf"], "gw_retro_go.elf")
 
     entry = {
         "id": bid,
@@ -373,28 +369,12 @@ def pack_build(build, tag, out_dir):
             "sha256": sha256_file(bundle_path),
             "url": bundle_name,
         },
-        "debug": {
-            "bytes": os.path.getsize(debug_path),
-            "sha256": sha256_file(debug_path),
-            "url": debug_name,
-        },
         "image": {
             "bytes": os.path.getsize(build["image"]),
             "sha256": image_sha,
             "path": image_arc,
         },
     }
-
-    if storage == "sd":
-        entry["sdUpdate"] = {
-            "bytes": os.path.getsize(sd_update_path),
-            "sha256": sd_update_sha,
-            # Points at the image's entry when the two are the same bytes.
-            "path": image_arc if sd_update_shared else sd_update_name,
-            # The only place a filename is load-bearing: the on-device updater
-            # matches these exact names (firmware_update.c:20,24).
-            "filename": sd_update_name,
-        }
 
     entry["content"] = []
     for full, arc, install, language in content:
@@ -411,7 +391,7 @@ def pack_build(build, tag, out_dir):
     return entry
 
 
-def build_manifest(builds, tag, commit, ref, built_at, core_meta_header, projects_path):
+def build_manifest(builds, tag, commit, ref, built_at, core_meta_header, projects_path, updates):
     reference = builds[0]
     provides_abi = read_provides_abi(reference["image"])
     superblock = read_superblock(reference["image"])
@@ -460,6 +440,7 @@ def build_manifest(builds, tag, commit, ref, built_at, core_meta_header, project
         "paths": dict(PATHS),
         "languages": sorted(languages),
         "builds": entries,
+        "updates": updates,
         "builtAt": built_at,
     }
 
@@ -487,6 +468,10 @@ def build_versions(manifest, tag, published_at, prerelease, previous, retained):
         "gitTag": manifest["firmware"]["gitTag"],
         "providesAbi": dict(manifest["firmware"]["providesAbi"]),
         "coreMetaVersion": manifest["firmware"]["coreMetaVersion"],
+        "updates": {
+            bank: f"{tag}/{asset['url']}"
+            for bank, asset in manifest["updates"].items()
+        },
     }
 
     older = [v for v in (previous or {}).get("versions", []) if v.get("tag") != tag]
@@ -528,6 +513,8 @@ def main():
         default=None,
         help="projects.json from gen_projects_json.py; copied into --out",
     )
+    ap.add_argument("--update-bank1", required=True)
+    ap.add_argument("--update-bank2", required=True)
     ap.add_argument(
         "--previous-versions",
         default=None,
@@ -560,6 +547,15 @@ def main():
                 dst.write(src.read())
 
     try:
+        updates = {}
+        for bank, path in ((1, args.update_bank1), (2, args.update_bank2)):
+            if not os.path.isfile(path):
+                raise PackError(f"missing update archive for bank {bank}: {path}")
+            updates[f"bank{bank}"] = {
+                "bytes": os.path.getsize(path),
+                "sha256": sha256_file(path),
+                "url": os.path.basename(path),
+            }
         manifest = build_manifest(
             builds,
             args.tag,
@@ -568,6 +564,7 @@ def main():
             args.built_at,
             args.core_meta_header,
             projects_out,
+            updates,
         )
     except PackError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -603,7 +600,6 @@ def main():
     for entry in manifest["builds"]:
         print(
             f"  {entry['id']:<12} bundle {entry['bundle']['bytes']:>9,} B  "
-            f"debug {entry['debug']['bytes']:>10,} B  "
             f"{len(entry['content'])} content files"
         )
     return 0

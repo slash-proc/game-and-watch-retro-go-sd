@@ -1,8 +1,9 @@
 # Retro-Go SD 2.0 release producer.
 #
 # Builds the four firmware variants (SD_CARD={0,1} x INTFLASH_BANK={1,2}), packs
-# each into a self-contained install zip plus a separate debug zip, publishes all
-# eight as release assets, and mirrors the release to GitHub Pages where a browser
+# each into a self-contained install zip, publishes the bank-specific updater
+# archives and an optional all-builds debug bundle, and mirrors the release to
+# GitHub Pages where a browser
 # can actually read it.
 #
 # See docs/RELEASE_2_0.md for the format and why it is shaped this way.
@@ -29,7 +30,9 @@ on:
     # deploy. Publishing from "whichever commit last touched Core/" would mint
     # releases nobody asked for and race the mirror against itself.
     tags: ['v*']
-    branches: [web-builder-flash]
+    branches: [main, web-builder, web-builder-flash]
+  pull_request:
+    branches: [main, web-builder, web-builder-flash]
     # No paths filter. It would apply to the tag push as well, and a tag pointing
     # at a commit that is already on the remote arrives as a push event with no
     # commits — nothing for a path filter to match, so the release would silently
@@ -151,6 +154,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          submodules: recursive
           fetch-depth: 0
           fetch-tags: true
           # No submodules: this job only runs scripts over what the build jobs produced.
@@ -175,6 +179,28 @@ jobs:
             done
             [ -d "_dl/$id/content" ] || { echo "missing content dir for $id"; exit 1; }
           done
+
+      - name: Build transient updater
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/opt/workdir" \
+            sylverb/retro-go-sd-builder:v1.5 \
+            bash -l -c 'make -j$(nproc) -C external/firmware_update'
+          mkdir -p _dl/updater
+          cp external/firmware_update/build/firmware_update.bin _dl/updater/
+
+      - name: Build bank-specific update archives
+        run: |
+          set -euo pipefail
+          mkdir -p _release
+          python3 scripts/flasher/make_update_package.py \
+            --updater _dl/updater/firmware_update.bin \
+            --content _dl/sd-bank1/content \
+            --output _release/retro-go_update-bank1.bin
+          python3 scripts/flasher/make_update_package.py \
+            --updater _dl/updater/firmware_update.bin \
+            --content _dl/sd-bank2/content \
+            --output _release/retro-go_update-bank2.bin
 
       - name: Pack release
         id: pack
@@ -220,7 +246,20 @@ jobs:
             --built-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             $([ "$PRERELEASE" = true ] && echo --prerelease) \
             --projects _release/projects.json \
+            --update-bank1 _release/retro-go_update-bank1.bin \
+            --update-bank2 _release/retro-go_update-bank2.bin \
             --out _release
+
+      - name: Build all-builds debug bundle
+        run: |
+          set -euo pipefail
+          rm -rf _debug-all
+          mkdir -p _debug-all
+          for id in sd-bank1 sd-bank2 flash-bank1 flash-bank2; do
+            mkdir -p "_debug-all/$id"
+            unzip -q "_release/retro-go-sd-${GITHUB_REF_NAME}-$id.zip" -d "_debug-all/$id"
+          done
+          (cd _debug-all && zip -qr "../debug-all-${GITHUB_REF_NAME}.zip" .)
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -228,22 +267,14 @@ jobs:
           tag_name: ${{ steps.pack.outputs.tag }}
           name: ${{ steps.pack.outputs.tag }}
           prerelease: ${{ steps.pack.outputs.prerelease }}
-          body: |
-            Retro-Go SD firmware, four variants: storage (SD card / internal flash)
-            x intflash bank (1 / 2).
-
-            Each `-<variant>.zip` is a complete install — the intflash image plus the
-            fonts, language blobs and boot logo that variant needs. The matching
-            `-debug.zip` holds only the ELF, for symbolising a crash.
-
-            Emulator cores and homebrew are **not** included; they install separately
-            from their own projects. `projects.json` lists the curated set.
-
-            - commit: `${{ github.sha }}`
+          body_path: CHANGELOG.md
           files: |
             _release/*.zip
             _release/manifest.json
             _release/projects.json
+            _release/retro-go_update-bank1.bin
+            _release/retro-go_update-bank2.bin
+            debug-all-${{ github.ref_name }}.zip
 
       - name: Stage the Pages mirror for this release
         run: |
@@ -251,7 +282,7 @@ jobs:
           # The manifest resolves every url as a plain filename beside itself, so the
           # zips must sit in the same directory as manifest.json.
           mkdir -p "_pages/dist/${{ steps.pack.outputs.tag }}"
-          cp _release/*.zip _release/manifest.json _release/projects.json \
+          cp _release/*.zip _release/*.bin _release/manifest.json _release/projects.json \
              "_pages/dist/${{ steps.pack.outputs.tag }}/"
 
       - name: Upload Pages staging

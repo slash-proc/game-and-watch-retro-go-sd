@@ -42,14 +42,17 @@ blobs are therefore per-build.
 
 ### Release assets
 
-Eight per release: one install zip and one debug zip per build.
+Six required release assets: one self-contained build zip per variant and two
+bank-specific SD updater archives. A separate `debug-all-<tag>.zip` is an
+optional developer convenience and is not part of the manifest.
 
 ```
-retro-go-sd-<tag>-{sd,flash}-bank{1,2}.zip         ~490 KB  image + content
-retro-go-sd-<tag>-{sd,flash}-bank{1,2}-debug.zip   ~1.5 MB  ELF
+retro-go-sd-<tag>-{sd,flash}-bank{1,2}.zip         image + debug ELF + content
+retro-go_update-bank1.bin                          SD updater for bank 1
+retro-go_update-bank2.bin                          SD updater for bank 2
 ```
 
-Each install zip is self-contained — its intflash image, its `lang/` blobs and a
+Each build zip is self-contained — its intflash image, debug ELF, `lang/` blobs and a
 copy of `fonts/` and `bios/logo.bin` (84 KB duplicated four times, not worth
 deduplicating). The image itself *is* deduplicated: `create_sd_data` copies it to
 `update_bank<n>.bin`, so the two are the same bytes and the zip stores one entry
