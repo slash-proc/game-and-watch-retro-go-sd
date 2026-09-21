@@ -433,8 +433,25 @@ static bool circular_flash_write(const char *file_path,
         total_bytes_processed += bytes_read;
 
         if (progress_cb) {
-            progress = (uint8_t)((total_bytes_processed * 100) / (*data_size));
-            progress_cb(*data_size, total_bytes_processed, progress);
+            /* Avoid (done * 100) uint32 overflow (~42.9 MiB) AND avoid
+             * uint64 / __aeabi_uldivmod — this frame already has a 16 KiB
+             * buffer on a 24 KiB stack; soft 64-bit div blew the stack and
+             * faulted (BSOD PC in SAI, LR=SAI1_Block_A). */
+            uint32_t total = *data_size;
+            uint32_t done = total_bytes_processed;
+            uint32_t pct;
+            if (total == 0)
+                pct = 0;
+            else if (done >= total)
+                pct = 100;
+            else if (done <= 0xffffffffu / 100u)
+                pct = (done * 100u) / total;
+            else
+                pct = done / (total / 100u); /* total >= 100 here */
+            if (pct > 100)
+                pct = 100;
+            progress = (uint8_t)pct;
+            progress_cb(total, done, progress);
         }
 
         if (bytes_read < want) {
