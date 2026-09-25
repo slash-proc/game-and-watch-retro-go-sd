@@ -104,10 +104,6 @@ static void gw_lcd_spi_tx(SPI_HandleTypeDef *spi, uint8_t *pData) {
 
 void lcd_deinit(SPI_HandleTypeDef *spi) {
   __HAL_LTDC_DISABLE_IT(&hltdc, LTDC_IT_LI | LTDC_IT_RR);
-  /* Stop scanning out before cutting panel rails — otherwise the glass
-   * sees a live RGB/CLK bus while VDD collapses, and the next SPI bring-up
-   * can leave it in a stuck state (FB+LTDC OK, screen garbage). */
-  __HAL_LTDC_DISABLE(&hltdc);
 
   // Power off
   gw_set_power_1V8(0);
@@ -136,31 +132,18 @@ void lcd_init(SPI_HandleTypeDef *spi, LTDC_HandleTypeDef *ltdc, lcd_init_flags_t
   // Disable LCD Chip select
   gw_lcd_set_chipselect(0);
 
-  /* MX_LTDC_Init() already set LTDEN. Keep the RGB bus quiet while the
-   * panel powers up and takes its SPI config — a live pixel clock during
-   * that window is a plausible cause of the intermittent "FB dump OK /
-   * screen scrambled" boot glitch (survives sleep because wake re-runs
-   * the same race; only a full reboot eventually wins). */
-  __HAL_LTDC_DISABLE(ltdc);
-
-  // LCD held out of reset while rails come up
+  // Wake up !
+  // Enable 1.8V &3V3 power supply
   gw_lcd_set_reset(0);
-
-  // Enable 3V3 then 1V8 with settle time (restored after 6a7f9f99 which
-  // dropped these delays and made panel bring-up racy).
   gw_set_power_3V3(1);
-  HAL_Delay(2);
   gw_set_power_1V8(1);
-  HAL_Delay(50);
-  wdog_refresh();
 
+  // Lets go, bootup sequence.
   /* reset sequence */
-  gw_lcd_set_reset(0);
-  HAL_Delay(1);
   gw_lcd_set_reset(1);
-  HAL_Delay(20);
+  HAL_Delay(5);
   gw_lcd_set_reset(0);
-  HAL_Delay(50);
+  HAL_Delay(20);
   wdog_refresh();
 
   gw_lcd_spi_tx(spi, (uint8_t *)"\x08\x80");
@@ -177,14 +160,17 @@ void lcd_init(SPI_HandleTypeDef *spi, LTDC_HandleTypeDef *ltdc, lcd_init_flags_t
   gw_lcd_spi_tx(spi, (uint8_t *)"\x14\x80");
   wdog_refresh();
 
+  // Wait for screen to finish initializing
+  HAL_Delay(50);
+  wdog_refresh();
+
   if (flags & LCD_INIT_CLEAR_BUFFERS) {
     lcd_clear_buffers();
   }
 
-  HAL_LTDC_SetAddress(ltdc, (uint32_t)fb1, 0);
+  HAL_LTDC_SetAddress(ltdc,(uint32_t) fb1, 0);
   HAL_LTDC_ProgramLineEvent(&hltdc, 239);
   __HAL_LTDC_ENABLE_IT(&hltdc, LTDC_IT_LI | LTDC_IT_RR);
-  __HAL_LTDC_ENABLE(ltdc);
 
   printf("LCD: Finished init\n");
 }
