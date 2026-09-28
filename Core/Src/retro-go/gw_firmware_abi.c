@@ -622,4 +622,7 @@ const gw_firmware_abi_t g_firmware_abi = {
     .odroid_overlay_draw_progress_bar = odroid_overlay_draw_progress_bar,
     .rg_storage_mkdir            = rg_storage_mkdir,
     .rg_dirname                  = rg_dirname,
+#if SD_CARD == 1
+    .flash_cache_usable_size     = flash_cache_usable_size,
+#endif
 };

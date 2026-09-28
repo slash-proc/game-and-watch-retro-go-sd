@@ -202,6 +202,13 @@ static bool find_write_slot(uint32_t start_pointer, uint32_t erase_size_total,
     return false;
 }
 
+uint32_t flash_cache_usable_size(void)
+{
+    uint32_t base = get_extflash_base();
+    uint32_t limit = (uint32_t)&__EXTFLASH_BASE__ + get_extflash_total_size();
+    return (limit > base) ? (limit - base) : 0;
+}
+
 /* Bytes to keep reserved at the bottom of external flash before the ROM cache may
  * write. We honor the LARGER of two reservations:
  *   1. get_ofw_extflash_size() - the active OFW's own external-flash footprint, read
