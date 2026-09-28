@@ -1364,12 +1364,11 @@ static void gui_coverflow_h_card(listbox_item_t *item, int center_x, int center_
 
     if (!has_cover)
     {
-        odroid_overlay_draw_fill_rect(x0, y0, draw_width, draw_height,
-                                      get_darken_pixel(C_GRAY, selected ? 80 : 45));
+        odroid_overlay_draw_fill_rect(x0, y0, draw_width, draw_height, C_BLACK);
         draw_centered_local_text_line(y0 + ((int)draw_height - i18n_get_text_height()) / 2,
                                       gui_no_cover_text_for_item(item), x0, x0 + draw_width,
                                       selected ? curr_colors->main_c : curr_colors->dis_c,
-                                      curr_colors->bg_c);
+                                      C_BLACK);
         return;
     }
 
