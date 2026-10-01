@@ -15,7 +15,6 @@
 #include <locale.h>
 #include <time.h>
 #include <math.h>
-#include <errno.h>
 
 #include "gw_lcd.h"
 #include "gw_audio.h"
@@ -274,67 +273,58 @@ extern int     __popcountsi2(unsigned);
  * Keep every ABI struct member in place in both variants. */
 #if SD_CARD == 0
 /* Flash-only lookup index generated after FrogFS placement and stored in
- * LittleFS at /data/mappedsidecars.bin. Each record is:
- * crc32(key)<TAB>0xXIP_ADDRESS<TAB>SIZE<LF>, matching gw_flash_alloc.c. The
- * sidecar itself remains in FrogFS. */
+ * LittleFS at /data/mappedsidecars.bin. It is an array of the same fixed-size
+ * key/address/size records used by gw_flash_alloc.c, without the surrounding
+ * SD cache's device identity and write state. The sidecar remains in FrogFS. */
 #define MAPPED_SIDECAR_INDEX ODROID_BASE_PATH_SAVES "/mappedsidecars.bin"
-#define MAPPED_SIDECAR_LINE_MAX 160
+#define MAPPED_SIDECAR_MAX_RECORDS GW_FLASH_CACHE_MAX_FILES
 static const uint8_t *lookup_mapped_data_in_flash(const char *key,
                                                   uint32_t *size_out)
 {
     if (!key)
         return NULL;
 
-    char *end = NULL;
     uint32_t key_crc = crc32_le(0, (const unsigned char *)key, strlen(key));
 
     FILE *index = fopen(MAPPED_SIDECAR_INDEX, "rb");
     if (!index)
         return NULL;
 
-    char line[MAPPED_SIDECAR_LINE_MAX];
-    while (fgets(line, sizeof(line), index)) {
-        char *tab1 = strchr(line, '\t');
-        if (!tab1)
+    if (fseek(index, 0, SEEK_END) != 0) {
+        fclose(index);
+        return NULL;
+    }
+    long index_bytes = ftell(index);
+    if (index_bytes < 0 ||
+        index_bytes % (long)sizeof(gw_flash_file_metadata_t) != 0 ||
+        (unsigned long)index_bytes / sizeof(gw_flash_file_metadata_t) >
+            MAPPED_SIDECAR_MAX_RECORDS ||
+        fseek(index, 0, SEEK_SET) != 0) {
+        fclose(index);
+        return NULL;
+    }
+
+    uint64_t flash_base = (uintptr_t)&__EXTFLASH_BASE__;
+    uint64_t flash_end = flash_base + OSPI_GetFlashSize();
+    gw_flash_file_metadata_t record;
+    while (fread(&record, sizeof(record), 1, index) == 1) {
+        if (!record.valid || record.file_crc32 != key_crc)
             continue;
-        *tab1++ = '\0';
-        char *tab2 = strchr(tab1, '\t');
-        if (!tab2)
-            continue;
-        *tab2++ = '\0';
 
-        errno = 0;
-        unsigned long index_crc = strtoul(line, &end, 16);
-        if (errno || end == line || *end != '\0' || index_crc > UINT32_MAX ||
-            (uint32_t)index_crc != key_crc)
-            continue;
-
-        errno = 0;
-        unsigned long address = strtoul(tab1, &end, 0);
-        if (errno || end == tab1 || address > UINT32_MAX || *end != '\0')
-            break;
-
-        errno = 0;
-        unsigned long size = strtoul(tab2, &end, 10);
-        if (errno || end == tab2 || size == 0 || size > UINT32_MAX)
-            break;
-        while (*end == '\r' || *end == '\n' || *end == ' ' || *end == '\t')
-            end++;
-        if (*end != '\0')
-            break;
-
-        uint64_t flash_base = (uintptr_t)&__EXTFLASH_BASE__;
-        uint64_t flash_end = flash_base + OSPI_GetFlashSize();
-        uint64_t data_end = (uint64_t)address + size;
-        if (address < flash_base || data_end > flash_end)
-            break;
+        uint64_t data_end = (uint64_t)record.flash_address + record.file_size;
+        if (!record.file_size || record.flash_address < flash_base ||
+            data_end > flash_end) {
+            fclose(index);
+            return NULL;
+        }
 
         fclose(index);
         if (size_out)
-            *size_out = (uint32_t)size;
+            *size_out = record.file_size;
         printf("flash_alloc: mapped key CRC %08lx -> 0x%08lx (%lu bytes)\n",
-               (unsigned long)key_crc, address, size);
-        return (const uint8_t *)(uintptr_t)address;
+               (unsigned long)key_crc, (unsigned long)record.flash_address,
+               (unsigned long)record.file_size);
+        return (const uint8_t *)(uintptr_t)record.flash_address;
     }
 
     fclose(index);
