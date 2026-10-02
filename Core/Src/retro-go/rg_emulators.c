@@ -1675,9 +1675,10 @@ static void add_emulator_dynamic(const gnw_core_meta_t *meta, const char *core_p
     }
 }
 
-/* Order-independent fingerprint of probeable /cores/*.bin (path + systems
- * count). Catches add/remove/replace even when the system-tab count is
- * unchanged (e.g. delete one core and add another). */
+/* Order-independent fingerprint of probeable /cores/*.bin. Includes path,
+ * systems_count, file size/mtime, and each system's logo blob ranges so an
+ * in-place SD update of header/pad art (same path, same systems_count) still
+ * mismatches after STOP2 wake and triggers a clean reboot. */
 static uint32_t cores_set_fingerprint(int *out_systems)
 {
     gnw_core_meta_t meta;
@@ -1707,6 +1708,23 @@ static uint32_t cores_set_fingerprint(int *out_systems)
 
         uint32_t h = crc32_le(0, (const unsigned char *)path, (unsigned int)strlen(path));
         h = crc32_le(h, (const unsigned char *)&meta.systems_count, sizeof(meta.systems_count));
+
+        rg_stat_t st = rg_storage_stat(path);
+        if (st.exists) {
+            uint32_t sz = (uint32_t)st.size;
+            uint32_t mt = (uint32_t)st.mtime;
+            h = crc32_le(h, (const unsigned char *)&sz, sizeof(sz));
+            h = crc32_le(h, (const unsigned char *)&mt, sizeof(mt));
+        }
+
+        for (uint32_t i = 0; i < meta.systems_count; i++) {
+            const gnw_core_system_t *sys = &meta.systems[i];
+            h = crc32_le(h, (const unsigned char *)&sys->pad_logo_offset, sizeof(sys->pad_logo_offset));
+            h = crc32_le(h, (const unsigned char *)&sys->pad_logo_size, sizeof(sys->pad_logo_size));
+            h = crc32_le(h, (const unsigned char *)&sys->header_logo_offset, sizeof(sys->header_logo_offset));
+            h = crc32_le(h, (const unsigned char *)&sys->header_logo_size, sizeof(sys->header_logo_size));
+        }
+
         fp ^= h;
         total += (int)meta.systems_count;
         files++;
