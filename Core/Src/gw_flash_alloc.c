@@ -779,6 +779,62 @@ void flash_alloc_reset()
     remove(METADATA_FILE);
 }
 
+/* When true, flash_file_is_cached() reuses the already-loaded index instead
+ * of fopen/fclose per probe (idle scan of on-screen games). */
+static bool lookup_session;
+
+void flash_cache_lookup_begin(void)
+{
+    initialize_metadata();
+    initialize_flash_pointer();
+    lookup_session = true;
+}
+
+void flash_cache_lookup_end(void)
+{
+    if (metadata) {
+        free(metadata);
+        metadata = NULL;
+    }
+    lookup_session = false;
+}
+
+static bool flash_crc_is_cached(uint32_t key_crc)
+{
+    bool owned = !lookup_session;
+    if (owned) {
+        initialize_metadata();
+        initialize_flash_pointer();
+    } else if (metadata == NULL) {
+        initialize_metadata();
+        initialize_flash_pointer();
+    }
+
+    uint32_t flash_address = 0;
+    uint32_t file_size = 0;
+    bool hit = is_file_in_flash(key_crc, &flash_address, &file_size);
+
+    if (owned) {
+        free(metadata);
+        metadata = NULL;
+    }
+    return hit;
+}
+
+bool flash_file_is_cached(const char *file_path)
+{
+    if (!file_path || !file_path[0])
+        return false;
+    return flash_crc_is_cached(compute_file_crc32(file_path));
+}
+
+bool flash_data_is_cached(const char *key)
+{
+    if (!key || !key[0])
+        return false;
+    return flash_crc_is_cached(compute_key_crc32(key));
+}
+
 uint8_t *store_file_in_flash(const char *file_path, uint32_t *file_size_p, bool byte_swap, flash_file_progress_cb_t progress_cb)
 {
     return store_file_in_flash_relocate(file_path, file_size_p, byte_swap, progress_cb, NULL);

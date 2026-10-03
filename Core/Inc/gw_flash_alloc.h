@@ -47,6 +47,20 @@ uint32_t flash_cache_usable_size(void);
 
 uint8_t *store_file_in_flash(const char *file_path, uint32_t *file_size_p, bool byte_swap, flash_file_progress_cb_t progress_cb);
 
+/* True if file_path (+ mtime + size) is already in the flash ROM cache.
+ * Probe only — does not mark the entry live and does not write. */
+bool flash_file_is_cached(const char *file_path);
+
+/* True if a derived-data blob key (e.g. "neogeo/mslug/p2") is in the cache.
+ * Same probe-only contract as flash_file_is_cached(). */
+bool flash_data_is_cached(const char *key);
+
+/* Hold the on-disk index open across several flash_*_is_cached() probes
+ * (e.g. idle scan of on-screen games). Pair with flash_cache_lookup_end().
+ * Nested sessions are not supported. */
+void flash_cache_lookup_begin(void);
+void flash_cache_lookup_end(void);
+
 /* Derived-data blobs: same flash cache, RAM source, caller-chosen key
  * string (make it content-addressed). lookup probes the cache without
  * writing; store writes (or returns the cached copy when the key+size
