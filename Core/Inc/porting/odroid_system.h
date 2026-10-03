@@ -190,6 +190,14 @@ typedef enum
 #define PANIC_TRACE_MAGIC 0x12345678
 
 void odroid_system_init(int app_id, int sampleRate);
+
+/* Autofire timing for common_emu_input_loop_handle_turbo().
+ * period_frames == 0 → wall-clock default (~10 Hz, 50% duty).
+ * period_frames  > 0 → frame-locked cycle; on_frames==0 → period/2.
+ * See gnw_core_meta_t.turbo_*_frames. */
+void odroid_system_set_turbo_params(uint8_t period_frames, uint8_t on_frames);
+bool odroid_button_turbos(void);
+
 char* odroid_system_get_path(emu_path_type_t type, const char *romPath);
 /* Build /cheats/<rom-relative-stem>.<cheat_ext>. cheat_ext has no leading '.'. */
 void odroid_system_get_cheat_path_to_buf(const char *romPath, const char *cheat_ext,
